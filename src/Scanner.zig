@@ -139,7 +139,8 @@ pub fn nextMarkupTag(scanner: *Scanner) NextMarkupTagError!MarkupTag {
                 '!' => {
                     scanner.state = .@"<!";
                     scanner.index += 1;
-                    return @call(.always_tail, nextMarkupTag, .{scanner});
+                    // return @call(.always_tail, nextMarkupTag, .{scanner});
+                    return scanner.nextMarkupTag();
                 },
                 else => @panic("TODO"),
             }
@@ -160,12 +161,14 @@ pub fn nextMarkupTag(scanner: *Scanner) NextMarkupTagError!MarkupTag {
                 '-' => {
                     scanner.state = .@"<!-";
                     scanner.index += 1;
-                    return @call(.always_tail, nextMarkupTag, .{scanner});
+                    // return @call(.always_tail, nextMarkupTag, .{scanner});
+                    return scanner.nextMarkupTag();
                 },
                 '[' => {
                     scanner.state = .@"<![";
                     scanner.index += 1;
-                    return @call(.always_tail, nextMarkupTag, .{scanner});
+                    // return @call(.always_tail, nextMarkupTag, .{scanner});
+                    return scanner.nextMarkupTag();
                 },
                 else => {
                     scanner.state = .text_or_close_or_start;
@@ -209,7 +212,8 @@ pub fn nextMarkupTag(scanner: *Scanner) NextMarkupTagError!MarkupTag {
                 'C' => {
                     scanner.state = .@"<![C";
                     scanner.index += 1;
-                    return @call(.always_tail, nextMarkupTag, .{scanner});
+                    // return @call(.always_tail, nextMarkupTag, .{scanner});
+                    return scanner.nextMarkupTag();
                 },
                 else => {
                     scanner.state = .text_or_close_or_start;
@@ -224,7 +228,8 @@ pub fn nextMarkupTag(scanner: *Scanner) NextMarkupTagError!MarkupTag {
                 'D' => {
                     scanner.state = .@"<![CD";
                     scanner.index += 1;
-                    return @call(.always_tail, nextMarkupTag, .{scanner});
+                    // return @call(.always_tail, nextMarkupTag, .{scanner});
+                    return scanner.nextMarkupTag();
                 },
                 else => {
                     scanner.state = .text_or_close_or_start;
@@ -239,7 +244,8 @@ pub fn nextMarkupTag(scanner: *Scanner) NextMarkupTagError!MarkupTag {
                 'A' => {
                     scanner.state = .@"<![CDA";
                     scanner.index += 1;
-                    return @call(.always_tail, nextMarkupTag, .{scanner});
+                    // return @call(.always_tail, nextMarkupTag, .{scanner});
+                    return scanner.nextMarkupTag();
                 },
                 else => {
                     scanner.state = .text_or_close_or_start;
@@ -254,7 +260,8 @@ pub fn nextMarkupTag(scanner: *Scanner) NextMarkupTagError!MarkupTag {
                 'T' => {
                     scanner.state = .@"<![CDAT";
                     scanner.index += 1;
-                    return @call(.always_tail, nextMarkupTag, .{scanner});
+                    // return @call(.always_tail, nextMarkupTag, .{scanner});
+                    return scanner.nextMarkupTag();
                 },
                 else => {
                     scanner.state = .text_or_close_or_start;
@@ -269,7 +276,8 @@ pub fn nextMarkupTag(scanner: *Scanner) NextMarkupTagError!MarkupTag {
                 'A' => {
                     scanner.state = .@"<![CDATA";
                     scanner.index += 1;
-                    return @call(.always_tail, nextMarkupTag, .{scanner});
+                    // return @call(.always_tail, nextMarkupTag, .{scanner});
+                    return scanner.nextMarkupTag();
                 },
                 else => {
                     scanner.state = .text_or_close_or_start;
@@ -412,7 +420,8 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
             }
             scanner.state = .comment_dash_dash;
             scanner.index += 1;
-            return @call(.always_tail, nextString, .{scanner});
+            // return @call(.always_tail, nextString, .{scanner});
+            return scanner.nextString();
         },
         .comment_dash_dash => {
             if (scanner.index == scanner.src.len) return error.BufferUnderrun;
@@ -425,7 +434,8 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
                 '-' => {
                     scanner.state = .comment_dash_dash_dash;
                     scanner.index += 1;
-                    return @call(.always_tail, nextString, .{scanner});
+                    // return @call(.always_tail, nextString, .{scanner});
+                    return scanner.nextString();
                 },
                 else => {
                     scanner.state = .@"<!--";
@@ -477,17 +487,26 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
             }
             scanner.state = .@"]]";
             scanner.index += 1;
-            return @call(.always_tail, nextString, .{scanner});
+            // return @call(.always_tail, nextString, .{scanner});
+            return scanner.nextString();
         },
         .@"]]" => {
             if (scanner.index == scanner.src.len) return error.BufferUnderrun;
-            if (scanner.src[scanner.index] != '>') {
-                scanner.state = .comment_dash;
-                return "]]";
+            switch (scanner.src[scanner.index]) {
+                '>' => {
+                    scanner.state = .text_or_close_or_start;
+                    scanner.index += 1;
+                    return null;
+                },
+                ']' => {
+                    scanner.index += 1;
+                    return "]";
+                },
+                else => {
+                    scanner.state = .@"<![CDATA[";
+                    return "]]";
+                },
             }
-            scanner.state = .text_or_close_or_start;
-            scanner.index += 1;
-            return null;
         },
     }
 }
@@ -579,20 +598,31 @@ inline fn isNameChar(codepoint: u21) bool {
     };
 }
 
-pub usingnamespace if (!@import("builtin").is_test) struct {} else struct {
-    fn expectNextDataType(scanner: *Scanner, expected: NextDataTypeError!DataType) !void {
-        const actual = scanner.nextDataType();
-        try std.testing.expectEqual(expected, actual);
-    }
-    fn expectNextMarkupTag(scanner: *Scanner, expected: NextMarkupTagError!MarkupTag) !void {
-        const actual = scanner.nextMarkupTag();
-        try std.testing.expectEqual(expected, actual);
-    }
-    fn expectNextString(scanner: *Scanner, expected: NextStringError!?[]const u8) !void {
-        const actual = scanner.nextString();
-        try std.testing.expectEqualDeep(expected, actual);
-    }
-};
+// pub usingnamespace if (!@import("builtin").is_test) struct {} else struct {
+fn expectNextDataType(scanner: *Scanner, expected: NextDataTypeError!DataType) !void {
+    const actual = scanner.nextDataType();
+    try std.testing.expectEqual(expected, actual);
+}
+fn expectNextMarkupTag(scanner: *Scanner, expected: NextMarkupTagError!MarkupTag) !void {
+    const actual = scanner.nextMarkupTag();
+    try std.testing.expectEqual(expected, actual);
+}
+fn expectNextString(scanner: *Scanner, expected: NextStringError!?[]const u8) !void {
+    const actual = scanner.nextString();
+
+    const maybe_expected = expected catch |err|
+        return try std.testing.expectError(err, actual);
+    const maybe_actual = actual catch |err|
+        return try std.testing.expectEqual(expected, err);
+
+    const expected_unwrapped = maybe_expected orelse
+        return try std.testing.expectEqual(@as(?[]const u8, null), maybe_actual);
+    const actual_unwrapped = maybe_actual orelse
+        return try std.testing.expectEqual(maybe_expected, maybe_actual);
+
+    try std.testing.expectEqualStrings(expected_unwrapped, actual_unwrapped);
+}
+// };
 
 test "Scanner Processing Instructions" {
     var scanner: Scanner = undefined;
@@ -851,6 +881,28 @@ test "Scanner Comments" {
 }
 
 test "Scanner CDATA Sections" {
-    // TODO: actually do testing
-    return error.SkipZigTest;
+    var scanner: Scanner = undefined;
+
+    scanner = Scanner.init("<![CDATA[]]>");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.cdata);
+    try scanner.expectNextString("");
+    try scanner.expectNextString(null);
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("<![CDATA[ foo ]]>");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.cdata);
+    try scanner.expectNextString(" foo ");
+    try scanner.expectNextString(null);
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("<![CDATA[]]]]>");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.cdata);
+    try scanner.expectNextString("");
+    try scanner.expectNextString("]");
+    try scanner.expectNextString("]");
+    try scanner.expectNextString(null);
+    try scanner.expectNextDataType(.eof);
 }
