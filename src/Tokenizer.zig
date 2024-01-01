@@ -1,12 +1,12 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-const Tokenizer = @This();
+const Scanner = @This();
 src: []const u8,
 index: usize,
 state: State,
 
-pub inline fn init(src: []const u8) Tokenizer {
+pub inline fn init(src: []const u8) Scanner {
     return .{
         .src = src,
         .index = 0,
@@ -15,310 +15,210 @@ pub inline fn init(src: []const u8) Tokenizer {
 }
 
 /// Replaces the current src with the given `src` parameter,
-/// with subsequent calls to `lexer.next()` behaving as though
+/// with subsequent calls to `scanner.next()` behaving as though
 /// the given src parameter has been appended to all the text
 /// that's already been tokenized.
+///
+/// NOTE: This invalidates the loc fields of any previously returned tokens.
+/// Those must somehow continue to refer to the previous buffer, or
+/// must instead be stored as `TokenWithString` or equivalent.
+///
 /// Useful for streaming data.
-pub fn feed(lexer: *Tokenizer, src: []const u8) void {
-    lexer.src = src;
-    lexer.index = 0;
+pub fn feed(scanner: *Scanner, src: []const u8) void {
+    scanner.src = src;
+    scanner.index = 0;
 }
 
-pub const Token = struct {
-    id: TokId,
-    loc: Loc,
-};
-
-pub const Loc = struct {
-    start: usize,
-    end: usize,
-};
-
-pub const TokId = enum {
-    /// End of the document.
+pub const DataType = enum {
+    /// The end of the XML source - if more input is feed into the Scanner,
+    /// this is overriden.
     eof,
-
-    /// The character '<' followed by a sequence of characters that don't form a valid tag.
-    invalid_tag_start,
-
-    /// '<?' followed by the PI target name
-    pi_target,
-    @"?>",
-
-    @"<!--",
-    /// The text in between two '--' tokens in a comment.
-    comment_text,
-    /// An invalid '--' in a comment which isn't followed by a '>'.
-    /// This is an error, however tokenization may proceed.
-    comment_invalid_double_dash,
-    /// This token is invalid, but can be treated the same as '-->' for the purposes
-    /// of deferring the error to a later stage.
-    @"--->",
-    @"-->",
-
-    @"<![CDATA[",
-    cdata_text,
-    @"]]>",
-
-    @"<!DOCTYPE",
-
-    @"<!ELEMENT",
-    @"<!ATTLIST",
-    @"<!ENTITY",
-
-    /// Denotes the closing bracket of a variety of opening tags.
-    @">",
-    /// Denotes the closing bracket of an element tag.
-    @"/>",
+    /// The opening of a markup tag '<'.
+    /// Call `nextMarkupTag` to find out the type of the markup tag.
+    markup_tag,
 };
 
-pub fn next(lexer: *Tokenizer) Token {
-    if (lexer.index == lexer.src.len) return makeEofToken(lexer.src.len);
-    switch (lexer.state) {
-        .text_or_close_or_start => switch (lexer.src[lexer.index]) {
-            '<' => {
-                const loc_start = lexer.index;
-                lexer.index += 1;
-                if (lexer.index == lexer.src.len) return .{
-                    .id = .invalid_tag_start,
-                    .loc = .{
-                        .start = loc_start,
-                        .end = lexer.index,
-                    },
-                };
-                switch (lexer.src[lexer.index]) {
-                    '?' => {
-                        lexer.index += 1;
-                        const pi_target_name_start = lexer.index;
+pub const MarkupTag = enum {
+    /// The markup tag is a PI (Processing Instructions) tag ('<?').
+    /// Call `nextString` to get segments of the PI target name until
+    /// it returns null.
+    ///
+    /// After it returns null, it should once again be called repeatedly
+    /// to obtain segments of the PI instructions string. If it returns
+    /// null immediately, there are no PI instructions after the target.
+    ///
+    /// After it returns null again, `nextDataType` should be called next.
+    pi,
+};
 
-                        while (lexer.index < lexer.src.len) { // loop ends immediately if we're already at the end of the src
-                            if (lexer.src[lexer.index] == '?' and
-                                lexer.index + 1 != lexer.src.len and
-                                lexer.src[lexer.index] == '>' //
-                            ) break; // '?>' terminates the PI
+pub const BufferError = error{
+    /// Must feed more input.
+    BufferUnderrun,
+};
 
-                            valid_pi_target_name: {
-                                const cp_start = lexer.index;
-                                const cp_len = std.unicode.utf8ByteSequenceLength(lexer.src[lexer.index]) catch |err| switch (err) {
-                                    error.Utf8InvalidStartByte => {
-                                        lexer.index += 1;
-                                        break :valid_pi_target_name;
-                                    },
-                                };
-                                lexer.index += cp_len;
-                                if (lexer.index > lexer.src.len) {
-                                    lexer.index = lexer.src.len;
-                                    break :valid_pi_target_name;
-                                }
+pub const NextDataTypeError = BufferError;
+/// See the comments on the data type tag for more information.
+pub fn nextDataType(scanner: *Scanner) NextDataTypeError!DataType {
+    switch (scanner.state) {
+        .text_or_close_or_start => {
+            if (scanner.index == scanner.src.len) return .eof;
+            switch (scanner.src[scanner.index]) {
+                '<' => {
+                    scanner.state = .markup_tag;
+                    scanner.index += 1;
+                    return .markup_tag;
+                },
+                '&' => @panic("TODO"),
+                else => @panic("TODO"),
+            }
+        },
+        .markup_tag => unreachable,
 
-                                const cp_bytes = lexer.src[cp_start..][0..cp_len];
-                                const cp_value = std.unicode.utf8Decode(cp_bytes) catch |e| switch (e) {
-                                    error.Utf8ExpectedContinuation,
-                                    error.Utf8OverlongEncoding,
-                                    error.Utf8EncodesSurrogateHalf,
-                                    error.Utf8CodepointTooLarge,
-                                    => @panic("TODO"),
-                                };
-                                if (!isNameChar(cp_value) or (cp_start == pi_target_name_start and !isNameStartChar(cp_value))) {
-                                    break :valid_pi_target_name;
-                                }
+        .pi_target_name => unreachable,
+        .pi_target_name_qm => unreachable,
+        .pi_target_name_qm_rab => unreachable,
+        .pi_target_name_end => unreachable,
 
-                                continue;
-                            }
+        .pi_data => unreachable,
+        .pi_data_qm => unreachable,
+        .pi_data_qm_rab => unreachable,
+    }
+}
 
-                            // not a valid PI target name codepoint
-                            return .{
-                                .id = .invalid_tag_start,
-                                .loc = .{
-                                    .start = loc_start,
-                                    .end = lexer.index,
-                                },
-                            };
-                        }
-
-                        return .{
-                            .id = .pi_target,
-                            .loc = .{
-                                .start = loc_start,
-                                .end = lexer.index,
-                            },
-                        };
-                    },
-
-                    '!' => {
-                        lexer.index += 1;
-
-                        inline for (
-                            comptime [_]struct { []const u8, State, TokId }{
-                                .{ "--", .comment_start, .@"<!--" },
-                                .{ "[CDATA[", .cdata_start, .@"<![CDATA[" },
-                                .{ "DOCTYPE", .doctype_def, .@"<!DOCTYPE" },
-                                .{ "ELEMENT", .element_type_decl, .@"<!ELEMENT" },
-                                .{ "ATTLIST", .attlist_decl, .@"<!ATTLIST" },
-                                .{ "ENTITY", .entity_decl, .@"<!ENTITY" },
-                            },
-                        ) |vals| {
-                            const match, const new_state, const tok_id = vals;
-                            if (std.mem.startsWith(u8, lexer.src[lexer.index..], match)) {
-                                lexer.index += match.len;
-                                lexer.state = new_state;
-                                return .{
-                                    .id = tok_id,
-                                    .loc = .{
-                                        .start = loc_start,
-                                        .end = lexer.index,
-                                    },
-                                };
-                            }
-                        }
-
-                        return .{
-                            .id = .invalid_tag_start,
-                            .loc = .{
-                                .start = loc_start,
-                                .end = lexer.index,
-                            },
-                        };
-                    },
-
-                    else => @panic("TODO"),
-                }
+pub const NextMarkupTagError = BufferError;
+/// See the comments on the markup tag for more information.
+pub fn nextMarkupTag(scanner: *Scanner) NextMarkupTagError!MarkupTag {
+    if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+    switch (scanner.state) {
+        .text_or_close_or_start => unreachable,
+        .markup_tag => switch (scanner.src[scanner.index]) {
+            '?' => {
+                scanner.state = .pi_target_name;
+                scanner.index += 1;
+                return .pi;
             },
+            '!' => @panic("TODO"),
             else => @panic("TODO"),
         },
 
-        // -- Processing Instructions tokenizing --
+        .pi_target_name => unreachable,
+        .pi_target_name_qm => unreachable,
+        .pi_target_name_qm_rab => unreachable,
+        .pi_target_name_end => unreachable,
 
-        // -- comment tokenizing --
+        .pi_data => unreachable,
+        .pi_data_qm => unreachable,
+        .pi_data_qm_rab => unreachable,
+    }
+}
 
-        .comment_start,
-        // this means the parsing of the document will end up in an error state,
-        // however it'd be more useful to defer such an error to a later stage
-        // than tokenization.
-        .comment_invalid_double_dash,
-        => {
-            const loc_start = lexer.index;
-            const double_dash = std.mem.indexOfPos(u8, lexer.src, lexer.index, "--") orelse lexer.src.len;
-            lexer.state = .comment_text;
-            lexer.index = double_dash;
-            return .{
-                .id = .comment_text,
-                .loc = .{
-                    .start = loc_start,
-                    .end = lexer.index,
-                },
-            };
-        },
-
-        .comment_text => {
-            const loc_start = lexer.index;
-            lexer.index += "--".len;
-
-            if (lexer.index < lexer.src.len) specific_case: {
-                switch (lexer.src[lexer.index]) {
-                    '>' => {
-                        lexer.index += 1;
-                        lexer.state = .text_or_close_or_start;
-                        return .{
-                            .id = .@"-->",
-                            .loc = .{
-                                .start = loc_start,
-                                .end = lexer.index,
-                            },
-                        };
-                    },
-                    '-' => {
-                        if (lexer.index + 1 == lexer.src.len) break :specific_case;
-                        if (lexer.src[lexer.index + 1] != '>') break :specific_case;
-                        lexer.index += 2;
-                        lexer.state = .text_or_close_or_start;
-                        return .{
-                            .id = .@"--->",
-                            .loc = .{
-                                .start = loc_start,
-                                .end = lexer.index,
-                            },
-                        };
-                    },
-                    else => {},
+pub const NextStringError = BufferError;
+pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
+    switch (scanner.state) {
+        .text_or_close_or_start => unreachable,
+        .markup_tag => unreachable,
+        .pi_target_name => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            const str_start = scanner.index;
+            for (scanner.src[scanner.index..], scanner.index..) |char, idx| {
+                if (isWhitespace(char)) {
+                    scanner.state = .pi_target_name_end;
+                    scanner.index = idx;
+                    return scanner.src[str_start..scanner.index];
+                }
+                if (char != '?') continue;
+                scanner.index = idx + 1;
+                if (scanner.index == scanner.src.len) {
+                    scanner.state = .pi_target_name_qm;
+                    return scanner.src[str_start..idx];
+                }
+                if (scanner.src[scanner.index] == '>') {
+                    scanner.state = .pi_target_name_qm_rab;
+                    return scanner.src[str_start..idx];
                 }
             }
-
-            lexer.state = .comment_invalid_double_dash;
-            return .{
-                .id = .comment_invalid_double_dash,
-                .loc = .{
-                    .start = loc_start,
-                    .end = lexer.index,
-                },
-            };
+            scanner.index = scanner.src.len;
+            return scanner.src[str_start..];
+        },
+        .pi_target_name_qm => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            assert(scanner.index == 0);
+            if (scanner.src[scanner.index] == '>') {
+                scanner.state = .pi_target_name_qm_rab;
+                return null;
+            }
+            scanner.state = .pi_target_name;
+            return "?";
+        },
+        .pi_target_name_qm_rab => {
+            assert(scanner.src[scanner.index] == '>');
+            scanner.state = .pi_data_qm_rab;
+            return null;
+        },
+        .pi_target_name_end => {
+            assert(isWhitespace(scanner.src[scanner.index]));
+            scanner.state = .pi_data;
+            return null;
         },
 
-        // -- CDATA tokenizing --
-
-        .cdata_start => {
-            const loc_start = lexer.index;
-
-            const cdata_end = std.mem.indexOfPos(u8, lexer.src, lexer.index, "]]>") orelse lexer.src.len;
-            lexer.state = .cdata_text;
-            lexer.index = cdata_end;
-            return .{
-                .id = .cdata_text,
-                .loc = .{
-                    .start = loc_start,
-                    .end = lexer.index,
-                },
-            };
+        .pi_data => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            const str_start = scanner.index;
+            for (scanner.src[scanner.index..], scanner.index..) |char, idx| {
+                if (char != '?') continue;
+                scanner.index = idx + 1;
+                if (scanner.index == scanner.src.len) {
+                    scanner.state = .pi_data_qm;
+                    return scanner.src[str_start..idx];
+                }
+                if (scanner.src[scanner.index] == '>') {
+                    scanner.state = .pi_data_qm_rab;
+                    return scanner.src[str_start..idx];
+                }
+            }
+            scanner.index = scanner.src.len;
+            return scanner.src[str_start..];
         },
-
-        .cdata_text => {
-            const loc_start = lexer.index;
-            lexer.state = .text_or_close_or_start;
-            lexer.index += "]]>".len;
-            return .{
-                .id = .@"]]>",
-                .loc = .{
-                    .start = loc_start,
-                    .end = lexer.index,
-                },
-            };
+        .pi_data_qm => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            assert(scanner.index == 0);
+            if (scanner.src[scanner.index] == '>') {
+                scanner.state = .text_or_close_or_start;
+                scanner.index += 1;
+                return null;
+            }
+            scanner.state = .pi_data;
+            return "?";
         },
-
-        .doctype_def => @panic("TODO"),
-
-        .element_type_decl => @panic("TODO"),
-        .attlist_decl => @panic("TODO"),
-        .entity_decl => @panic("TODO"),
+        .pi_data_qm_rab => {
+            assert(scanner.src[scanner.index] == '>');
+            scanner.state = .text_or_close_or_start;
+            scanner.index += 1;
+            return null;
+        },
     }
 }
 
 const State = enum {
     text_or_close_or_start,
+    markup_tag,
 
-    comment_start,
-    comment_text,
-    comment_invalid_double_dash,
+    pi_target_name,
+    pi_target_name_qm,
+    pi_target_name_qm_rab,
+    pi_target_name_end,
 
-    cdata_start,
-    cdata_text,
-
-    doctype_def,
-
-    element_type_decl,
-    attlist_decl,
-    entity_decl,
+    pi_data,
+    pi_data_qm,
+    pi_data_qm_rab,
 };
 
-inline fn makeEofToken(src_len: usize) Token {
-    return .{
-        .id = .eof,
-        .loc = .{
-            .start = src_len,
-            .end = src_len,
-        },
-    };
-}
-
+const whitespace_set = &[_]u8{
+    '\u{20}',
+    '\u{09}',
+    '\u{0D}',
+    '\u{0A}',
+};
 inline fn isWhitespace(cp_first_byte: u8) bool {
     return switch (cp_first_byte) {
         '\u{20}',
@@ -366,41 +266,101 @@ inline fn isNameChar(codepoint: u21) bool {
     };
 }
 
-fn testTokenizer(src: []const u8, expected: []const Token) !void {
-    var tk = Tokenizer.init(src);
+pub usingnamespace if (!@import("builtin").is_test) struct {} else struct {
+    const scanner_test_log = std.log.scoped(.scanner_test);
 
-    var actual = std.ArrayList(Token).init(std.testing.allocator);
-    defer actual.deinit();
+    fn expectNextDataType(scanner: *Scanner, expected: NextDataTypeError!DataType) !void {
+        const actual = scanner.nextDataType();
+        try std.testing.expectEqual(expected, actual);
+    }
+    fn expectNextMarkupTag(scanner: *Scanner, expected: NextMarkupTagError!MarkupTag) !void {
+        const actual = scanner.nextMarkupTag();
+        try std.testing.expectEqual(expected, actual);
+    }
+    fn expectNextString(scanner: *Scanner, expected: NextStringError!?[]const u8) !void {
+        const actual = scanner.nextString();
+        try std.testing.expectEqualDeep(expected, actual);
+    }
+    fn expectNextStringFull(scanner: *Scanner, expected: ?[]const u8) !void {
+        var actual = std.ArrayList(u8).init(std.testing.allocator);
+        defer actual.deinit();
 
-    while (true) {
-        const tok = tk.next();
-        try actual.append(tok);
-        switch (tok.id) {
-            .eof => break,
-            else => {},
+        {
+            const first_segment = (scanner.nextString() catch unreachable) orelse {
+                try std.testing.expectEqual(expected, null);
+                return;
+            };
+            try actual.appendSlice(first_segment);
+        }
+
+        while (scanner.nextString() catch unreachable) |segment| {
+            try actual.appendSlice(segment);
+        }
+
+        if (expected == null or !std.mem.eql(u8, actual.items, expected.?)) {
+            scanner_test_log.err("Expected {?s}, got {s}", .{ expected, actual.items });
+            return error.TestExpectedEqual;
         }
     }
+};
 
-    try std.testing.expectEqualDeep(expected, actual.items);
-}
+test "Scanner PI" {
+    var scanner: Scanner = undefined;
 
-test Tokenizer {
-    try testTokenizer("<!---->", &[_]Token{
-        .{
-            .id = .@"<!--",
-            .loc = .{ .start = 0, .end = 4 },
-        },
-        .{
-            .id = .comment_text,
-            .loc = .{ .start = 4, .end = 4 },
-        },
-        .{
-            .id = .@"-->",
-            .loc = .{ .start = 4, .end = 7 },
-        },
-        .{
-            .id = .eof,
-            .loc = .{ .start = 7, .end = 7 },
-        },
-    });
+    scanner = Scanner.init("<??>");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.pi);
+    try scanner.expectNextStringFull("");
+    try scanner.expectNextStringFull(null);
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("<?foo?>");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.pi);
+    try scanner.expectNextStringFull("foo");
+    try scanner.expectNextStringFull(null);
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("<?foo bar?>");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.pi);
+    try scanner.expectNextStringFull("foo");
+    try scanner.expectNextStringFull(" bar");
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("<");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(error.BufferUnderrun);
+    scanner.feed("?");
+    try scanner.expectNextMarkupTag(.pi);
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("fo");
+    try scanner.expectNextString("fo");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("o?");
+    try scanner.expectNextString("o");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("bar");
+    try scanner.expectNextString("?");
+    try scanner.expectNextString("bar");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed(" ");
+    try scanner.expectNextString("");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextString(" ");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("?");
+    try scanner.expectNextString("");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed(" ");
+    try scanner.expectNextString("?");
+    try scanner.expectNextString(" ");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("?");
+    try scanner.expectNextString("");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed(">");
+    try scanner.expectNextString(null);
+    try scanner.expectNextDataType(.eof);
 }
