@@ -14,16 +14,7 @@ pub inline fn init(src: []const u8) Scanner {
     };
 }
 
-/// Replaces the current src with the given `src` parameter,
-/// with subsequent calls to `scanner.next()` behaving as though
-/// the given src parameter has been appended to all the text
-/// that's already been tokenized.
-///
-/// NOTE: This invalidates the loc fields of any previously returned tokens.
-/// Those must somehow continue to refer to the previous buffer, or
-/// must instead be stored as `TokenWithString` or equivalent.
-///
-/// Useful for streaming data.
+/// Should be called to feed more input after encountering `error.BufferUnderrun`.
 pub fn feed(scanner: *Scanner, src: []const u8) void {
     scanner.src = src;
     scanner.index = 0;
@@ -39,6 +30,12 @@ pub const DataType = enum {
 };
 
 pub const MarkupTag = enum {
+    /// The '<' character was followed by a sequence of characters
+    /// which do not form a valid markup tag. This is an error,
+    /// but tokenization may continue and this error can be deferred
+    /// to later.
+    invalid,
+
     /// The markup tag is a PI (Processing Instructions) tag ('<?').
     /// Call `nextString` to get segments of the PI target name until
     /// it returns null.
@@ -49,6 +46,27 @@ pub const MarkupTag = enum {
     ///
     /// After it returns null again, `nextDataType` should be called next.
     pi,
+
+    /// The markup tag is a comment tag ('<!--').
+    /// Call `nextString` to get segments of the comment text.
+    ///
+    /// The invalid token '--' will be tokenized as normal, and in addition
+    /// is guaranteed to be returned as a singular string, such that the error
+    /// can be easily flagged and deferred to later code.
+    ///
+    /// After `nextString` returns null, `nextMarkupTag` should be called next,
+    /// which will return either `.comment_end` or `.comment_end_triple_dash`.
+    comment,
+
+    /// Indicates '-->' after a comment.
+    comment_end,
+    /// Indicates '--->' after a comment. This is an error, but can be deferred
+    /// to later, and tokenization may proceed.
+    comment_end_triple_dash,
+
+    /// The markup tag is a CDATA Section ('<![CDATA[').
+    /// Call `nextString` to get the CDATA text segments until it returns `null`.
+    cdata,
 };
 
 pub const BufferError = error{
@@ -82,23 +100,49 @@ pub fn nextDataType(scanner: *Scanner) NextDataTypeError!DataType {
         .pi_data => unreachable,
         .pi_data_qm => unreachable,
         .pi_data_qm_rab => unreachable,
+
+        .@"<!" => unreachable,
+
+        .@"<!-" => unreachable,
+        .@"<!--" => unreachable,
+        .comment_dash => unreachable,
+        .comment_dash_dash => unreachable,
+        .comment_dash_dash_dash => unreachable,
+        .@"--->" => unreachable,
+        .@"-->" => unreachable,
+
+        .@"<![" => unreachable,
+        .@"<![C" => unreachable,
+        .@"<![CD" => unreachable,
+        .@"<![CDA" => unreachable,
+        .@"<![CDAT" => unreachable,
+        .@"<![CDATA" => unreachable,
+        .@"<![CDATA[" => unreachable,
+        .@"]" => unreachable,
+        .@"]]" => unreachable,
     }
 }
 
 pub const NextMarkupTagError = BufferError;
 /// See the comments on the markup tag for more information.
 pub fn nextMarkupTag(scanner: *Scanner) NextMarkupTagError!MarkupTag {
-    if (scanner.index == scanner.src.len) return error.BufferUnderrun;
     switch (scanner.state) {
         .text_or_close_or_start => unreachable,
-        .markup_tag => switch (scanner.src[scanner.index]) {
-            '?' => {
-                scanner.state = .pi_target_name;
-                scanner.index += 1;
-                return .pi;
-            },
-            '!' => @panic("TODO"),
-            else => @panic("TODO"),
+        .markup_tag => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            switch (scanner.src[scanner.index]) {
+                '?' => {
+                    scanner.state = .pi_target_name;
+                    scanner.index += 1;
+                    return .pi;
+                },
+                '!' => {
+                    scanner.state = .@"<!";
+                    scanner.index += 1;
+                    return @call(.always_tail, nextMarkupTag, .{scanner});
+                },
+                else => @panic("TODO"),
+            }
         },
 
         .pi_target_name => unreachable,
@@ -109,6 +153,149 @@ pub fn nextMarkupTag(scanner: *Scanner) NextMarkupTagError!MarkupTag {
         .pi_data => unreachable,
         .pi_data_qm => unreachable,
         .pi_data_qm_rab => unreachable,
+
+        .@"<!" => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            switch (scanner.src[scanner.index]) {
+                '-' => {
+                    scanner.state = .@"<!-";
+                    scanner.index += 1;
+                    return @call(.always_tail, nextMarkupTag, .{scanner});
+                },
+                '[' => {
+                    scanner.state = .@"<![";
+                    scanner.index += 1;
+                    return @call(.always_tail, nextMarkupTag, .{scanner});
+                },
+                else => {
+                    scanner.state = .text_or_close_or_start;
+                    scanner.index += 1;
+                    return .invalid;
+                },
+            }
+        },
+
+        .@"<!-" => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            switch (scanner.src[scanner.index]) {
+                '-' => {
+                    scanner.state = .@"<!--";
+                    scanner.index += 1;
+                    return .comment;
+                },
+                else => {
+                    scanner.state = .text_or_close_or_start;
+                    scanner.index += 1;
+                    return .invalid;
+                },
+            }
+        },
+        .@"<!--" => unreachable,
+        .comment_dash => unreachable,
+        .comment_dash_dash => unreachable,
+        .comment_dash_dash_dash => unreachable,
+        .@"--->" => {
+            scanner.state = .text_or_close_or_start;
+            return .comment_end_triple_dash;
+        },
+        .@"-->" => {
+            scanner.state = .text_or_close_or_start;
+            return .comment_end;
+        },
+
+        .@"<![" => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            switch (scanner.src[scanner.index]) {
+                'C' => {
+                    scanner.state = .@"<![C";
+                    scanner.index += 1;
+                    return @call(.always_tail, nextMarkupTag, .{scanner});
+                },
+                else => {
+                    scanner.state = .text_or_close_or_start;
+                    scanner.index += 1;
+                    return .invalid;
+                },
+            }
+        },
+        .@"<![C" => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            switch (scanner.src[scanner.index]) {
+                'D' => {
+                    scanner.state = .@"<![CD";
+                    scanner.index += 1;
+                    return @call(.always_tail, nextMarkupTag, .{scanner});
+                },
+                else => {
+                    scanner.state = .text_or_close_or_start;
+                    scanner.index += 1;
+                    return .invalid;
+                },
+            }
+        },
+        .@"<![CD" => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            switch (scanner.src[scanner.index]) {
+                'A' => {
+                    scanner.state = .@"<![CDA";
+                    scanner.index += 1;
+                    return @call(.always_tail, nextMarkupTag, .{scanner});
+                },
+                else => {
+                    scanner.state = .text_or_close_or_start;
+                    scanner.index += 1;
+                    return .invalid;
+                },
+            }
+        },
+        .@"<![CDA" => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            switch (scanner.src[scanner.index]) {
+                'T' => {
+                    scanner.state = .@"<![CDAT";
+                    scanner.index += 1;
+                    return @call(.always_tail, nextMarkupTag, .{scanner});
+                },
+                else => {
+                    scanner.state = .text_or_close_or_start;
+                    scanner.index += 1;
+                    return .invalid;
+                },
+            }
+        },
+        .@"<![CDAT" => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            switch (scanner.src[scanner.index]) {
+                'A' => {
+                    scanner.state = .@"<![CDATA";
+                    scanner.index += 1;
+                    return @call(.always_tail, nextMarkupTag, .{scanner});
+                },
+                else => {
+                    scanner.state = .text_or_close_or_start;
+                    scanner.index += 1;
+                    return .invalid;
+                },
+            }
+        },
+        .@"<![CDATA" => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            switch (scanner.src[scanner.index]) {
+                '[' => {
+                    scanner.state = .@"<![CDATA[";
+                    scanner.index += 1;
+                    return .cdata;
+                },
+                else => {
+                    scanner.state = .text_or_close_or_start;
+                    scanner.index += 1;
+                    return .invalid;
+                },
+            }
+        },
+        .@"<![CDATA[" => unreachable,
+        .@"]" => unreachable,
+        .@"]]" => unreachable,
     }
 }
 
@@ -144,7 +331,7 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
             if (scanner.index == scanner.src.len) return error.BufferUnderrun;
             assert(scanner.index == 0);
             if (scanner.src[scanner.index] == '>') {
-                scanner.state = .pi_target_name_qm_rab;
+                scanner.state = .pi_data_qm_rab;
                 return null;
             }
             scanner.state = .pi_target_name;
@@ -164,8 +351,7 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
         .pi_data => {
             if (scanner.index == scanner.src.len) return error.BufferUnderrun;
             const str_start = scanner.index;
-            for (scanner.src[scanner.index..], scanner.index..) |char, idx| {
-                if (char != '?') continue;
+            while (std.mem.indexOfScalarPos(u8, scanner.src, scanner.index, '?')) |idx| {
                 scanner.index = idx + 1;
                 if (scanner.index == scanner.src.len) {
                     scanner.state = .pi_data_qm;
@@ -196,6 +382,113 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
             scanner.index += 1;
             return null;
         },
+
+        .@"<!" => unreachable,
+
+        .@"<!-" => unreachable,
+        .@"<!--" => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            const str_start = scanner.index;
+            while (std.mem.indexOfScalarPos(u8, scanner.src, scanner.index, '-')) |idx| {
+                scanner.index = idx + 1;
+                if (scanner.index == scanner.src.len) {
+                    scanner.state = .comment_dash;
+                    return scanner.src[str_start..idx];
+                }
+                if (scanner.src[scanner.index] == '-') {
+                    scanner.state = .comment_dash_dash;
+                    scanner.index += 1;
+                    return scanner.src[str_start..idx];
+                }
+            }
+            scanner.index = scanner.src.len;
+            return scanner.src[str_start..];
+        },
+        .comment_dash => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            if (scanner.src[scanner.index] != '-') {
+                scanner.state = .@"<!--";
+                return "-";
+            }
+            scanner.state = .comment_dash_dash;
+            scanner.index += 1;
+            return @call(.always_tail, nextString, .{scanner});
+        },
+        .comment_dash_dash => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            switch (scanner.src[scanner.index]) {
+                '>' => {
+                    scanner.state = .@"-->";
+                    scanner.index += 1;
+                    return null;
+                },
+                '-' => {
+                    scanner.state = .comment_dash_dash_dash;
+                    scanner.index += 1;
+                    return @call(.always_tail, nextString, .{scanner});
+                },
+                else => {
+                    scanner.state = .@"<!--";
+                    return "--";
+                },
+            }
+        },
+        .comment_dash_dash_dash => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            if (scanner.src[scanner.index] != '>') {
+                scanner.state = .comment_dash;
+                return "--";
+            }
+            scanner.state = .@"--->";
+            scanner.index += 1;
+            return null;
+        },
+        .@"-->" => unreachable,
+        .@"--->" => unreachable,
+
+        .@"<![" => unreachable,
+        .@"<![C" => unreachable,
+        .@"<![CD" => unreachable,
+        .@"<![CDA" => unreachable,
+        .@"<![CDAT" => unreachable,
+        .@"<![CDATA" => unreachable,
+        .@"<![CDATA[" => {
+            const str_start = scanner.index;
+            while (std.mem.indexOfScalarPos(u8, scanner.src, scanner.index, ']')) |idx| {
+                scanner.index = idx + 1;
+                if (scanner.index == scanner.src.len) {
+                    scanner.state = .@"]";
+                    return scanner.src[str_start..idx];
+                }
+                if (scanner.src[scanner.index] == ']') {
+                    scanner.state = .@"]]";
+                    scanner.index += 1;
+                    return scanner.src[str_start..idx];
+                }
+            }
+            scanner.index = scanner.src.len;
+            return scanner.src[str_start..];
+        },
+        .@"]" => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            if (scanner.src[scanner.index] != ']') {
+                scanner.state = .@"<![CDATA[";
+                return "]";
+            }
+            scanner.state = .@"]]";
+            scanner.index += 1;
+            return @call(.always_tail, nextString, .{scanner});
+        },
+        .@"]]" => {
+            if (scanner.index == scanner.src.len) return error.BufferUnderrun;
+            if (scanner.src[scanner.index] != '>') {
+                scanner.state = .comment_dash;
+                return "]]";
+            }
+            scanner.state = .text_or_close_or_start;
+            scanner.index += 1;
+            return null;
+        },
     }
 }
 
@@ -211,6 +504,26 @@ const State = enum {
     pi_data,
     pi_data_qm,
     pi_data_qm_rab,
+
+    @"<!",
+
+    @"<!-",
+    @"<!--",
+    comment_dash,
+    comment_dash_dash,
+    comment_dash_dash_dash,
+    @"--->",
+    @"-->",
+
+    @"<![",
+    @"<![C",
+    @"<![CD",
+    @"<![CDA",
+    @"<![CDAT",
+    @"<![CDATA",
+    @"<![CDATA[",
+    @"]",
+    @"]]",
 };
 
 const whitespace_set = &[_]u8{
@@ -267,8 +580,6 @@ inline fn isNameChar(codepoint: u21) bool {
 }
 
 pub usingnamespace if (!@import("builtin").is_test) struct {} else struct {
-    const scanner_test_log = std.log.scoped(.scanner_test);
-
     fn expectNextDataType(scanner: *Scanner, expected: NextDataTypeError!DataType) !void {
         const actual = scanner.nextDataType();
         try std.testing.expectEqual(expected, actual);
@@ -281,54 +592,130 @@ pub usingnamespace if (!@import("builtin").is_test) struct {} else struct {
         const actual = scanner.nextString();
         try std.testing.expectEqualDeep(expected, actual);
     }
-    fn expectNextStringFull(scanner: *Scanner, expected: ?[]const u8) !void {
-        var actual = std.ArrayList(u8).init(std.testing.allocator);
-        defer actual.deinit();
-
-        {
-            const first_segment = (scanner.nextString() catch unreachable) orelse {
-                try std.testing.expectEqual(expected, null);
-                return;
-            };
-            try actual.appendSlice(first_segment);
-        }
-
-        while (scanner.nextString() catch unreachable) |segment| {
-            try actual.appendSlice(segment);
-        }
-
-        if (expected == null or !std.mem.eql(u8, actual.items, expected.?)) {
-            scanner_test_log.err("Expected {?s}, got {s}", .{ expected, actual.items });
-            return error.TestExpectedEqual;
-        }
-    }
 };
 
-test "Scanner PI" {
+test "Scanner Processing Instructions" {
     var scanner: Scanner = undefined;
 
     scanner = Scanner.init("<??>");
     try scanner.expectNextDataType(.markup_tag);
     try scanner.expectNextMarkupTag(.pi);
-    try scanner.expectNextStringFull("");
-    try scanner.expectNextStringFull(null);
+
+    try scanner.expectNextString("");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("<? ?>");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.pi);
+
+    try scanner.expectNextString("");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextString(" ");
+    try scanner.expectNextString(null);
+
     try scanner.expectNextDataType(.eof);
 
     scanner = Scanner.init("<?foo?>");
     try scanner.expectNextDataType(.markup_tag);
     try scanner.expectNextMarkupTag(.pi);
-    try scanner.expectNextStringFull("foo");
-    try scanner.expectNextStringFull(null);
+
+    try scanner.expectNextString("foo");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("<?foo ?>");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.pi);
+
+    try scanner.expectNextString("foo");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextString(" ");
+    try scanner.expectNextString(null);
+
     try scanner.expectNextDataType(.eof);
 
     scanner = Scanner.init("<?foo bar?>");
     try scanner.expectNextDataType(.markup_tag);
     try scanner.expectNextMarkupTag(.pi);
-    try scanner.expectNextStringFull("foo");
-    try scanner.expectNextStringFull(" bar");
+
+    try scanner.expectNextString("foo");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextString(" bar");
+    try scanner.expectNextString(null);
+
     try scanner.expectNextDataType(.eof);
 
-    scanner = Scanner.init("<");
+    scanner = Scanner.init("<?foo");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.pi);
+    try scanner.expectNextString("foo");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("?>");
+    try scanner.expectNextString("");
+    try scanner.expectNextString(null);
+    try scanner.expectNextString(null);
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("<?foo");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.pi);
+    try scanner.expectNextString("foo");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("?");
+    try scanner.expectNextString("");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed(">");
+    try scanner.expectNextString(null);
+    try scanner.expectNextString(null);
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("<?");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.pi);
+    scanner.feed("fizz?>");
+
+    try scanner.expectNextString("fizz");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("<?bar");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.pi);
+    try scanner.expectNextString("bar");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("?");
+    try scanner.expectNextString("");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("?");
+    try scanner.expectNextString("?");
+    try scanner.expectNextString("");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("baz");
+    try scanner.expectNextString("?");
+    try scanner.expectNextString("baz");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("?>");
+    try scanner.expectNextString("");
+    try scanner.expectNextString(null);
+    try scanner.expectNextString(null);
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("");
+    try scanner.expectNextDataType(.eof);
+    scanner.feed("<");
     try scanner.expectNextDataType(.markup_tag);
     try scanner.expectNextMarkupTag(error.BufferUnderrun);
     scanner.feed("?");
@@ -347,7 +734,6 @@ test "Scanner PI" {
     scanner.feed(" ");
     try scanner.expectNextString("");
     try scanner.expectNextString(null);
-
     try scanner.expectNextString(" ");
     try scanner.expectNextString(error.BufferUnderrun);
     scanner.feed("?");
@@ -363,4 +749,108 @@ test "Scanner PI" {
     scanner.feed(">");
     try scanner.expectNextString(null);
     try scanner.expectNextDataType(.eof);
+}
+
+test "Scanner Comments" {
+    var scanner: Scanner = undefined;
+
+    scanner = Scanner.init("<!--" ++ "-->");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.comment);
+    try scanner.expectNextString("");
+    try scanner.expectNextString(null);
+    try scanner.expectNextMarkupTag(.comment_end);
+
+    scanner = Scanner.init("<!--" ++ "-" ++ "-->");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.comment);
+    try scanner.expectNextString("");
+    try scanner.expectNextString(null);
+    try scanner.expectNextMarkupTag(.comment_end_triple_dash);
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("<!--" ++ "--" ++ "-->");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.comment);
+    try scanner.expectNextString("");
+    try scanner.expectNextString("--");
+    try scanner.expectNextString(null);
+    try scanner.expectNextMarkupTag(.comment_end);
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("<!--" ++ "--" ++ "-" ++ "-->");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.comment);
+    try scanner.expectNextString("");
+    try scanner.expectNextString("--");
+    try scanner.expectNextString(null);
+    try scanner.expectNextMarkupTag(.comment_end_triple_dash);
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("<!-- <foo bar> -->");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.comment);
+    try scanner.expectNextString(" <foo bar> ");
+    try scanner.expectNextString(null);
+    try scanner.expectNextMarkupTag(.comment_end);
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("<!--");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.comment);
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("--");
+    try scanner.expectNextString("");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed(">");
+    try scanner.expectNextString(null);
+    try scanner.expectNextMarkupTag(.comment_end);
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("<!--");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.comment);
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("--a");
+    try scanner.expectNextString("");
+    try scanner.expectNextString("--");
+    try scanner.expectNextString("a");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("-->");
+    try scanner.expectNextString("");
+    try scanner.expectNextString(null);
+    try scanner.expectNextMarkupTag(.comment_end);
+    try scanner.expectNextDataType(.eof);
+
+    scanner = Scanner.init("<!--");
+    try scanner.expectNextDataType(.markup_tag);
+    try scanner.expectNextMarkupTag(.comment);
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("-");
+    try scanner.expectNextString("");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("-");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("-");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("-");
+    try scanner.expectNextString("--");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("-");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed(" ");
+    try scanner.expectNextString("--");
+    try scanner.expectNextString("-");
+    try scanner.expectNextString(" ");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feed("-->");
+    try scanner.expectNextString("");
+    try scanner.expectNextString(null);
+    try scanner.expectNextMarkupTag(.comment_end);
+    try scanner.expectNextDataType(.eof);
+}
+
+test "Scanner CDATA Sections" {
+    // TODO: actually do testing
+    return error.SkipZigTest;
 }
