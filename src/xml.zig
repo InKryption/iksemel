@@ -1,8 +1,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-pub const Tokenizer = @import("Tokenizer.zig");
+pub const Scanner = @import("Scanner.zig");
 
 comptime {
-    _ = Tokenizer;
+    _ = Scanner;
 }
