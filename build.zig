@@ -7,12 +7,17 @@ pub fn build(b: *Build) void {
 
     const unit_test_step = b.step("unit-test", "Run unit tests");
 
+    const xml_root = Build.LazyPath.relative("src/xml.zig");
+
     const xml_mod = b.addModule("iksemel", .{
-        .source_file = Build.LazyPath.relative("src/xml.zig"),
+        .root_source_file = xml_root,
+        .target = target,
+        .optimize = optimize,
     });
+    _ = xml_mod;
 
     const xml_unit_tests_exe = b.addTest(.{
-        .root_source_file = xml_mod.source_file,
+        .root_source_file = xml_root,
         .target = target,
         .optimize = optimize,
     });
