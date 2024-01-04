@@ -460,17 +460,29 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
 
 pub const NextStringError = BufferOrEofError;
 /// The returned string is valid for as long as `scanner.src` is valid.
-// TODO: Use `@call(.always_tail, nextString, .{scanner})` in this function once
-// that works for this return type.
+/// Calling this after it returns null is illegal behaviour.
+// TODO: Make calling this when it's already returned null be checked illegal behaviour.
+// TODO: Use `@call(.always_tail, nextString, .{scanner})` in this function once that
+// works for this return type.
 pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
     switch (scanner.state) {
         .check_next_tok_type => unreachable,
 
         .text_data => {
+            try scanner.checkForEof();
             const str_start = scanner.index;
             while (std.mem.indexOfAnyPos(u8, scanner.src, scanner.index, &.{ '&', '<', ']' })) |idx| {
                 scanner.index = idx;
-                if (scanner.src[scanner.index] != ']') break;
+                switch (scanner.src[scanner.index]) {
+                    '<', '&' => {
+                        if (str_start != idx) break;
+                        scanner.state = .text_data_end;
+                        // return @call(.always_tail, nextString, .{scanner});
+                        return scanner.nextString();
+                    },
+                    ']' => {},
+                    else => unreachable,
+                }
 
                 scanner.index += 1;
                 if (scanner.index == scanner.src.len) {
@@ -755,7 +767,8 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
                     break;
                 }
             }
-            return scanner.src[str_start..scanner.index];
+            if (str_start != scanner.index) return scanner.src[str_start..scanner.index];
+            return null;
         },
         .element_open_name_end => return null,
 
@@ -805,6 +818,7 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
         .@"</" => {
             try scanner.checkForEof();
             const str_start = scanner.index;
+            // TODO: also stop on whitespace
             const idx = std.mem.indexOfScalarPos(u8, scanner.src, scanner.index, '>') orelse {
                 scanner.index = scanner.src.len;
                 return scanner.src[str_start..];
@@ -822,7 +836,7 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
     }
 }
 
-inline fn checkForEof(scanner: *Scanner) BufferError!void {
+inline fn checkForEof(scanner: *Scanner) BufferOrEofError!void {
     if (scanner.index != scanner.src.len) return;
     if (!scanner.eof_specified) return error.BufferUnderrun;
     return error.PrematureEof;
@@ -951,6 +965,7 @@ fn expectNextTokenType(scanner: *Scanner, expected: NextTokenTypeError!TokenType
         .markup_tag,
 
         .element_open_name_end,
+        .@"element_open,/",
         .attr_value_sq,
         .attr_value_dq,
         .attr_value_sq_ref,
@@ -1604,5 +1619,149 @@ test "Scanner Element Opening Tags" {
     try scanner.expectNextTokenType(.element_open_end);
     try scanner.expectNextTokenType(error.BufferUnderrun);
     scanner.feedEof();
+    try scanner.expectNextTokenType(.eof);
+}
+
+test Scanner {
+    var feeder = std.mem.window(u8,
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\
+        \\<foo>
+        \\  Lorem ipsum
+        \\  <bar fizz='buzz'><baz/></bar>
+        \\</foo>
+        \\
+    , 2, 2);
+
+    var scanner = Scanner.initStreaming("");
+    try scanner.expectNextTokenType(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextTokenType(.pi);
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    for (comptime &[_]*const [2:0]u8{
+        "xm", "l ", "ve", "rs", "io",  "n=", "\"1", ".0",  "\" ", //
+        "en", "co", "di", "ng", "=\"", "UT", "F-",  "8\"",
+    }) |expected| {
+        try scanner.expectNextString(expected);
+        try scanner.expectNextString(error.BufferUnderrun);
+        const fed = feeder.next().?;
+        scanner.feedInput(fed);
+    }
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextTokenType(.text_data);
+    try scanner.expectNextString("\n\n");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.element_open);
+    try scanner.expectNextString("f");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString("oo");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.element_open_end);
+
+    try scanner.expectNextTokenType(.text_data);
+    try scanner.expectNextString("\n");
+
+    for (comptime &[_]*const [2:0]u8{
+        "  ", "Lo", "re", "m ", "ip", "su", "m\n", "  ",
+    }) |expected| {
+        try scanner.expectNextString(error.BufferUnderrun);
+        scanner.feedInput(feeder.next().?);
+        try scanner.expectNextString(expected);
+    }
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.element_open);
+    try scanner.expectNextString("b");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString("ar");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.attr_name);
+    try scanner.expectNextString("f");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString("iz");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString("z");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.attr_eql);
+
+    try scanner.expectNextTokenType(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextTokenType(.attr_value_quote_single);
+    try scanner.expectNextString("b");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString("uz");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString("z");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.attr_value_end);
+    try scanner.expectNextTokenType(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextTokenType(.element_open_end);
+
+    try scanner.expectNextTokenType(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextTokenType(.element_open);
+    try scanner.expectNextString("ba");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString("z");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextTokenType(.element_open_end_close_inline);
+
+    try scanner.expectNextTokenType(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextTokenType(.element_close);
+    try scanner.expectNextString("b");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString("ar");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.text_data);
+    try scanner.expectNextString("\n");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.element_close);
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString("fo");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString("o");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextTokenType(.text_data);
+    try scanner.expectNextString("\n");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedEof();
+    try scanner.expectNextString(null);
     try scanner.expectNextTokenType(.eof);
 }
