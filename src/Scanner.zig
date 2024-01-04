@@ -82,8 +82,6 @@ pub const TokenType = enum {
     /// The markup tag is a PI (Processing Instructions) tag ('<?').
     /// Call `nextString` to get segments of the PI target name until
     /// it returns null.
-    ///
-    /// After it returns null again, `nextTokenType` should be called next.
     pi,
 
     /// The opening tag '<!--'.
@@ -125,7 +123,7 @@ pub const TokenType = enum {
     /// Indicates an attribute name.
     /// Call `nextString` to get the segments of the attribute name until it returns `null`.
     attr_name,
-    /// Indicates '='.
+    /// Indicates '=' in an element tag.
     attr_eql,
     /// Indicates the start of a quoted attribute value (single quotes).
     /// First call `nextString` until it returns null, and then `nextTokenType` will
@@ -134,12 +132,13 @@ pub const TokenType = enum {
     /// * `.char_ent_ref`: indicating a character/entity reference in the attribute value,
     ///   which should be tokenized as normal, before calling `nextString` again, and
     ///   repeating the process.
-    attr_value_single_quote,
+    attr_value_quote_single,
     /// Indicates the start of a quoted attribute value (double quotes).
-    /// Equivalent to `.attr_value_single_quote`, save for the quotes.
-    attr_value_double_quote,
-    /// Indicates the end of a quoted attribute value (single/double quote based off of the
-    /// latest opened attribute value quote).
+    /// Equivalent to `.attr_value_quote_single`, save for the quotes.
+    attr_value_quote_double,
+    /// Indicates the end of a quoted attribute value, with whether
+    /// it's a single or double quote being based off of the latest
+    /// opened attribute value quote.
     attr_value_end,
 
     /// Indicates the start of an element closing tag `'</' Name`.
@@ -147,15 +146,11 @@ pub const TokenType = enum {
     element_close,
 };
 
-pub const BufferError = error{
-    /// Must feed more input or eof.
-    BufferUnderrun,
-    /// The XML source ended prematurely, when more input was expected, resulting
-    /// in the documenting being invalid.
-    PrematureEof,
-};
+pub const BufferError = error{BufferUnderrun};
+pub const EofError = error{PrematureEof};
+pub const BufferOrEofError = BufferError || EofError;
 
-pub const NextTokenTypeError = BufferError;
+pub const NextTokenTypeError = BufferOrEofError;
 /// See the comments on the data type tag for more information.
 pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
     switch (scanner.state) {
@@ -397,12 +392,12 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
                 '\'' => {
                     scanner.state = .attr_value_sq;
                     scanner.index += 1;
-                    return .attr_value_single_quote;
+                    return .attr_value_quote_single;
                 },
                 '\"' => {
                     scanner.state = .attr_value_dq;
                     scanner.index += 1;
-                    return .attr_value_double_quote;
+                    return .attr_value_quote_double;
                 },
                 '>' => {
                     scanner.state = .check_next_tok_type;
@@ -463,7 +458,8 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
     }
 }
 
-pub const NextStringError = BufferError;
+pub const NextStringError = BufferOrEofError;
+/// The returned string is valid for as long as `scanner.src` is valid.
 // TODO: Use `@call(.always_tail, nextString, .{scanner})` in this function once
 // that works for this return type.
 pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
@@ -1446,6 +1442,12 @@ test "Scanner Element Closing Tags" {
     try scanner.expectNextString(null);
     try scanner.expectNextTokenType(.eof);
 
+    scanner = Scanner.initComplete("</foo >");
+    try scanner.expectNextTokenType(.element_close);
+    try scanner.expectNextString("foo ");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.eof);
+
     scanner = Scanner.initComplete("</ >");
     try scanner.expectNextTokenType(.element_close);
     try scanner.expectNextString(" ");
@@ -1458,7 +1460,7 @@ test "Scanner Element Closing Tags" {
     try scanner.expectNextTokenType(.eof);
 }
 
-test "Scanner Empty Elements" {
+test "Scanner Element Opening Tags" {
     var scanner: Scanner = undefined;
 
     scanner = Scanner.initComplete("<foo  />");
@@ -1486,7 +1488,26 @@ test "Scanner Empty Elements" {
 
     try scanner.expectNextTokenType(.attr_eql);
 
-    try scanner.expectNextTokenType(.attr_value_single_quote);
+    try scanner.expectNextTokenType(.attr_value_quote_single);
+    try scanner.expectNextString("fizz");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.attr_value_end);
+
+    try scanner.expectNextTokenType(.element_open_end);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("<foo bar=\"fizz\">");
+    try scanner.expectNextTokenType(.element_open);
+    try scanner.expectNextString("foo");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.attr_name);
+    try scanner.expectNextString("bar");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.attr_eql);
+
+    try scanner.expectNextTokenType(.attr_value_quote_double);
     try scanner.expectNextString("fizz");
     try scanner.expectNextString(null);
     try scanner.expectNextTokenType(.attr_value_end);
@@ -1505,7 +1526,7 @@ test "Scanner Empty Elements" {
 
     try scanner.expectNextTokenType(.attr_eql);
 
-    try scanner.expectNextTokenType(.attr_value_single_quote);
+    try scanner.expectNextTokenType(.attr_value_quote_single);
     try scanner.expectNextString(null);
 
     try scanner.expectNextTokenType(.char_ent_ref);
@@ -1529,7 +1550,7 @@ test "Scanner Empty Elements" {
 
     try scanner.expectNextTokenType(.attr_eql);
 
-    try scanner.expectNextTokenType(.attr_value_single_quote);
+    try scanner.expectNextTokenType(.attr_value_quote_single);
     try scanner.expectNextString("fizz");
     try scanner.expectNextString(null);
     try scanner.expectNextTokenType(.char_ent_ref);
@@ -1559,7 +1580,7 @@ test "Scanner Empty Elements" {
 
     try scanner.expectNextTokenType(.attr_eql);
 
-    try scanner.expectNextTokenType(.attr_value_single_quote);
+    try scanner.expectNextTokenType(.attr_value_quote_single);
     try scanner.expectNextString("fi");
     try scanner.expectNextString(error.BufferUnderrun);
     scanner.feedInput("zz&ba");
