@@ -122,6 +122,9 @@ pub const TokenType = enum {
 
     /// Indicates an attribute name.
     /// Call `nextString` to get the segments of the attribute name until it returns `null`.
+    /// No validation is performed on the name, it is simply a string of non-whitespace,
+    /// non-quote and non-equals symbols. Invalid invariants are left to the caller to
+    /// verify.
     attr_name,
     /// Indicates '=' in an element tag.
     attr_eql,
@@ -143,6 +146,9 @@ pub const TokenType = enum {
 
     /// Indicates the start of an element closing tag `'</' Name`.
     /// Call `nextString` to get segments of the element name until it returns `null`.
+    /// Unlike for `element_open`, this may include whitespace after the name,
+    /// and any other stray characters before the '>', for the purposes of allowing
+    /// the caller to handle invalid invariants of `</.*>`.
     element_close,
 
     /// Whether or not this token should be followed up by a call to `nextString`.
