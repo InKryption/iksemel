@@ -407,9 +407,7 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
 
         .element_open => unreachable,
         .element_open_name_end => {
-            while (scanner.index != scanner.src.len) : (scanner.index += 1) {
-                if (!isWhitespace(scanner.src[scanner.index])) break;
-            }
+            scanner.index = std.mem.indexOfNonePos(u8, scanner.src, scanner.index, whitespace_set) orelse scanner.src.len;
             try scanner.checkForEof();
             switch (scanner.src[scanner.index]) {
                 else => {
@@ -789,14 +787,13 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
 
                 // terminate on '=', '\'', and '\"' as well and let caller
                 // handle the fact that it doesn't make sense.
-                const is_terminator = isWhitespace(char) or switch (char) {
-                    '/', '>', '=', '\'', '\"' => true,
-                    else => false,
+                const terminators = whitespace_set ++ &[_]u8{
+                    '/',  '>',  '=',
+                    '\'', '\"',
                 };
-                if (is_terminator) {
-                    scanner.state = .element_open_name_end;
-                    break;
-                }
+                if (std.mem.indexOfScalar(u8, terminators, char) == null) continue;
+                scanner.state = .element_open_name_end;
+                break;
             }
             if (str_start != scanner.index) return scanner.src[str_start..scanner.index];
             return null;
@@ -849,7 +846,6 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
         .@"</" => {
             try scanner.checkForEof();
             const str_start = scanner.index;
-            // TODO: also stop on whitespace
             const idx = std.mem.indexOfScalarPos(u8, scanner.src, scanner.index, '>') orelse {
                 scanner.index = scanner.src.len;
                 return scanner.src[str_start..];
@@ -931,16 +927,12 @@ const State = enum {
     element_close_end,
 };
 
-inline fn isWhitespace(cp_first_byte: u8) bool {
-    return switch (cp_first_byte) {
-        '\u{20}',
-        '\u{09}',
-        '\u{0D}',
-        '\u{0A}',
-        => true,
-        else => false,
-    };
-}
+const whitespace_set: []const u8 = &[_]u8{
+    '\u{20}',
+    '\u{09}',
+    '\u{0D}',
+    '\u{0A}',
+};
 
 fn testingPrint(comptime fmt_str: []const u8, args: anytype) void {
     if (@inComptime()) {
