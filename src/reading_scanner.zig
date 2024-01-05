@@ -78,19 +78,6 @@ pub fn ReadingScanner(comptime SrcReader: type) type {
 }
 
 test ReadingScanner {
-    var fbs = std.io.fixedBufferStream(
-        \\<?xml version="1.0" encoding="UTF-8"?>
-        \\
-        \\<foo>
-        \\  Lorem ipsum
-        \\  <bar fizz='buzz'><baz/></bar>
-        \\</foo>
-        \\
-    );
-
-    var rs_buffer: [2]u8 = undefined;
-    var rs = readingScanner(fbs.reader(), &rs_buffer);
-
     const TokTypeOrStr = union(enum) {
         tt: Scanner.TokenType,
         str: ?[]const u8,
@@ -145,6 +132,18 @@ test ReadingScanner {
         .{ .str = "\n" },
         .{ .tt = .eof },
     };
+    var fbs = std.io.fixedBufferStream(
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\
+        \\<foo>
+        \\  Lorem ipsum
+        \\  <bar fizz='buzz'><baz/></bar>
+        \\</foo>
+        \\
+    );
+
+    var rs_buffer: [2]u8 = undefined;
+    var rs = readingScanner(fbs.reader(), &rs_buffer);
 
     var tt_or_str_list = std.ArrayList(TokTypeOrStr).init(std.testing.allocator);
     defer tt_or_str_list.deinit();
