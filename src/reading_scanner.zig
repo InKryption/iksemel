@@ -55,10 +55,15 @@ pub fn ReadingScanner(comptime SrcReader: type) type {
         }
 
         /// Writes the string to the stream.
-        pub fn nextStringStream(rs: *Self, out_writer: anytype) (Error || @TypeOf(out_writer).Error)!void {
+        /// Returns true if there was any non-null component of the string, false otherwise.
+        pub fn nextStringStream(rs: *Self, out_writer: anytype) (Error || @TypeOf(out_writer).Error)!bool {
+            const first_str = (try rs.nextString()) orelse return false;
+            try out_writer.writeAll(first_str);
+
             while (try rs.nextString()) |str| {
                 try out_writer.writeAll(str);
             }
+            return true;
         }
 
         inline fn feed(rs: *Self) SrcReader.Error!void {
@@ -157,7 +162,7 @@ test ReadingScanner {
         if (tt == .eof) break;
 
         if (!tt.hasString()) continue;
-        try rs.nextStringStream(str_buffer.writer());
+        _ = try rs.nextStringStream(str_buffer.writer());
         const duped = try std.testing.allocator.dupe(u8, str_buffer.items);
         errdefer std.testing.allocator.free(duped);
         str_buffer.clearRetainingCapacity();
