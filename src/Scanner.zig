@@ -144,6 +144,37 @@ pub const TokenType = enum {
     /// Indicates the start of an element closing tag `'</' Name`.
     /// Call `nextString` to get segments of the element name until it returns `null`.
     element_close,
+
+    /// Whether or not this token should be followed up by a call to `nextString`.
+    /// `.eof` returns false.
+    pub inline fn hasString(token_type: TokenType) bool {
+        return switch (token_type) {
+            .eof => false,
+
+            .char_ent_ref,
+            .text_data,
+            .pi,
+            .comment,
+            .invalid_comment_dash_dash,
+            .cdata,
+            .element_open,
+            .attr_name,
+            .attr_value_quote_single,
+            .attr_value_quote_double,
+            .element_close,
+            => true,
+
+            .invalid_markup,
+            .comment_end,
+            .invalid_comment_end_triple_dash,
+            .invalid_cdata_stray_end,
+            .element_open_end,
+            .element_open_end_close_inline,
+            .attr_eql,
+            .attr_value_end,
+            => false,
+        };
+    }
 };
 
 pub const BufferError = error{BufferUnderrun};

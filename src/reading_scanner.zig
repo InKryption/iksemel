@@ -154,40 +154,14 @@ test ReadingScanner {
     while (true) {
         const tt = try rs.nextTokenType();
         try tt_or_str_list.append(.{ .tt = tt });
+        if (tt == .eof) break;
 
-        switch (tt) {
-            .eof => break,
-
-            .char_ent_ref,
-            .text_data,
-            .pi,
-            .comment,
-            .invalid_comment_dash_dash,
-            .cdata,
-            .element_open,
-            .attr_name,
-            .attr_value_quote_single,
-            .attr_value_quote_double,
-            .element_close,
-            => {
-                try rs.nextStringStream(str_buffer.writer());
-
-                const duped = try std.testing.allocator.dupe(u8, str_buffer.items);
-                errdefer std.testing.allocator.free(duped);
-                str_buffer.clearRetainingCapacity();
-
-                try tt_or_str_list.append(.{ .str = duped });
-            },
-            .invalid_markup,
-            .comment_end,
-            .invalid_comment_end_triple_dash,
-            .invalid_cdata_stray_end,
-            .element_open_end,
-            .element_open_end_close_inline,
-            .attr_eql,
-            .attr_value_end,
-            => {},
-        }
+        if (!tt.hasString()) continue;
+        try rs.nextStringStream(str_buffer.writer());
+        const duped = try std.testing.allocator.dupe(u8, str_buffer.items);
+        errdefer std.testing.allocator.free(duped);
+        str_buffer.clearRetainingCapacity();
+        try tt_or_str_list.append(.{ .str = duped });
     }
 
     try std.testing.expectEqualDeep(expected_tt_or_str_list, tt_or_str_list.items);
