@@ -3,21 +3,21 @@ const assert = std.debug.assert;
 const xml = @import("xml.zig");
 
 const Tree = @This();
-str_data: std.ArrayListUnmanaged(u8),
-comment_data: std.MultiArrayList(CommentData),
-pi_data: std.ArrayListUnmanaged(ProcessingInstructionData),
-data_ranges: std.ArrayListUnmanaged(DataRange),
-attributes_data: std.MultiArrayList(AttributeData),
-children_data: std.MultiArrayList(ChildData),
+str_buf: std.ArrayListUnmanaged(u8),
+comment_buf: std.MultiArrayList(CommentData),
+pi_buf: std.ArrayListUnmanaged(ProcessingInstructionData),
+buf_ranges: std.ArrayListUnmanaged(DataRange),
+attributes_buf: std.MultiArrayList(AttributeData),
+children_buf: std.MultiArrayList(ChildData),
 elements: std.MultiArrayList(Element),
 
 pub fn deinit(tree: *Tree, allocator: std.mem.Allocator) void {
-    tree.str_data.deinit(allocator);
-    tree.comment_data.deinit(allocator);
-    tree.pi_data.deinit(allocator);
-    tree.data_ranges.deinit(allocator);
-    tree.attributes_data.deinit(allocator);
-    tree.children_data.deinit(allocator);
+    tree.str_buf.deinit(allocator);
+    tree.comment_buf.deinit(allocator);
+    tree.pi_buf.deinit(allocator);
+    tree.buf_ranges.deinit(allocator);
+    tree.attributes_buf.deinit(allocator);
+    tree.children_buf.deinit(allocator);
     tree.elements.deinit(allocator);
 }
 
@@ -44,6 +44,30 @@ pub const AttributeData = union(enum) {
     val_str: DataRange,
     /// Range in `str_data`.
     val_char_ent_ref: DataRange,
+
+    pub inline fn typed(attr_data: AttributeData, tree: *const Tree) Typed {
+        return switch (attr_data) {
+            inline //
+            .name,
+            .val_str,
+            .val_char_ent_ref,
+            => |range, tag| @unionInit(Typed, @tagName(tag), tree.str_buf.items[range.start..range.end]),
+            inline //
+            .eql,
+            .value_quote_single,
+            .value_quote_double,
+            => |_, tag| tag,
+        };
+    }
+
+    pub const Typed = union(@typeInfo(AttributeData).Union.tag_type.?) {
+        name: []const u8,
+        eql,
+        value_quote_single,
+        value_quote_double,
+        val_str: []const u8,
+        val_char_ent_ref: []const u8,
+    };
 };
 pub const ChildData = struct {
     type: Type,
@@ -73,7 +97,61 @@ pub const ChildData = struct {
         /// `data_index` indexes `elements`.
         element,
     };
+
+    pub inline fn typed(child_data: ChildData, tree: *const Tree) Typed {
+        return switch (child_data.type) {
+            inline //
+            .invalid_markup,
+            .char_ent_ref,
+            .text_data,
+            .cdata,
+            => |tag| blk: {
+                const range = tree.buf_ranges.items[child_data.data_index];
+                break :blk @unionInit(Typed, @tagName(tag), tree.str_buf.items[range.start..range.end]);
+            },
+            .pi => blk: {
+                const pi = tree.pi_buf.items[child_data.data_index];
+                if (pi.target.start == 0 and pi.target.end == 0) break :blk .{ .pi = null };
+                const target = tree.str_buf.items[pi.target.start..pi.target.end];
+                if (pi.data.start == 0 and pi.data.end == 0) break :blk .{ .pi = .{
+                    .target = target,
+                    .data = null,
+                } };
+                const data = tree.str_buf.items[pi.data.start..pi.data.end];
+                break :blk .{ .pi = .{
+                    .target = target,
+                    .data = data,
+                } };
+            },
+            .comment => .{ .comment = tree.buf_ranges.items[child_data.data_index] },
+            .invalid_cdata_stray_end => .invalid_cdata_stray_end,
+            .element_close => blk: {
+                if (child_data.data_index == std.math.maxInt(usize)) break :blk .{ .element_close = null };
+                const range = tree.buf_ranges.items[child_data.data_index];
+                break :blk .{ .element_close = tree.str_buf.items[range.start..range.end] };
+            },
+            .element => .{ .element = tree.elements.get(child_data.data_index) },
+        };
+    }
+    pub const Typed = union(Type) {
+        invalid_markup: []const u8,
+        char_ent_ref: []const u8,
+        text_data: []const u8,
+        cdata: []const u8,
+        pi: ?ProcessingInstructions,
+        /// Indexes `tree.comment_buf`
+        comment: DataRange,
+        invalid_cdata_stray_end,
+        element_close: ?[]const u8,
+        element: Element,
+
+        pub const ProcessingInstructions = struct {
+            target: []const u8,
+            data: ?[]const u8,
+        };
+    };
 };
+
 pub const Element = struct {
     /// Range in `str_data`.
     name: DataRange,
@@ -85,25 +163,21 @@ pub const Element = struct {
 
     pub fn getName(element: Element, tree: *const Tree) ?[]const u8 {
         if (element.name.start == 0 and element.name.end == 0) return null;
-        return tree.str_data.items[element.name.start..element.name.end];
+        return tree.str_buf.items[element.name.start..element.name.end];
     }
 
     pub inline fn attributeDataIterator(element: Element, tree: *const Tree) AttributeDataIterator {
         return .{
             .attributes = element.attributes,
             .current = element.attributes.start,
-            .tree = tree,
+            .slice = tree.attributes_buf.slice(),
         };
-    }
-
-    pub inline fn childIterator(element: Element, tree: *const Tree) ChildIterator {
-        return ChildIterator.init(tree, element.children);
     }
 
     pub const AttributeDataIterator = struct {
         attributes: DataRange,
         current: usize,
-        tree: *const Tree,
+        slice: std.MultiArrayList(AttributeData).Slice,
 
         pub inline fn reset(iter: *AttributeDataIterator) void {
             iter.current = iter.attributes.start;
@@ -112,10 +186,13 @@ pub const Element = struct {
         pub inline fn next(iter: *AttributeDataIterator) ?AttributeData {
             if (iter.current == iter.attributes.end) return null;
             defer iter.current += 1;
-            const slice = iter.tree.attributes_data.slice();
-            return slice.get(iter.current);
+            return iter.slice.get(iter.current);
         }
     };
+
+    pub inline fn childIterator(element: Element, tree: *const Tree) ChildIterator {
+        return ChildIterator.init(tree, element.children);
+    }
 };
 
 pub const ChildIterator = struct {
@@ -128,7 +205,7 @@ pub const ChildIterator = struct {
     },
 
     pub inline fn init(tree: *const Tree, start: usize) ChildIterator {
-        const slice = tree.children_data.slice();
+        const slice = tree.children_buf.slice();
         return .{
             .start = start,
             .current = if (start == std.math.maxInt(usize)) null else start,
@@ -165,12 +242,12 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
     var rs = xml.readingScanner(src_reader, options.read_buffer);
 
     var tree: Tree = .{
-        .str_data = .{},
-        .comment_data = .{},
-        .pi_data = .{},
-        .data_ranges = .{},
-        .attributes_data = .{},
-        .children_data = .{},
+        .str_buf = .{},
+        .comment_buf = .{},
+        .pi_buf = .{},
+        .buf_ranges = .{},
+        .attributes_buf = .{},
+        .children_buf = .{},
         .elements = .{},
     };
     errdefer tree.deinit(allocator);
@@ -199,13 +276,13 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
                     else => unreachable,
                 };
 
-                const new_range_idx = tree.data_ranges.items.len;
-                const new_range = try tree.data_ranges.addOne(allocator);
-                errdefer _ = tree.data_ranges.pop();
+                const new_range_idx = tree.buf_ranges.items.len;
+                const new_range = try tree.buf_ranges.addOne(allocator);
+                errdefer _ = tree.buf_ranges.pop();
 
-                const start = tree.str_data.items.len;
-                assert(try rs.nextStringStream(tree.str_data.writer(allocator))); // there should be no possible way for invalid markup to not return a string.
-                const end = tree.str_data.items.len;
+                const start = tree.str_buf.items.len;
+                assert(try rs.nextStringStream(tree.str_buf.writer(allocator))); // there should be no possible way for invalid markup to not return a string.
+                const end = tree.str_buf.items.len;
                 new_range.* = .{ .start = start, .end = end };
                 try tree.appendChild(allocator, current_element, .{
                     .type = child_type,
@@ -213,16 +290,16 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
                 });
             },
             .pi_target => {
-                const new_pi_index = tree.pi_data.items.len;
-                const new_pi = try tree.pi_data.addOne(allocator);
+                const new_pi_index = tree.pi_buf.items.len;
+                const new_pi = try tree.pi_buf.addOne(allocator);
 
-                const target_start = tree.str_data.items.len;
+                const target_start = tree.str_buf.items.len;
                 new_pi.* = .{
                     .target = .{ .start = target_start, .end = target_start },
                     .data = .{ .start = 0, .end = 0 },
                 };
-                if (try rs.nextStringStream(tree.str_data.writer(allocator))) {
-                    const target_end = tree.str_data.items.len;
+                if (try rs.nextStringStream(tree.str_buf.writer(allocator))) {
+                    const target_end = tree.str_buf.items.len;
                     new_pi.target.end = target_end;
                 }
 
@@ -234,15 +311,15 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
             .pi_data => {
                 const child_index = tree.elements.items(.children)[current_element];
 
-                const slice = tree.children_data.slice();
+                const slice = tree.children_buf.slice();
                 const children_next_indices = slice.items(.next_index);
                 var next_idx: usize = children_next_indices[child_index];
                 while (children_next_indices[next_idx] != 0) next_idx = children_next_indices[next_idx];
 
-                const data_start = tree.str_data.items.len;
-                if (try rs.nextStringStream(tree.str_data.writer(allocator))) {
-                    const data_end = tree.str_data.items.len;
-                    tree.pi_data.items[slice.items(.data_index)[next_idx]].data = .{
+                const data_start = tree.str_buf.items.len;
+                if (try rs.nextStringStream(tree.str_buf.writer(allocator))) {
+                    const data_end = tree.str_buf.items.len;
+                    tree.pi_buf.items[slice.items(.data_index)[next_idx]].data = .{
                         .start = data_start,
                         .end = data_end,
                     };
@@ -250,36 +327,36 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
             },
 
             .comment => {
-                const new_range_idx = tree.data_ranges.items.len;
-                const new_range = try tree.data_ranges.addOne(allocator);
-                errdefer _ = tree.data_ranges.pop();
+                const new_range_idx = tree.buf_ranges.items.len;
+                const new_range = try tree.buf_ranges.addOne(allocator);
+                errdefer _ = tree.buf_ranges.pop();
 
-                const start = tree.comment_data.len;
+                const start = tree.comment_buf.len;
 
                 while (true) {
-                    const data_start = tree.str_data.items.len;
-                    if (try rs.nextStringStream(tree.str_data.writer(allocator))) {
-                        const data_end = tree.str_data.items.len;
-                        try tree.comment_data.append(allocator, .{ .data = .{
+                    const data_start = tree.str_buf.items.len;
+                    if (try rs.nextStringStream(tree.str_buf.writer(allocator))) {
+                        const data_end = tree.str_buf.items.len;
+                        try tree.comment_buf.append(allocator, .{ .data = .{
                             .start = data_start,
                             .end = data_end,
                         } });
                     }
 
                     switch (try rs.nextTokenType()) {
-                        .invalid_comment_dash_dash => try tree.comment_data.append(allocator, .invalid_dash_dash),
+                        .invalid_comment_dash_dash => try tree.comment_buf.append(allocator, .invalid_dash_dash),
                         .invalid_comment_end_triple_dash => {
-                            try tree.comment_data.append(allocator, .invalid_end_triple_dash);
+                            try tree.comment_buf.append(allocator, .invalid_end_triple_dash);
                             break;
                         },
                         .comment_end => {
-                            try tree.comment_data.append(allocator, .end);
+                            try tree.comment_buf.append(allocator, .end);
                             break;
                         },
                         else => unreachable,
                     }
                 }
-                const end = tree.comment_data.len;
+                const end = tree.comment_buf.len;
                 new_range.* = .{
                     .start = start,
                     .end = end,
@@ -304,11 +381,11 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
                 var elements_slice = tree.elements.slice();
 
                 const name_range: DataRange = blk: {
-                    const name_start = tree.str_data.items.len;
-                    if (!try rs.nextStringStream(tree.str_data.writer(allocator))) {
+                    const name_start = tree.str_buf.items.len;
+                    if (!try rs.nextStringStream(tree.str_buf.writer(allocator))) {
                         break :blk .{ .start = 0, .end = 0 };
                     }
-                    const name_end = tree.str_data.items.len;
+                    const name_end = tree.str_buf.items.len;
                     break :blk .{ .start = name_start, .end = name_end };
                 };
                 elements_slice.set(new_element_idx, .{
@@ -333,16 +410,16 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
                 const attributes: *DataRange = &tree.elements.items(.attributes)[current_element];
                 if (attributes.start == 0 and attributes.end == 0) {
                     attributes.* = .{
-                        .start = tree.attributes_data.len,
-                        .end = tree.attributes_data.len,
+                        .start = tree.attributes_buf.len,
+                        .end = tree.attributes_buf.len,
                     };
                 }
 
-                const start = tree.str_data.items.len;
-                assert(try rs.nextStringStream(tree.str_data.writer(allocator))); // there should be no possible way for attribute name to not return a string.
-                const end = tree.str_data.items.len;
+                const start = tree.str_buf.items.len;
+                assert(try rs.nextStringStream(tree.str_buf.writer(allocator))); // there should be no possible way for attribute name to not return a string.
+                const end = tree.str_buf.items.len;
 
-                try tree.attributes_data.append(allocator, .{ .name = .{
+                try tree.attributes_buf.append(allocator, .{ .name = .{
                     .start = start,
                     .end = end,
                 } });
@@ -353,12 +430,12 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
                 const attributes: *DataRange = &tree.elements.items(.attributes)[current_element];
                 if (attributes.start == 0 and attributes.end == 0) {
                     attributes.* = .{
-                        .start = tree.attributes_data.len,
-                        .end = tree.attributes_data.len,
+                        .start = tree.attributes_buf.len,
+                        .end = tree.attributes_buf.len,
                     };
                 }
 
-                try tree.attributes_data.append(allocator, .eql);
+                try tree.attributes_buf.append(allocator, .eql);
                 attributes.end += 1;
             },
             .attr_value_quote_single,
@@ -373,19 +450,19 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
                 const attributes: *DataRange = &tree.elements.items(.attributes)[current_element];
                 if (attributes.start == 0 and attributes.end == 0) {
                     attributes.* = .{
-                        .start = tree.attributes_data.len,
-                        .end = tree.attributes_data.len,
+                        .start = tree.attributes_buf.len,
+                        .end = tree.attributes_buf.len,
                     };
                 }
 
-                try tree.attributes_data.append(allocator, attr_data);
+                try tree.attributes_buf.append(allocator, attr_data);
                 attributes.end += 1;
 
                 while (true) {
-                    const data_start = tree.str_data.items.len;
-                    if (try rs.nextStringStream(tree.str_data.writer(allocator))) {
-                        const data_end = tree.str_data.items.len;
-                        try tree.attributes_data.append(allocator, .{ .val_str = .{
+                    const data_start = tree.str_buf.items.len;
+                    if (try rs.nextStringStream(tree.str_buf.writer(allocator))) {
+                        const data_end = tree.str_buf.items.len;
+                        try tree.attributes_buf.append(allocator, .{ .val_str = .{
                             .start = data_start,
                             .end = data_end,
                         } });
@@ -394,10 +471,10 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
                     switch (try rs.nextTokenType()) {
                         .attr_value_end => break,
                         .char_ent_ref => {
-                            const char_ent_ref_start = tree.str_data.items.len;
-                            if (try rs.nextStringStream(tree.str_data.writer(allocator))) {
-                                const char_ent_ref_end = tree.str_data.items.len;
-                                try tree.attributes_data.append(allocator, .{ .val_char_ent_ref = .{
+                            const char_ent_ref_start = tree.str_buf.items.len;
+                            if (try rs.nextStringStream(tree.str_buf.writer(allocator))) {
+                                const char_ent_ref_end = tree.str_buf.items.len;
+                                try tree.attributes_buf.append(allocator, .{ .val_char_ent_ref = .{
                                     .start = char_ent_ref_start,
                                     .end = char_ent_ref_end,
                                 } });
@@ -414,22 +491,22 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
                 defer current_element -= 1;
                 const curr_element_name: DataRange = tree.elements.items(.name)[current_element];
 
-                const maybe_name_start = tree.str_data.items.len;
-                if (try rs.nextStringStream(tree.str_data.writer(allocator))) {
-                    const maybe_name_end = tree.str_data.items.len;
+                const maybe_name_start = tree.str_buf.items.len;
+                if (try rs.nextStringStream(tree.str_buf.writer(allocator))) {
+                    const maybe_name_end = tree.str_buf.items.len;
                     const name_range_value: DataRange = if (std.mem.eql(
                         u8,
-                        tree.str_data.items[curr_element_name.start..curr_element_name.end],
-                        tree.str_data.items[maybe_name_start..maybe_name_end],
+                        tree.str_buf.items[curr_element_name.start..curr_element_name.end],
+                        tree.str_buf.items[maybe_name_start..maybe_name_end],
                     )) blk: {
-                        tree.str_data.shrinkRetainingCapacity(maybe_name_start);
+                        tree.str_buf.shrinkRetainingCapacity(maybe_name_start);
                         break :blk curr_element_name;
                     } else .{
                         .start = maybe_name_start,
                         .end = maybe_name_end,
                     };
-                    const new_index = tree.data_ranges.items.len;
-                    try tree.data_ranges.append(allocator, name_range_value);
+                    const new_index = tree.buf_ranges.items.len;
+                    try tree.buf_ranges.append(allocator, name_range_value);
                     try tree.appendChild(allocator, current_element, .{
                         .type = .element_close,
                         .data_index = new_index,
@@ -451,8 +528,8 @@ fn appendChild(
         data_index: usize,
     },
 ) std.mem.Allocator.Error!void {
-    const new_idx = try tree.children_data.addOne(allocator);
-    tree.children_data.set(new_idx, .{
+    const new_idx = try tree.children_buf.addOne(allocator);
+    tree.children_buf.set(new_idx, .{
         .type = child.type,
         .data_index = child.data_index,
         .next_index = 0,
@@ -463,7 +540,7 @@ fn appendChild(
         return;
     }
 
-    const children_next_indices = tree.children_data.items(.next_index);
+    const children_next_indices = tree.children_buf.items(.next_index);
     var next_idx_ptr: *usize = &children_next_indices[child_index_ptr.*];
     while (next_idx_ptr.* != 0) next_idx_ptr = &children_next_indices[next_idx_ptr.*];
     next_idx_ptr.* = new_idx;
@@ -491,25 +568,23 @@ test Tree {
     try std.testing.expectEqual(Tree.DataRange{ .start = 0, .end = 0 }, root.attributes);
     var root_child_iter = root.childIterator(&tree);
     {
-        const child = root_child_iter.next() orelse return error.TestExpectedNotNull;
-        try std.testing.expectEqual(Tree.ChildData.Type.pi, child.type);
-        const pi_data = tree.pi_data.items[child.data_index];
-        try std.testing.expectEqualStrings("xml", tree.str_data.items[pi_data.target.start..pi_data.target.end]);
-        try std.testing.expectEqualStrings(" version=\"1.0\" encoding=\"UTF-8\"", tree.str_data.items[pi_data.data.start..pi_data.data.end]);
+        const child = (root_child_iter.next() orelse return error.TestExpectedNotNull).typed(&tree);
+        try std.testing.expectEqual(Tree.ChildData.Type.pi, child);
+        const pi = child.pi orelse return error.TestExpectedNotNull;
+        try std.testing.expectEqualStrings("xml", pi.target);
+        try std.testing.expectEqualStrings(" version=\"1.0\" encoding=\"UTF-8\"", pi.data orelse return error.TestExpectedNotNull);
     }
 
-    {
-        const child = root_child_iter.next() orelse return error.TestExpectedNotNull;
-        try std.testing.expectEqual(Tree.ChildData.Type.text_data, child.type);
-        const range = tree.data_ranges.items[child.data_index];
-        try std.testing.expectEqualStrings("\n\n", tree.str_data.items[range.start..range.end]);
-    }
+    try std.testing.expectEqualDeep(
+        ChildData.Typed{ .text_data = "\n\n" },
+        (root_child_iter.next() orelse return error.TestExpectedNotNull).typed(&tree),
+    );
 
     {
         const foo = blk: {
-            const child = root_child_iter.next() orelse return error.TestExpectedNotNull;
-            try std.testing.expectEqual(Tree.ChildData.Type.element, child.type);
-            const foo = tree.elements.get(child.data_index);
+            const child = (root_child_iter.next() orelse return error.TestExpectedNotNull).typed(&tree);
+            try std.testing.expectEqual(Tree.ChildData.Type.element, child);
+            const foo = child.element;
             try std.testing.expectEqualStrings("foo", foo.getName(&tree) orelse return error.TextExpectedEqual);
             try std.testing.expectEqual(Tree.DataRange{ .start = 0, .end = 0 }, foo.attributes);
             break :blk foo;
@@ -517,44 +592,44 @@ test Tree {
 
         var foo_child_iter: Tree.ChildIterator = foo.childIterator(&tree);
         {
-            const child = foo_child_iter.next() orelse return error.TextExpectedNotNull;
-            try std.testing.expectEqual(Tree.ChildData.Type.text_data, child.type);
-            const range = tree.data_ranges.items[child.data_index];
-            try std.testing.expectEqualStrings("\n  Lorem ipsum\n  ", tree.str_data.items[range.start..range.end]);
+            const child = (foo_child_iter.next() orelse return error.TestExpectedNotNull).typed(&tree);
+            try std.testing.expectEqual(Tree.ChildData.Type.text_data, child);
+            try std.testing.expectEqualStrings("\n  Lorem ipsum\n  ", child.text_data);
         }
         {
             const bar = blk: {
-                const child = foo_child_iter.next() orelse return error.TextExpectedNotNull;
-                try std.testing.expectEqual(Tree.ChildData.Type.element, child.type);
-                const bar = tree.elements.get(child.data_index);
+                const child = (foo_child_iter.next() orelse return error.TestExpectedNotNull).typed(&tree);
+                try std.testing.expectEqual(Tree.ChildData.Type.element, child);
+                const bar = child.element;
                 try std.testing.expectEqualStrings("bar", bar.getName(&tree) orelse return error.TextExpectedEqual);
                 break :blk bar;
             };
             {
                 var attr_iter = bar.attributeDataIterator(&tree);
 
-                const name = attr_iter.next() orelse return error.TextExpectedNotNull;
+                const name = (attr_iter.next() orelse return error.TestExpectedNotNull).typed(&tree);
                 try std.testing.expectEqual(AttributeData.name, name);
-                try std.testing.expectEqualStrings("fizz", tree.str_data.items[name.name.start..name.name.end]);
+                try std.testing.expectEqualStrings("fizz", name.name);
 
                 try std.testing.expectEqual(@as(?AttributeData, .eql), attr_iter.next());
 
                 try std.testing.expectEqual(@as(?AttributeData, .value_quote_single), attr_iter.next());
 
-                const val_str = attr_iter.next() orelse return error.TextExpectedNotNull;
+                const val_str = (attr_iter.next() orelse return error.TestExpectedNotNull).typed(&tree);
                 try std.testing.expectEqual(AttributeData.val_str, val_str);
-                try std.testing.expectEqualStrings("buzz", tree.str_data.items[val_str.val_str.start..val_str.val_str.end]);
+                try std.testing.expectEqualStrings("buzz", val_str.val_str);
 
                 try std.testing.expectEqual(@as(?AttributeData, null), attr_iter.next());
             }
+
             var bar_child_iter = bar.childIterator(&tree);
 
             {
                 const baz: Tree.Element = blk: {
-                    const child = bar_child_iter.next() orelse return error.TestExpectedNotNull;
+                    const child = (bar_child_iter.next() orelse return error.TestExpectedNotNull).typed(&tree);
 
-                    try std.testing.expectEqual(Tree.ChildData.Type.element, child.type);
-                    const element = tree.elements.get(child.data_index);
+                    try std.testing.expectEqual(Tree.ChildData.Type.element, child);
+                    const element = child.element;
                     try std.testing.expectEqualStrings("baz", element.getName(&tree) orelse return error.TestExpectedEqual);
 
                     break :blk element;
@@ -567,25 +642,22 @@ test Tree {
             }
 
             {
-                const child = bar_child_iter.next() orelse return error.TestExpectedNotNull;
-                try std.testing.expectEqual(Tree.ChildData.Type.element_close, child.type);
-                const range = tree.data_ranges.items[child.data_index];
-                try std.testing.expectEqualStrings("bar", tree.str_data.items[range.start..range.end]);
+                const child = (bar_child_iter.next() orelse return error.TestExpectedNotNull).typed(&tree);
+                try std.testing.expectEqual(Tree.ChildData.Type.element_close, child);
+                try std.testing.expectEqualStrings("bar", child.element_close orelse return error.TestExpectedNotNull);
             }
 
             try std.testing.expectEqual(@as(?ChildData, null), bar_child_iter.next());
         }
         {
-            const child = foo_child_iter.next() orelse return error.TextExpectedNotNull;
-            try std.testing.expectEqual(ChildData.Type.text_data, child.type);
-            const range = tree.data_ranges.items[child.data_index];
-            try std.testing.expectEqualStrings("\n", tree.str_data.items[range.start..range.end]);
+            const child = (foo_child_iter.next() orelse return error.TestExpectedNotNull).typed(&tree);
+            try std.testing.expectEqual(ChildData.Type.text_data, child);
+            try std.testing.expectEqualStrings("\n", child.text_data);
         }
         {
-            const child = foo_child_iter.next() orelse return error.TextExpectedNotNull;
-            try std.testing.expectEqual(ChildData.Type.element_close, child.type);
-            const range = tree.data_ranges.items[child.data_index];
-            try std.testing.expectEqualStrings("foo", tree.str_data.items[range.start..range.end]);
+            const child = (foo_child_iter.next() orelse return error.TestExpectedNotNull).typed(&tree);
+            try std.testing.expectEqual(ChildData.Type.element_close, child);
+            try std.testing.expectEqualStrings("foo", child.element_close orelse return error.TestExpectedNotNull);
         }
         try std.testing.expectEqual(@as(?ChildData, null), foo_child_iter.next());
     }
@@ -593,8 +665,8 @@ test Tree {
     {
         const child = root_child_iter.next() orelse return error.TestExpectedNotNull;
         try std.testing.expectEqual(Tree.ChildData.Type.text_data, child.type);
-        const range = tree.data_ranges.items[child.data_index];
-        try std.testing.expectEqualStrings("\n", tree.str_data.items[range.start..range.end]);
+        const range = tree.buf_ranges.items[child.data_index];
+        try std.testing.expectEqualStrings("\n", tree.str_buf.items[range.start..range.end]);
     }
 
     try std.testing.expectEqual(@as(?Tree.ChildData, null), root_child_iter.next());
