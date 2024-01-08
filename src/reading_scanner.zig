@@ -1,7 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-const Scanner = @import("Scanner.zig");
+const xml = @import("xml.zig");
 
 pub inline fn readingScanner(src_reader: anytype, read_buffer: []u8) ReadingScanner(@TypeOf(src_reader)) {
     const Rs = ReadingScanner(@TypeOf(src_reader));
@@ -10,7 +10,7 @@ pub inline fn readingScanner(src_reader: anytype, read_buffer: []u8) ReadingScan
 
 pub fn ReadingScanner(comptime SrcReader: type) type {
     return struct {
-        scanner: Scanner,
+        scanner: xml.Scanner,
         src: SrcReader,
         buffer: []u8,
         const Self = @This();
@@ -18,14 +18,14 @@ pub fn ReadingScanner(comptime SrcReader: type) type {
         pub fn init(src_reader: SrcReader, read_buffer: []u8) Self {
             assert(read_buffer.len != 0);
             return .{
-                .scanner = Scanner.initStreaming(""),
+                .scanner = xml.Scanner.initStreaming(""),
                 .src = src_reader,
                 .buffer = read_buffer,
             };
         }
 
-        pub const Error = Scanner.EofError || SrcReader.Error;
-        pub fn nextTokenType(rs: *Self) Error!Scanner.TokenType {
+        pub const Error = xml.Scanner.EofError || SrcReader.Error;
+        pub fn nextTokenType(rs: *Self) Error!xml.Scanner.TokenType {
             assert(rs.buffer.len != 0);
             return rs.scanner.nextTokenType() catch |err_1| return switch (err_1) {
                 error.PrematureEof => |e| e,
@@ -79,7 +79,7 @@ pub fn ReadingScanner(comptime SrcReader: type) type {
 
 test ReadingScanner {
     const TokTypeOrStr = union(enum) {
-        tt: Scanner.TokenType,
+        tt: xml.Scanner.TokenType,
         str: ?[]const u8,
 
         pub fn format(
@@ -101,8 +101,10 @@ test ReadingScanner {
     };
 
     const expected_tt_or_str_list: []const TokTypeOrStr = &.{
-        .{ .tt = .pi },
-        .{ .str = "xml version=\"1.0\" encoding=\"UTF-8\"" },
+        .{ .tt = .pi_target },
+        .{ .str = "xml" },
+        .{ .tt = .pi_data },
+        .{ .str = " version=\"1.0\" encoding=\"UTF-8\"" },
         .{ .tt = .text_data },
         .{ .str = "\n\n" },
         .{ .tt = .element_open },

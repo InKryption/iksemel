@@ -82,24 +82,31 @@ pub const TokenType = enum {
     /// The markup tag is a PI (Processing Instructions) tag ('<?').
     /// Call `nextString` to get segments of the PI target name until
     /// it returns null.
-    pi,
+    pi_target,
+
+    /// The data that comes after the PI target, up to the '?>' token.
+    pi_data,
 
     /// The opening tag '<!--'.
     /// Call `nextString` to get segments of the comment text.
     ///
     /// After `nextString` returns null, `nextTokenType` should be called next,
-    /// which will return either `.comment_end` or `.invalid_comment_end_triple_dash`.
+    /// which will return one of:
+    /// * `.invalid_comment_dash_dash`: there is an invalid token '--' in the middle of the string,
+    ///   and `nextString` should be called again, repeating the process.
+    /// * `.invalid_comment_end_triple_dash`: the comment ends with the invalid token '--->'.
+    /// * `.comment_end`: the comment ends with the token '-->'.
     comment,
     /// The invalid token '--'.
     /// This can be ignored, and resume calling `nextString` as described for `.comment`,
     /// hence the error may be reported at a later time when it can be discerned
     /// into possibly more useful information, or grouped with other errors.
     invalid_comment_dash_dash,
-    /// Indicates '-->' after a comment.
-    comment_end,
     /// Indicates '--->' after a comment. This is an error, but can be deferred
     /// to later, and tokenization may proceed.
     invalid_comment_end_triple_dash,
+    /// Indicates '-->' after a comment.
+    comment_end,
 
     /// The markup tag is a CDATA Section ('<![CDATA[').
     ///
@@ -157,9 +164,11 @@ pub const TokenType = enum {
         return switch (token_type) {
             .eof => false,
 
+            .invalid_markup,
             .char_ent_ref,
             .text_data,
-            .pi,
+            .pi_target,
+            .pi_data,
             .comment,
             .invalid_comment_dash_dash,
             .cdata,
@@ -170,9 +179,8 @@ pub const TokenType = enum {
             .element_close,
             => true,
 
-            .invalid_markup,
-            .comment_end,
             .invalid_comment_end_triple_dash,
+            .comment_end,
             .invalid_cdata_stray_end,
             .element_open_end,
             .element_open_end_close_inline,
@@ -226,12 +234,15 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
         .ref_semicolon => unreachable,
 
         .markup_tag => {
-            try scanner.checkForEof();
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.eof_specified) return error.BufferUnderrun;
+                return .invalid_markup;
+            }
             switch (scanner.src[scanner.index]) {
                 '?' => {
-                    scanner.state = .pi;
+                    scanner.state = .pi_target;
                     scanner.index += 1;
-                    return .pi;
+                    return .pi_target;
                 },
                 '!' => {
                     scanner.state = .@"<!";
@@ -251,11 +262,16 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
             }
         },
 
-        .pi => unreachable,
-        .@"pi,?" => unreachable,
+        .pi_target => unreachable,
+        .pi_target_qm => unreachable,
+        .pi_target_end, .pi_data => return .pi_data,
+        .pi_data_qm => unreachable,
 
         .@"<!" => {
-            try scanner.checkForEof();
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.eof_specified) return error.BufferUnderrun;
+                return .invalid_markup;
+            }
             switch (scanner.src[scanner.index]) {
                 '-' => {
                     scanner.state = .@"<!-";
@@ -269,27 +285,22 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
                     // return @call(.always_tail, nextTokenType, .{scanner});
                     return scanner.nextTokenType();
                 },
-                else => {
-                    scanner.state = .check_next_tok_type;
-                    scanner.index += 1;
-                    return .invalid_markup;
-                },
+                else => return .invalid_markup,
             }
         },
 
         .@"<!-" => {
-            try scanner.checkForEof();
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.eof_specified) return error.BufferUnderrun;
+                return .invalid_markup;
+            }
             switch (scanner.src[scanner.index]) {
                 '-' => {
                     scanner.state = .comment;
                     scanner.index += 1;
                     return .comment;
                 },
-                else => {
-                    scanner.state = .check_next_tok_type;
-                    scanner.index += 1;
-                    return .invalid_markup;
-                },
+                else => return .invalid_markup,
             }
         },
         .comment => unreachable,
@@ -312,100 +323,40 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
             return .invalid_comment_end_triple_dash;
         },
 
-        .@"<![" => {
-            try scanner.checkForEof();
-            switch (scanner.src[scanner.index]) {
-                'C' => {
-                    scanner.state = .@"<![C";
-                    scanner.index += 1;
-                    // return @call(.always_tail, nextTokenType, .{scanner});
-                    return scanner.nextTokenType();
-                },
-                else => {
-                    scanner.state = .check_next_tok_type;
-                    scanner.index += 1;
-                    return .invalid_markup;
-                },
+        inline //
+        .@"<![",
+        .@"<![C",
+        .@"<![CD",
+        .@"<![CDA",
+        .@"<![CDAT",
+        => |tag| {
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.eof_specified) return error.BufferUnderrun;
+                return .invalid_markup;
             }
-        },
-        .@"<![C" => {
-            try scanner.checkForEof();
-            switch (scanner.src[scanner.index]) {
-                'D' => {
-                    scanner.state = .@"<![CD";
-                    scanner.index += 1;
-                    // return @call(.always_tail, nextTokenType, .{scanner});
-                    return scanner.nextTokenType();
-                },
-                else => {
-                    scanner.state = .check_next_tok_type;
-                    scanner.index += 1;
-                    return .invalid_markup;
-                },
-            }
-        },
-        .@"<![CD" => {
-            try scanner.checkForEof();
-            switch (scanner.src[scanner.index]) {
-                'A' => {
-                    scanner.state = .@"<![CDA";
-                    scanner.index += 1;
-                    // return @call(.always_tail, nextTokenType, .{scanner});
-                    return scanner.nextTokenType();
-                },
-                else => {
-                    scanner.state = .check_next_tok_type;
-                    scanner.index += 1;
-                    return .invalid_markup;
-                },
-            }
-        },
-        .@"<![CDA" => {
-            try scanner.checkForEof();
-            switch (scanner.src[scanner.index]) {
-                'T' => {
-                    scanner.state = .@"<![CDAT";
-                    scanner.index += 1;
-                    // return @call(.always_tail, nextTokenType, .{scanner});
-                    return scanner.nextTokenType();
-                },
-                else => {
-                    scanner.state = .check_next_tok_type;
-                    scanner.index += 1;
-                    return .invalid_markup;
-                },
-            }
-        },
-        .@"<![CDAT" => {
-            try scanner.checkForEof();
-            switch (scanner.src[scanner.index]) {
-                'A' => {
-                    scanner.state = .@"<![CDATA";
-                    scanner.index += 1;
-                    // return @call(.always_tail, nextTokenType, .{scanner});
-                    return scanner.nextTokenType();
-                },
-                else => {
-                    scanner.state = .check_next_tok_type;
-                    scanner.index += 1;
-                    return .invalid_markup;
-                },
-            }
+            const next_state: State, const expected_char: u8 = comptime switch (tag) {
+                .@"<![" => .{ .@"<![C", 'C' },
+                .@"<![C" => .{ .@"<![CD", 'D' },
+                .@"<![CD" => .{ .@"<![CDA", 'A' },
+                .@"<![CDA" => .{ .@"<![CDAT", 'T' },
+                .@"<![CDAT" => .{ .@"<![CDATA", 'A' },
+                else => unreachable,
+            };
+            if (scanner.src[scanner.index] != expected_char) return .invalid_markup;
+            scanner.state = next_state;
+            scanner.index += 1;
+            // return @call(.always_tail, nextTokenType, .{scanner});
+            return scanner.nextTokenType();
         },
         .@"<![CDATA" => {
-            try scanner.checkForEof();
-            switch (scanner.src[scanner.index]) {
-                '[' => {
-                    scanner.state = .cdata;
-                    scanner.index += 1;
-                    return .cdata;
-                },
-                else => {
-                    scanner.state = .check_next_tok_type;
-                    scanner.index += 1;
-                    return .invalid_markup;
-                },
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.eof_specified) return error.BufferUnderrun;
+                return .invalid_markup;
             }
+            if (scanner.src[scanner.index] != '[') return .invalid_markup;
+            scanner.state = .cdata;
+            scanner.index += 1;
+            return .cdata;
         },
         .cdata => unreachable,
         .@"cdata,]" => unreachable,
@@ -501,7 +452,7 @@ pub const NextStringError = BufferOrEofError;
 // works for this return type.
 pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
     switch (scanner.state) {
-        .check_next_tok_type => unreachable,
+        .check_next_tok_type => return null,
 
         .text_data => {
             try scanner.checkForEof();
@@ -650,34 +601,90 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
             return null;
         },
 
-        .markup_tag => unreachable,
+        .markup_tag => {
+            scanner.state = .check_next_tok_type;
+            return "<";
+        },
 
-        .pi => {
+        .pi_target => {
             try scanner.checkForEof();
             const str_start = scanner.index;
-            while (std.mem.indexOfScalarPos(u8, scanner.src, scanner.index, '?')) |idx| {
-                scanner.state = .@"pi,?";
-                scanner.index = idx + 1;
-                if (str_start != idx) return scanner.src[str_start..idx];
-                return scanner.nextString();
+            const str_end = std.mem.indexOfAnyPos(u8, scanner.src, scanner.index, whitespace_set ++ &[_]u8{'?'}) orelse {
+                scanner.index = scanner.src.len;
+                return scanner.src[str_start..];
+            };
+            scanner.index = str_end;
+            switch (scanner.src[scanner.index]) {
+                '?' => {
+                    scanner.state = .pi_target_qm;
+                    scanner.index += 1;
+                    if (str_start != str_end) return scanner.src[str_start..str_end];
+                    // return @call(.always_tail, nextString, .{scanner});
+                    return scanner.nextString();
+                },
+                else => {
+                    scanner.state = .pi_target_end;
+                    if (str_start != str_end) return scanner.src[str_start..str_end];
+                    // return @call(.always_tail, nextString, .{scanner});
+                    return scanner.nextString();
+                },
             }
-            scanner.index = scanner.src.len;
-            return scanner.src[str_start..scanner.index];
         },
-        .@"pi,?" => {
+        .pi_target_qm => {
             try scanner.checkForEof();
-            if (scanner.src[scanner.index] != '>') {
-                scanner.state = .pi;
-                return "?";
+            switch (scanner.src[scanner.index]) {
+                '>' => {
+                    scanner.state = .check_next_tok_type;
+                    scanner.index += 1;
+                    return null;
+                },
+                else => {
+                    scanner.state = .pi_target;
+                    return "?";
+                },
             }
-            scanner.state = .check_next_tok_type;
-            scanner.index += 1;
+        },
+        .pi_target_end => {
+            scanner.state = .pi_data;
             return null;
         },
+        .pi_data => {
+            try scanner.checkForEof();
+            const str_start = scanner.index;
+            const str_end = std.mem.indexOfScalarPos(u8, scanner.src, scanner.index, '?') orelse {
+                scanner.index = scanner.src.len;
+                return scanner.src[str_start..];
+            };
+            scanner.index = str_end + 1;
+            scanner.state = .pi_data_qm;
+            if (str_start != str_end) return scanner.src[str_start..str_end];
+            // return @call(.always_tail, nextString, .{scanner});
+            return scanner.nextString();
+        },
+        .pi_data_qm => {
+            try scanner.checkForEof();
+            switch (scanner.src[scanner.index]) {
+                '>' => {
+                    scanner.state = .check_next_tok_type;
+                    scanner.index += 1;
+                    return null;
+                },
+                else => {
+                    scanner.state = .pi_data;
+                    return "?";
+                },
+            }
+        },
 
-        .@"<!" => unreachable,
+        .@"<!" => {
+            scanner.state = .check_next_tok_type;
+            return "<!";
+        },
 
-        .@"<!-" => unreachable,
+        .@"<!-" => {
+            scanner.state = .check_next_tok_type;
+            return "<!-";
+        },
         .comment => {
             try scanner.checkForEof();
             const str_start = scanner.index;
@@ -736,12 +743,10 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
         },
         .@"comment,--->" => return null,
 
-        .@"<![" => unreachable,
-        .@"<![C" => unreachable,
-        .@"<![CD" => unreachable,
-        .@"<![CDA" => unreachable,
-        .@"<![CDAT" => unreachable,
-        .@"<![CDATA" => unreachable,
+        .@"<![", .@"<![C", .@"<![CD", .@"<![CDA", .@"<![CDAT", .@"<![CDATA" => |tag| {
+            scanner.state = .check_next_tok_type;
+            return @tagName(tag);
+        },
         .cdata => {
             try scanner.checkForEof();
             const str_start = scanner.index;
@@ -887,8 +892,11 @@ const State = enum {
 
     markup_tag,
 
-    pi,
-    @"pi,?",
+    pi_target,
+    pi_target_qm,
+    pi_target_end,
+    pi_data,
+    pi_data_qm,
 
     @"<!",
 
@@ -957,6 +965,11 @@ fn expectNextTokenType(scanner: *Scanner, expected: NextTokenTypeError!TokenType
         .check_next_tok_type,
         .markup_tag,
 
+        .pi_target,
+        .pi_target_qm,
+        .pi_data,
+        .pi_data_qm,
+
         .element_open_name_end,
         .@"element_open,/",
         .attr_value_sq,
@@ -988,9 +1001,7 @@ fn expectNextTokenType(scanner: *Scanner, expected: NextTokenTypeError!TokenType
 
 fn expectNextString(scanner: *Scanner, expected: NextStringError!?[]const u8) !void {
     switch (scanner.state) {
-        .check_next_tok_type,
-        .markup_tag,
-        => |tag| {
+        .@"comment,-->" => |tag| {
             testingPrint("expected to be able to obtain next string, but state is .{}\n", .{std.zig.fmtId(@tagName(tag))});
             return error.TestExpectedEqual;
         },
@@ -1034,40 +1045,98 @@ fn expectNextString(scanner: *Scanner, expected: NextStringError!?[]const u8) !v
     try std.testing.expectEqualStrings(expected_unwrapped, actual_unwrapped);
 }
 
+test "Scanner Invalid Markup" {
+    var scanner: Scanner = undefined;
+
+    scanner = Scanner.initComplete("<");
+    try scanner.expectNextTokenType(.invalid_markup);
+    try scanner.expectNextString("<");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.eof);
+
+    for ([_][]const u8{
+        "<!",
+        "<!-",
+        "<![",
+        "<![C",
+        "<![CD",
+        "<![CDA",
+        "<![CDAT",
+        "<![CDATA",
+    }) |incomplete_mk_str| {
+        scanner = Scanner.initComplete(incomplete_mk_str);
+        try scanner.expectNextTokenType(.invalid_markup);
+        try scanner.expectNextString(incomplete_mk_str);
+        try scanner.expectNextString(null);
+        try scanner.expectNextTokenType(.eof);
+
+        scanner = Scanner.initStreaming("");
+        for (0..incomplete_mk_str.len) |i| {
+            scanner.feedInput(incomplete_mk_str[i..][0..1]);
+            try scanner.expectNextTokenType(error.BufferUnderrun);
+        }
+
+        var eof_copy = scanner;
+        eof_copy.feedEof();
+        try eof_copy.expectNextTokenType(.invalid_markup);
+        try eof_copy.expectNextString(incomplete_mk_str);
+        try eof_copy.expectNextString(null);
+        try eof_copy.expectNextTokenType(.eof);
+
+        scanner.feedInput("a");
+        scanner.feedEof();
+        try scanner.expectNextTokenType(.invalid_markup);
+        try scanner.expectNextString(incomplete_mk_str);
+        try scanner.expectNextString(null);
+        try scanner.expectNextTokenType(.text_data);
+        try scanner.expectNextString("a");
+        try scanner.expectNextString(null);
+        try scanner.expectNextTokenType(.eof);
+    }
+}
+
 test "Scanner Processing Instructions" {
     var scanner: Scanner = undefined;
 
     scanner = Scanner.initComplete("<??>");
-    try scanner.expectNextTokenType(.pi);
+    try scanner.expectNextTokenType(.pi_target);
     try scanner.expectNextString(null);
     try scanner.expectNextTokenType(.eof);
 
     scanner = Scanner.initComplete("<? ?>");
-    try scanner.expectNextTokenType(.pi);
+    try scanner.expectNextTokenType(.pi_target);
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.pi_data);
     try scanner.expectNextString(" ");
     try scanner.expectNextString(null);
     try scanner.expectNextTokenType(.eof);
 
     scanner = Scanner.initComplete("<?foo?>");
-    try scanner.expectNextTokenType(.pi);
+    try scanner.expectNextTokenType(.pi_target);
     try scanner.expectNextString("foo");
     try scanner.expectNextString(null);
     try scanner.expectNextTokenType(.eof);
 
     scanner = Scanner.initComplete("<?foo ?>");
-    try scanner.expectNextTokenType(.pi);
-    try scanner.expectNextString("foo ");
+    try scanner.expectNextTokenType(.pi_target);
+    try scanner.expectNextString("foo");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.pi_data);
+    try scanner.expectNextString(" ");
     try scanner.expectNextString(null);
     try scanner.expectNextTokenType(.eof);
 
     scanner = Scanner.initComplete("<?foo bar?>");
-    try scanner.expectNextTokenType(.pi);
-    try scanner.expectNextString("foo bar");
+    try scanner.expectNextTokenType(.pi_target);
+    try scanner.expectNextString("foo");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.pi_data);
+    try scanner.expectNextString(" bar");
     try scanner.expectNextString(null);
     try scanner.expectNextTokenType(.eof);
 
     scanner = Scanner.initComplete("<?" ++ "???" ++ "?>");
-    try scanner.expectNextTokenType(.pi);
+    try scanner.expectNextTokenType(.pi_target);
     try scanner.expectNextString("?");
     try scanner.expectNextString("?");
     try scanner.expectNextString("?");
@@ -1075,7 +1144,7 @@ test "Scanner Processing Instructions" {
     try scanner.expectNextTokenType(.eof);
 
     scanner = Scanner.initStreaming("<?foo");
-    try scanner.expectNextTokenType(.pi);
+    try scanner.expectNextTokenType(.pi_target);
     try scanner.expectNextString("foo");
     try scanner.expectNextString(error.BufferUnderrun);
     scanner.feedInput("?>");
@@ -1085,7 +1154,7 @@ test "Scanner Processing Instructions" {
     try scanner.expectNextTokenType(.eof);
 
     scanner = Scanner.initStreaming("<?foo");
-    try scanner.expectNextTokenType(.pi);
+    try scanner.expectNextTokenType(.pi_target);
     try scanner.expectNextString("foo");
     try scanner.expectNextString(error.BufferUnderrun);
     scanner.feedInput("?");
@@ -1097,7 +1166,7 @@ test "Scanner Processing Instructions" {
     try scanner.expectNextTokenType(.eof);
 
     scanner = Scanner.initStreaming("<?");
-    try scanner.expectNextTokenType(.pi);
+    try scanner.expectNextTokenType(.pi_target);
     scanner.feedInput("fizz?>");
     try scanner.expectNextString("fizz");
     try scanner.expectNextString(null);
@@ -1106,7 +1175,7 @@ test "Scanner Processing Instructions" {
     try scanner.expectNextTokenType(.eof);
 
     scanner = Scanner.initStreaming("<?bar");
-    try scanner.expectNextTokenType(.pi);
+    try scanner.expectNextTokenType(.pi_target);
     try scanner.expectNextString("bar");
     try scanner.expectNextString(error.BufferUnderrun);
     scanner.feedInput("?");
@@ -1129,7 +1198,7 @@ test "Scanner Processing Instructions" {
     scanner.feedInput("<");
     try scanner.expectNextTokenType(error.BufferUnderrun);
     scanner.feedInput("?");
-    try scanner.expectNextTokenType(.pi);
+    try scanner.expectNextTokenType(.pi_target);
     try scanner.expectNextString(error.BufferUnderrun);
     scanner.feedInput("fo");
     try scanner.expectNextString("fo");
@@ -1142,6 +1211,8 @@ test "Scanner Processing Instructions" {
     try scanner.expectNextString("bar");
     try scanner.expectNextString(error.BufferUnderrun);
     scanner.feedInput(" ");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.pi_data);
     try scanner.expectNextString(" ");
     try scanner.expectNextString(error.BufferUnderrun);
     scanner.feedInput("?");
@@ -1629,18 +1700,26 @@ test Scanner {
     var scanner = Scanner.initStreaming("");
     try scanner.expectNextTokenType(error.BufferUnderrun);
     scanner.feedInput(feeder.next().?);
-    try scanner.expectNextTokenType(.pi);
+    try scanner.expectNextTokenType(.pi_target);
     try scanner.expectNextString(error.BufferUnderrun);
     scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString("xm");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString("l");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.pi_data);
+    try scanner.expectNextString(" ");
+    try scanner.expectNextString(error.BufferUnderrun);
     for (comptime &[_]*const [2:0]u8{
-        "xm", "l ", "ve", "rs", "io",  "n=", "\"1", ".0",  "\" ", //
-        "en", "co", "di", "ng", "=\"", "UT", "F-",  "8\"",
+        "ve", "rs", "io", "n=", "\"1", ".0", "\" ", "en", "co", "di", "ng", "=\"", "UT", "F-", "8\"",
     }) |expected| {
-        try scanner.expectNextString(expected);
         try scanner.expectNextString(error.BufferUnderrun);
-        const fed = feeder.next().?;
-        scanner.feedInput(fed);
+        scanner.feedInput(feeder.next().?);
+        try scanner.expectNextString(expected);
     }
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(feeder.next().?);
     try scanner.expectNextString(null);
 
     try scanner.expectNextTokenType(error.BufferUnderrun);
