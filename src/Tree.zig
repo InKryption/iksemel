@@ -96,17 +96,9 @@ pub const Element = struct {
         };
     }
 
-    pub const AttributeDataSegment = union(enum) {
-        /// Range in `str_data`.
-        name: []const u8,
-        eql,
-        value_quote_single,
-        value_quote_double,
-        /// Range in `str_data`.
-        val_str: []const u8,
-        /// Range in `str_data`.
-        val_char_ent_ref: []const u8,
-    };
+    pub inline fn childIterator(element: Element, tree: *const Tree) ChildIterator {
+        return ChildIterator.init(tree, element.children);
+    }
 
     pub const AttributeDataIterator = struct {
         attributes: DataRange,
@@ -117,21 +109,51 @@ pub const Element = struct {
             iter.current = iter.attributes.start;
         }
 
-        pub inline fn next(iter: *AttributeDataIterator) ?AttributeDataSegment {
+        pub inline fn next(iter: *AttributeDataIterator) ?AttributeData {
             if (iter.current == iter.attributes.end) return null;
             defer iter.current += 1;
             const slice = iter.tree.attributes_data.slice();
-            const current_value = slice.get(iter.current);
-            return switch (current_value) {
-                .name => |range| .{ .name = iter.tree.str_data.items[range.start..range.end] },
-                .eql => .eql,
-                .value_quote_single => .value_quote_single,
-                .value_quote_double => .value_quote_double,
-                .val_str => |range| .{ .val_str = iter.tree.str_data.items[range.start..range.end] },
-                .val_char_ent_ref => |range| .{ .val_char_ent_ref = iter.tree.str_data.items[range.start..range.end] },
-            };
+            return slice.get(iter.current);
         }
     };
+};
+
+pub const ChildIterator = struct {
+    start: usize,
+    current: ?usize,
+    child_data: struct {
+        type: []const ChildData.Type,
+        data_index: []const usize,
+        next_index: []const usize,
+    },
+
+    pub inline fn init(tree: *const Tree, start: usize) ChildIterator {
+        const slice = tree.children_data.slice();
+        return .{
+            .start = start,
+            .current = if (start == std.math.maxInt(usize)) null else start,
+            .child_data = .{
+                .type = slice.items(.type),
+                .data_index = slice.items(.data_index),
+                .next_index = slice.items(.next_index),
+            },
+        };
+    }
+
+    pub inline fn reset(iter: *ChildIterator) void {
+        iter.current = iter.start;
+    }
+
+    pub fn next(iter: *ChildIterator) ?ChildData {
+        const current = iter.current orelse return null;
+        const next_index = iter.child_data.next_index[current];
+        iter.current = if (next_index == 0) null else next_index;
+        return .{
+            .type = iter.child_data.type[current],
+            .data_index = iter.child_data.data_index[current],
+            .next_index = next_index,
+        };
+    }
 };
 
 pub const ParseOptions = struct {
@@ -466,11 +488,9 @@ test Tree {
 
     const root = tree.elements.get(0);
     try std.testing.expectEqual(Tree.DataRange{ .start = 0, .end = 0 }, root.attributes);
-    var root_curr_child = root.children;
+    var root_child_iter = root.childIterator(&tree);
     {
-        const child = tree.children_data.get(root_curr_child);
-        root_curr_child = child.next_index;
-
+        const child = root_child_iter.next() orelse return error.TestExpectedNotNull;
         try std.testing.expectEqual(Tree.ChildData.Type.pi, child.type);
         const pi_data = tree.pi_data.items[child.data_index];
         try std.testing.expectEqualStrings("xml", tree.str_data.items[pi_data.target.start..pi_data.target.end]);
@@ -478,111 +498,103 @@ test Tree {
     }
 
     {
-        const child = tree.children_data.get(root_curr_child);
-        root_curr_child = child.next_index;
-
+        const child = root_child_iter.next() orelse return error.TestExpectedNotNull;
         try std.testing.expectEqual(Tree.ChildData.Type.text_data, child.type);
         const range = tree.data_ranges.items[child.data_index];
         try std.testing.expectEqualStrings("\n\n", tree.str_data.items[range.start..range.end]);
     }
 
-    const foo: Tree.Element = blk: {
-        const child = tree.children_data.get(root_curr_child);
-        root_curr_child = child.next_index;
-
-        try std.testing.expectEqual(Tree.ChildData.Type.element, child.type);
-        const element = tree.elements.get(child.data_index);
-        try std.testing.expectEqualStrings("foo", element.getName(&tree) orelse return error.TextExpectedEqual);
-
-        break :blk element;
-    };
-    try std.testing.expectEqual(Tree.DataRange{ .start = 0, .end = 0 }, foo.attributes);
-
     {
-        const child = tree.children_data.get(root_curr_child);
-        root_curr_child = child.next_index;
+        const foo = blk: {
+            const child = root_child_iter.next() orelse return error.TestExpectedNotNull;
+            try std.testing.expectEqual(Tree.ChildData.Type.element, child.type);
+            const foo = tree.elements.get(child.data_index);
+            try std.testing.expectEqualStrings("foo", foo.getName(&tree) orelse return error.TextExpectedEqual);
+            try std.testing.expectEqual(Tree.DataRange{ .start = 0, .end = 0 }, foo.attributes);
+            break :blk foo;
+        };
 
-        try std.testing.expectEqual(Tree.ChildData.Type.text_data, child.type);
-        const range = tree.data_ranges.items[child.data_index];
-        try std.testing.expectEqualStrings("\n", tree.str_data.items[range.start..range.end]);
-    }
-
-    try std.testing.expectEqual(@as(usize, 0), root_curr_child);
-
-    var foo_curr_child = foo.children;
-    {
-        const child = tree.children_data.get(foo_curr_child);
-        foo_curr_child = child.next_index;
-
-        try std.testing.expectEqual(Tree.ChildData.Type.text_data, child.type);
-        const range = tree.data_ranges.items[child.data_index];
-        try std.testing.expectEqualStrings("\n  Lorem ipsum\n  ", tree.str_data.items[range.start..range.end]);
-    }
-
-    const bar: Tree.Element = blk: {
-        const child = tree.children_data.get(foo_curr_child);
-        foo_curr_child = child.next_index;
-
-        try std.testing.expectEqual(Tree.ChildData.Type.element, child.type);
-        const element = tree.elements.get(child.data_index);
-        try std.testing.expectEqualStrings("bar", element.getName(&tree) orelse return error.TextExpectedEqual);
-
-        break :blk element;
-    };
-    {
-        var iter = bar.attributeDataIterator(&tree);
-        for ([_]?Tree.Element.AttributeDataSegment{
-            .{ .name = "fizz" },
-            .eql,
-            .value_quote_single,
-            .{ .val_str = "buzz" },
-        }) |expected| {
-            try std.testing.expectEqualDeep(expected, iter.next());
+        var foo_child_iter: Tree.ChildIterator = foo.childIterator(&tree);
+        {
+            const child = foo_child_iter.next() orelse return error.TextExpectedNotNull;
+            try std.testing.expectEqual(Tree.ChildData.Type.text_data, child.type);
+            const range = tree.data_ranges.items[child.data_index];
+            try std.testing.expectEqualStrings("\n  Lorem ipsum\n  ", tree.str_data.items[range.start..range.end]);
         }
+        {
+            const bar = blk: {
+                const child = foo_child_iter.next() orelse return error.TextExpectedNotNull;
+                try std.testing.expectEqual(Tree.ChildData.Type.element, child.type);
+                const bar = tree.elements.get(child.data_index);
+                try std.testing.expectEqualStrings("bar", bar.getName(&tree) orelse return error.TextExpectedEqual);
+                break :blk bar;
+            };
+            {
+                var attr_iter = bar.attributeDataIterator(&tree);
+
+                const name = attr_iter.next() orelse return error.TextExpectedNotNull;
+                try std.testing.expectEqual(AttributeData.name, name);
+                try std.testing.expectEqualStrings("fizz", tree.str_data.items[name.name.start..name.name.end]);
+
+                try std.testing.expectEqual(@as(?AttributeData, .eql), attr_iter.next());
+
+                try std.testing.expectEqual(@as(?AttributeData, .value_quote_single), attr_iter.next());
+
+                const val_str = attr_iter.next() orelse return error.TextExpectedNotNull;
+                try std.testing.expectEqual(AttributeData.val_str, val_str);
+                try std.testing.expectEqualStrings("buzz", tree.str_data.items[val_str.val_str.start..val_str.val_str.end]);
+
+                try std.testing.expectEqual(@as(?AttributeData, null), attr_iter.next());
+            }
+            var bar_child_iter = bar.childIterator(&tree);
+
+            {
+                const baz: Tree.Element = blk: {
+                    const child = bar_child_iter.next() orelse return error.TestExpectedNotNull;
+
+                    try std.testing.expectEqual(Tree.ChildData.Type.element, child.type);
+                    const element = tree.elements.get(child.data_index);
+                    try std.testing.expectEqualStrings("baz", element.getName(&tree) orelse return error.TestExpectedEqual);
+
+                    break :blk element;
+                };
+                try std.testing.expectEqual(Tree.DataRange{ .start = 0, .end = 0 }, foo.attributes);
+                try std.testing.expectEqual(@as(usize, std.math.maxInt(usize)), baz.children);
+
+                var baz_child_iter = baz.childIterator(&tree);
+                try std.testing.expectEqual(@as(?ChildData, null), baz_child_iter.next());
+            }
+
+            {
+                const child = bar_child_iter.next() orelse return error.TestExpectedNotNull;
+                try std.testing.expectEqual(Tree.ChildData.Type.element_close, child.type);
+                const range = tree.data_ranges.items[child.data_index];
+                try std.testing.expectEqualStrings("bar", tree.str_data.items[range.start..range.end]);
+            }
+
+            try std.testing.expectEqual(@as(?ChildData, null), bar_child_iter.next());
+        }
+        {
+            const child = foo_child_iter.next() orelse return error.TextExpectedNotNull;
+            try std.testing.expectEqual(ChildData.Type.text_data, child.type);
+            const range = tree.data_ranges.items[child.data_index];
+            try std.testing.expectEqualStrings("\n", tree.str_data.items[range.start..range.end]);
+        }
+        {
+            const child = foo_child_iter.next() orelse return error.TextExpectedNotNull;
+            try std.testing.expectEqual(ChildData.Type.element_close, child.type);
+            const range = tree.data_ranges.items[child.data_index];
+            try std.testing.expectEqualStrings("foo", tree.str_data.items[range.start..range.end]);
+        }
+        try std.testing.expectEqual(@as(?ChildData, null), foo_child_iter.next());
     }
 
     {
-        const child = tree.children_data.get(foo_curr_child);
-        foo_curr_child = child.next_index;
-
+        const child = root_child_iter.next() orelse return error.TestExpectedNotNull;
         try std.testing.expectEqual(Tree.ChildData.Type.text_data, child.type);
         const range = tree.data_ranges.items[child.data_index];
         try std.testing.expectEqualStrings("\n", tree.str_data.items[range.start..range.end]);
     }
 
-    {
-        const child = tree.children_data.get(foo_curr_child);
-        foo_curr_child = child.next_index;
-
-        try std.testing.expectEqual(Tree.ChildData.Type.element_close, child.type);
-        const range = tree.data_ranges.items[child.data_index];
-        try std.testing.expectEqualStrings("foo", tree.str_data.items[range.start..range.end]);
-    }
-
-    try std.testing.expectEqual(@as(usize, 0), foo_curr_child);
-
-    var bar_curr_child = bar.children;
-    const baz: Tree.Element = blk: {
-        const child = tree.children_data.get(bar_curr_child);
-        bar_curr_child = child.next_index;
-
-        try std.testing.expectEqual(Tree.ChildData.Type.element, child.type);
-        const element = tree.elements.get(child.data_index);
-        try std.testing.expectEqualStrings("baz", element.getName(&tree) orelse return error.TextExpectedEqual);
-
-        break :blk element;
-    };
-    try std.testing.expectEqual(Tree.DataRange{ .start = 0, .end = 0 }, foo.attributes);
-    try std.testing.expectEqual(@as(usize, std.math.maxInt(usize)), baz.children);
-
-    {
-        const child = tree.children_data.get(bar_curr_child);
-        bar_curr_child = child.next_index;
-
-        try std.testing.expectEqual(Tree.ChildData.Type.element_close, child.type);
-        const range = tree.data_ranges.items[child.data_index];
-        try std.testing.expectEqualStrings("bar", tree.str_data.items[range.start..range.end]);
-    }
-
-    try std.testing.expectEqual(@as(usize, 0), bar_curr_child);
+    try std.testing.expectEqual(@as(?Tree.ChildData, null), root_child_iter.next());
 }
