@@ -7,6 +7,15 @@ index: usize,
 state: State,
 eof_specified: bool,
 
+/// The set of codepoints defined as whitespace. They are all
+/// exactly one byte in size.
+pub const whitespace_set: []const u8 = &[_]u8{
+    '\u{20}',
+    '\u{09}',
+    '\u{0D}',
+    '\u{0A}',
+};
+
 /// Initializes the `Scanner` with the full input.
 /// Calling `feedInput` or `feedEof` is illegal.
 pub inline fn initComplete(src: []const u8) Scanner {
@@ -127,6 +136,9 @@ pub const TokenType = enum {
     /// the element inline.
     element_open_end_close_inline,
 
+    /// Indicates whitespace in between the element name and attribute data, and
+    /// amidst attribute data.
+    element_tag_whitespace,
     /// Indicates an attribute name.
     /// Call `nextString` to get the segments of the attribute name until it returns `null`.
     /// No validation is performed on the name, it is simply a string of non-whitespace,
@@ -173,6 +185,7 @@ pub const TokenType = enum {
             .invalid_comment_dash_dash,
             .cdata,
             .element_open,
+            .element_tag_whitespace,
             .attr_name,
             .attr_value_quote_single,
             .attr_value_quote_double,
@@ -364,10 +377,17 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
 
         .element_open => unreachable,
         .element_open_name_end => {
-            scanner.index = std.mem.indexOfNonePos(u8, scanner.src, scanner.index, whitespace_set) orelse scanner.src.len;
             try scanner.checkForEof();
+            if (std.mem.indexOfScalar(u8, whitespace_set, scanner.src[scanner.index]) != null) {
+                scanner.state = .element_open_name_ws;
+                return .element_tag_whitespace;
+            }
             switch (scanner.src[scanner.index]) {
                 else => {
+                    if (std.mem.indexOfScalar(u8, whitespace_set, scanner.src[scanner.index]) != null) {
+                        scanner.state = .element_open_name_ws;
+                        return .element_tag_whitespace;
+                    }
                     scanner.state = .attr_name;
                     return .attr_name;
                 },
@@ -397,6 +417,7 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
                 },
             }
         },
+        .element_open_name_ws => unreachable,
 
         .attr_name => unreachable,
 
@@ -810,6 +831,14 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
             return null;
         },
         .element_open_name_end => return null,
+        .element_open_name_ws => {
+            assert(std.mem.indexOfScalar(u8, whitespace_set, scanner.src[scanner.index]) != null);
+            const str_start = scanner.index;
+            scanner.state = .element_open_name_end;
+            scanner.index = std.mem.indexOfNonePos(u8, scanner.src, scanner.index, whitespace_set) orelse scanner.src.len;
+            if (str_start == scanner.index) return null;
+            return scanner.src[str_start..scanner.index];
+        },
 
         .@"element_open,/" => unreachable,
 
@@ -920,6 +949,7 @@ const State = enum {
 
     element_open,
     element_open_name_end,
+    element_open_name_ws,
     @"element_open,/",
 
     attr_val_sq_ref_segment,
@@ -939,13 +969,6 @@ const State = enum {
 
     @"</",
     element_close_end,
-};
-
-const whitespace_set: []const u8 = &[_]u8{
-    '\u{20}',
-    '\u{09}',
-    '\u{0D}',
-    '\u{0A}',
 };
 
 fn testingPrint(comptime fmt_str: []const u8, args: anytype) void {
@@ -1546,6 +1569,11 @@ test "Scanner Element Opening Tags" {
     try scanner.expectNextTokenType(.element_open);
     try scanner.expectNextString("foo");
     try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.element_tag_whitespace);
+    try scanner.expectNextString("  ");
+    try scanner.expectNextString(null);
+
     try scanner.expectNextTokenType(.element_open_end_close_inline);
     try scanner.expectNextTokenType(.eof);
 
@@ -1553,12 +1581,21 @@ test "Scanner Element Opening Tags" {
     try scanner.expectNextTokenType(.element_open);
     try scanner.expectNextString("foo");
     try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.element_tag_whitespace);
+    try scanner.expectNextString("  ");
+    try scanner.expectNextString(null);
+
     try scanner.expectNextTokenType(.element_open_end);
     try scanner.expectNextTokenType(.eof);
 
     scanner = Scanner.initComplete("<foo bar='fizz'>");
     try scanner.expectNextTokenType(.element_open);
     try scanner.expectNextString("foo");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.element_tag_whitespace);
+    try scanner.expectNextString(" ");
     try scanner.expectNextString(null);
 
     try scanner.expectNextTokenType(.attr_name);
@@ -1575,9 +1612,49 @@ test "Scanner Element Opening Tags" {
     try scanner.expectNextTokenType(.element_open_end);
     try scanner.expectNextTokenType(.eof);
 
+    scanner = Scanner.initComplete("<foo bar = 'fizz' >");
+    try scanner.expectNextTokenType(.element_open);
+    try scanner.expectNextString("foo");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.element_tag_whitespace);
+    try scanner.expectNextString(" ");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.attr_name);
+    try scanner.expectNextString("bar");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.element_tag_whitespace);
+    try scanner.expectNextString(" ");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.attr_eql);
+
+    try scanner.expectNextTokenType(.element_tag_whitespace);
+    try scanner.expectNextString(" ");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.attr_value_quote_single);
+    try scanner.expectNextString("fizz");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.attr_value_end);
+
+    try scanner.expectNextTokenType(.element_tag_whitespace);
+    try scanner.expectNextString(" ");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.element_open_end);
+
+    try scanner.expectNextTokenType(.eof);
+
     scanner = Scanner.initComplete("<foo bar=\"fizz\">");
     try scanner.expectNextTokenType(.element_open);
     try scanner.expectNextString("foo");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.element_tag_whitespace);
+    try scanner.expectNextString(" ");
     try scanner.expectNextString(null);
 
     try scanner.expectNextTokenType(.attr_name);
@@ -1597,6 +1674,10 @@ test "Scanner Element Opening Tags" {
     scanner = Scanner.initComplete("<foo bar='&baz;'>");
     try scanner.expectNextTokenType(.element_open);
     try scanner.expectNextString("foo");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.element_tag_whitespace);
+    try scanner.expectNextString(" ");
     try scanner.expectNextString(null);
 
     try scanner.expectNextTokenType(.attr_name);
@@ -1621,6 +1702,10 @@ test "Scanner Element Opening Tags" {
     scanner = Scanner.initComplete("<foo  bar='fizz&baz;buzz'>");
     try scanner.expectNextTokenType(.element_open);
     try scanner.expectNextString("foo");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.element_tag_whitespace);
+    try scanner.expectNextString("  ");
     try scanner.expectNextString(null);
 
     try scanner.expectNextTokenType(.attr_name);
@@ -1648,6 +1733,10 @@ test "Scanner Element Opening Tags" {
     try scanner.expectNextString(error.BufferUnderrun);
     scanner.feedInput("o  ba");
     try scanner.expectNextString("o");
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.element_tag_whitespace);
+    try scanner.expectNextString("  ");
     try scanner.expectNextString(null);
 
     try scanner.expectNextTokenType(.attr_name);
@@ -1761,6 +1850,10 @@ test Scanner {
     try scanner.expectNextString("ar");
     try scanner.expectNextString(error.BufferUnderrun);
     scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString(null);
+
+    try scanner.expectNextTokenType(.element_tag_whitespace);
+    try scanner.expectNextString(" ");
     try scanner.expectNextString(null);
 
     try scanner.expectNextTokenType(.attr_name);

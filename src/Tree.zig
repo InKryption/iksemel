@@ -328,6 +328,7 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
             .element_open_end => {},
             .element_open_end_close_inline => current_element -= 1,
 
+            .element_tag_whitespace => assert(try rs.nextStringStream(std.io.null_writer)),
             .attr_name => {
                 const attributes: *DataRange = &tree.elements.items(.attributes)[current_element];
                 if (attributes.start == 0 and attributes.end == 0) {

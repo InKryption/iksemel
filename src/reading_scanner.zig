@@ -114,6 +114,8 @@ test ReadingScanner {
         .{ .str = "\n  Lorem ipsum\n  " },
         .{ .tt = .element_open },
         .{ .str = "bar" },
+        .{ .tt = .element_tag_whitespace },
+        .{ .str = " " },
         .{ .tt = .attr_name },
         .{ .str = "fizz" },
         .{ .tt = .attr_eql },
