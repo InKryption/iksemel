@@ -57,15 +57,13 @@ pub const AttributeData = struct {
     value: DataRange,
 
     pub inline fn typed(attr: AttributeData, tree: *const Tree) Typed {
+        const name_is_null = attr.name.start == 0 and attr.name.end == 0;
+        const value_is_null = attr.value.start == 0 and attr.value.end == 0;
         return .{
-            .name = if (attr.name.start == 0 and
-                attr.name.end == 0 //
-            ) null else tree.str_buf.items[attr.name.start..attr.name.end],
+            .name = if (name_is_null) null else tree.str_buf.items[attr.name.start..attr.name.end],
 
             .eql = attr.eql,
-            .value = if (attr.value.start == 0 and
-                attr.value.end == 0 //
-            ) null else blk: {
+            .value = if (value_is_null) null else blk: {
                 const slice = tree.attr_val_buf.slice();
                 break :blk .{
                     .len = slice.len,
