@@ -7,6 +7,7 @@ str_buf: std.ArrayListUnmanaged(u8),
 comment_buf: std.MultiArrayList(CommentData),
 pi_buf: std.ArrayListUnmanaged(ProcessingInstructionData),
 buf_ranges: std.ArrayListUnmanaged(DataRange),
+attr_val_buf: std.MultiArrayList(AttributeValueData),
 attributes_buf: std.MultiArrayList(AttributeData),
 children_buf: std.MultiArrayList(ChildData),
 elements: std.MultiArrayList(Element),
@@ -16,6 +17,7 @@ pub fn deinit(tree: *Tree, allocator: std.mem.Allocator) void {
     tree.comment_buf.deinit(allocator);
     tree.pi_buf.deinit(allocator);
     tree.buf_ranges.deinit(allocator);
+    tree.attr_val_buf.deinit(allocator);
     tree.attributes_buf.deinit(allocator);
     tree.children_buf.deinit(allocator);
     tree.elements.deinit(allocator);
@@ -28,47 +30,86 @@ pub const CommentData = union(enum) {
     invalid_end_triple_dash,
     end,
 };
+
 pub const ProcessingInstructionData = struct {
-    /// Indexes `str_data`.
+    /// Indexes `str_buf`.
     target: DataRange,
-    /// Indexes `str_data`.
+    /// Indexes `str_buf`.
     data: DataRange,
 };
-pub const AttributeData = union(enum) {
-    /// Range in `str_data`.
-    name: DataRange,
-    eql,
-    value_quote_single,
-    value_quote_double,
-    /// Range in `str_data`.
-    val_str: DataRange,
-    /// Range in `str_data`.
-    val_char_ent_ref: DataRange,
 
-    pub inline fn typed(attr_data: AttributeData, tree: *const Tree) Typed {
-        return switch (attr_data) {
-            inline //
-            .name,
-            .val_str,
-            .val_char_ent_ref,
-            => |range, tag| @unionInit(Typed, @tagName(tag), tree.str_buf.items[range.start..range.end]),
-            inline //
-            .eql,
-            .value_quote_single,
-            .value_quote_double,
-            => |_, tag| tag,
+/// `... = '...'`:   `.{ .name = .{ .start = n, .end = m }, .eql = true,  .value = .{ .start = n, .end = m }  }`
+/// `    = '...'`:   `.{ .name = .{ .start = 0, .end = 0 }, .eql = true,  .value = .{ .start = n, .end = m }  }`
+/// `...   '...'`:   `.{ .name = .{ .start = n, .end = m }, .eql = false, .value = .{ .start = n, .end = m } }`
+/// `... =      `:   `.{ .name = .{ .start = n, .end = m }, .eql = true,  .value = .{ .start = 0, .end = 0 }  }`
+/// `      '...'`:   `.{ .name = .{ .start = 0, .end = 0 }, .eql = false, .value = .{ .start = n, .end = m }  }`
+/// `    =      `:   `.{ .name = .{ .start = 0, .end = 0 }, .eql = true,  .value = .{ .start = 0, .end = 0 }  }`
+/// `...        `:   `.{ .name = .{ .start = n, .end = m }, .eql = false, .value = .{ .start = 0, .end = 0 }  }`
+pub const AttributeData = struct {
+    /// Indexes `str_buf`.
+    /// `.{ .start = 0, .end = 0 }` represents no name - this is an error.
+    name: DataRange,
+    /// Indicates whether or not there is actually an equals sign in between the value and the string.
+    /// False is an error.
+    eql: bool,
+    /// Indexes `attr_val_buf`.
+    /// `.{ .start = 0, .end = 0 }` represents no value - this is an error.
+    value: DataRange,
+
+    pub inline fn typed(attr: AttributeData, tree: *const Tree) Typed {
+        return .{
+            .name = if (attr.name.start == 0 and
+                attr.name.end == 0 //
+            ) null else tree.str_buf.items[attr.name.start..attr.name.end],
+
+            .eql = attr.eql,
+            .value = if (attr.value.start == 0 and
+                attr.value.end == 0 //
+            ) null else blk: {
+                const slice = tree.attr_val_buf.slice();
+                break :blk .{
+                    .len = slice.len,
+                    .str = slice.items(.str).ptr,
+                    .kind = slice.items(.kind).ptr,
+                };
+            },
         };
     }
+    pub const Typed = struct {
+        name: ?[]const u8,
+        eql: bool,
+        value: ?Value,
 
-    pub const Typed = union(@typeInfo(AttributeData).Union.tag_type.?) {
-        name: []const u8,
-        eql,
-        value_quote_single,
-        value_quote_double,
-        val_str: []const u8,
-        val_char_ent_ref: []const u8,
+        /// SoA version of `AttributeValueData`.
+        pub const Value = struct {
+            len: usize,
+            /// Indexes `str_buf`.
+            str: [*]const DataRange,
+            kind: [*]const AttributeValueData.Kind,
+
+            pub inline fn getStrings(value: Value) []const DataRange {
+                return value.str[0..value.len];
+            }
+            pub inline fn getKinds(value: Value) []const AttributeValueData.Kind {
+                return value.kind[0..value.len];
+            }
+        };
     };
 };
+
+pub const AttributeValueData = struct {
+    /// Indexes `str_buf`.
+    str: DataRange,
+    kind: Kind,
+
+    pub const Kind = enum {
+        /// Regular string data
+        str,
+        /// A character or entity reference.
+        ref,
+    };
+};
+
 pub const ChildData = struct {
     type: Type,
     /// Meaning depends on `type`.
@@ -77,21 +118,21 @@ pub const ChildData = struct {
     next_index: usize,
 
     pub const Type = enum {
-        /// `data_index` indexes `data_ranges`, wherein the range indexes `str_data`.
+        /// `data_index` indexes `data_ranges`, wherein the range indexes `str_buf`.
         invalid_markup,
-        /// `data_index` indexes `data_ranges`, wherein the range indexes `str_data`.
+        /// `data_index` indexes `data_ranges`, wherein the range indexes `str_buf`.
         char_ent_ref,
-        /// `data_index` indexes `data_ranges`, wherein the range indexes `str_data`.
+        /// `data_index` indexes `data_ranges`, wherein the range indexes `str_buf`.
         text_data,
-        /// `data_index` indexes `data_ranges`, wherein the range indexes `str_data`.
+        /// `data_index` indexes `data_ranges`, wherein the range indexes `str_buf`.
         cdata,
-        /// `data_index` indexes `pi_data`.
+        /// `data_index` indexes `pi_buf`.
         pi,
-        /// `data_index` indexes `data_ranges`, wherein the range indexes `comment_data`.
+        /// `data_index` indexes `data_ranges`, wherein the range indexes `comment_buf`.
         comment,
         /// `data_index` is undefined.
         invalid_cdata_stray_end,
-        /// `data_index` indexes `data_ranges`, wherein the range indexes `str_data`.
+        /// `data_index` indexes `data_ranges`, wherein the range indexes `str_buf`.
         /// The value `std.math.maxInt(usize)` is used as the null value.
         element_close,
         /// `data_index` indexes `elements`.
@@ -153,9 +194,9 @@ pub const ChildData = struct {
 };
 
 pub const Element = struct {
-    /// Range in `str_data`.
+    /// Range in `str_buf`.
     name: DataRange,
-    /// The range indexes `attributes_data`.
+    /// The range indexes `attributes_buf`.
     attributes: DataRange,
     /// `std.math.maxInt(usize)` is used as null.
     /// Indicates the first node in the list in `children_data`.
@@ -246,6 +287,7 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
         .comment_buf = .{},
         .pi_buf = .{},
         .buf_ranges = .{},
+        .attr_val_buf = .{},
         .attributes_buf = .{},
         .children_buf = .{},
         .elements = .{},
@@ -418,15 +460,18 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
                 const start = tree.str_buf.items.len;
                 assert(try rs.nextStringStream(tree.str_buf.writer(allocator))); // there should be no possible way for attribute name to not return a string.
                 const end = tree.str_buf.items.len;
-
-                try tree.attributes_buf.append(allocator, .{ .name = .{
+                const range: DataRange = .{
                     .start = start,
                     .end = end,
-                } });
-
+                };
+                try tree.attributes_buf.append(allocator, .{
+                    .name = range,
+                    .eql = false,
+                    .value = .{ .start = 0, .end = 0 },
+                });
                 attributes.end += 1;
             },
-            .attr_eql => {
+            .attr_eql => blk: {
                 const attributes: *DataRange = &tree.elements.items(.attributes)[current_element];
                 if (attributes.start == 0 and attributes.end == 0) {
                     attributes.* = .{
@@ -434,19 +479,23 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
                         .end = tree.attributes_buf.len,
                     };
                 }
-
-                try tree.attributes_buf.append(allocator, .eql);
+                {
+                    const attrs = tree.attributes_buf.items(.eql);
+                    if (!attrs[attrs.len - 1]) {
+                        attrs[attrs.len - 1] = true;
+                        break :blk;
+                    }
+                }
+                try tree.attributes_buf.append(allocator, .{
+                    .name = .{ .start = 0, .end = 0 },
+                    .eql = true,
+                    .value = .{ .start = 0, .end = 0 },
+                });
                 attributes.end += 1;
             },
             .attr_value_quote_single,
             .attr_value_quote_double,
-            => |tag| {
-                const attr_data: AttributeData = switch (tag) {
-                    .attr_value_quote_single => .value_quote_single,
-                    .attr_value_quote_double => .value_quote_double,
-                    else => unreachable,
-                };
-
+            => {
                 const attributes: *DataRange = &tree.elements.items(.attributes)[current_element];
                 if (attributes.start == 0 and attributes.end == 0) {
                     attributes.* = .{
@@ -455,30 +504,53 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
                     };
                 }
 
-                try tree.attributes_buf.append(allocator, attr_data);
-                attributes.end += 1;
+                const attr_val_range: *DataRange = blk: {
+                    try tree.attributes_buf.ensureUnusedCapacity(allocator, 1);
+                    const attr_vals = tree.attributes_buf.items(.value);
+
+                    if (attr_vals[attr_vals.len - 1].start == 0 and
+                        attr_vals[attr_vals.len - 1].end == 0 //
+                    ) {
+                        attr_vals[attr_vals.len - 1] = .{
+                            .start = tree.attr_val_buf.len,
+                            .end = tree.attr_val_buf.len,
+                        };
+                        break :blk &attr_vals[attr_vals.len - 1];
+                    } else {
+                        tree.attributes_buf.appendAssumeCapacity(.{
+                            .name = .{ .start = 0, .end = 0 },
+                            .eql = false,
+                            .value = .{
+                                .start = tree.attr_val_buf.len,
+                                .end = tree.attr_val_buf.len,
+                            },
+                        });
+                        attributes.end += 1;
+                        break :blk &attr_vals[attr_vals.len - 1];
+                    }
+                };
 
                 while (true) {
                     const data_start = tree.str_buf.items.len;
                     if (try rs.nextStringStream(tree.str_buf.writer(allocator))) {
                         const data_end = tree.str_buf.items.len;
-                        try tree.attributes_buf.append(allocator, .{ .val_str = .{
-                            .start = data_start,
-                            .end = data_end,
-                        } });
-                        attributes.end += 1;
+                        try tree.attr_val_buf.append(allocator, .{
+                            .str = .{ .start = data_start, .end = data_end },
+                            .kind = .str,
+                        });
+                        attr_val_range.end += 1;
                     }
                     switch (try rs.nextTokenType()) {
                         .attr_value_end => break,
                         .char_ent_ref => {
                             const char_ent_ref_start = tree.str_buf.items.len;
                             if (try rs.nextStringStream(tree.str_buf.writer(allocator))) {
-                                const char_ent_ref_end = tree.str_buf.items.len;
-                                try tree.attributes_buf.append(allocator, .{ .val_char_ent_ref = .{
-                                    .start = char_ent_ref_start,
-                                    .end = char_ent_ref_end,
-                                } });
-                                attributes.end += 1;
+                                const ref_end = tree.str_buf.items.len;
+                                try tree.attr_val_buf.append(allocator, .{
+                                    .str = .{ .start = char_ent_ref_start, .end = ref_end },
+                                    .kind = .ref,
+                                });
+                                attr_val_range.end += 1;
                             }
                         },
                         else => unreachable,
@@ -607,17 +679,20 @@ test Tree {
             {
                 var attr_iter = bar.attributeDataIterator(&tree);
 
-                const name = (attr_iter.next() orelse return error.TestExpectedNotNull).typed(&tree);
-                try std.testing.expectEqual(AttributeData.name, name);
-                try std.testing.expectEqualStrings("fizz", name.name);
+                const attr = (attr_iter.next() orelse return error.TestExpectedNotNull).typed(&tree);
+                try std.testing.expectEqualStrings("fizz", attr.name orelse return error.TestExpectedNotNull);
+                try std.testing.expect(attr.eql);
 
-                try std.testing.expectEqual(@as(?AttributeData, .eql), attr_iter.next());
+                const value = attr.value orelse return error.TestExpectedNotNull;
+                try std.testing.expectEqualSlices(AttributeValueData.Kind, &.{.str}, value.getKinds());
 
-                try std.testing.expectEqual(@as(?AttributeData, .value_quote_single), attr_iter.next());
-
-                const val_str = (attr_iter.next() orelse return error.TestExpectedNotNull).typed(&tree);
-                try std.testing.expectEqual(AttributeData.val_str, val_str);
-                try std.testing.expectEqualStrings("buzz", val_str.val_str);
+                var actual_strings = std.ArrayList([]const u8).init(std.testing.allocator);
+                defer actual_strings.deinit();
+                for (value.getStrings(), value.getKinds()) |range, _| {
+                    const string = tree.str_buf.items[range.start..range.end];
+                    try actual_strings.append(string);
+                }
+                try std.testing.expectEqualDeep(@as([]const []const u8, &.{"buzz"}), actual_strings.items);
 
                 try std.testing.expectEqual(@as(?AttributeData, null), attr_iter.next());
             }
