@@ -117,6 +117,16 @@ pub const TokenType = enum {
     /// Indicates '-->' after a comment.
     comment_end,
 
+    /// Encountered token '<!DOCTYPE'.
+    /// The next two tokens will be `.doctype_decl_whitespace` and then `.doctype_name`.
+    doctype_decl,
+    /// Whitespace in the midst of the tokens after `.doctype_decl`. Call `nextString`
+    /// repeatedly until it returns null to get the full whitespace.
+    doctype_decl_whitespace,
+    /// The name coming after the '<!DOCTYPE' token. Call `nextString` in order to get
+    /// its segments until it returns null.
+    doctype_name,
+
     /// The markup tag is a CDATA Section ('<![CDATA[').
     ///
     /// Call `nextString` to get the CDATA text segments until it returns `null`.
@@ -190,6 +200,8 @@ pub const TokenType = enum {
             .attr_value_quote_single,
             .attr_value_quote_double,
             .element_close,
+            .doctype_decl_whitespace,
+            .doctype_name,
             => true,
 
             .invalid_comment_end_triple_dash,
@@ -199,6 +211,7 @@ pub const TokenType = enum {
             .element_open_end_close_inline,
             .attr_eql,
             .attr_value_end,
+            .doctype_decl,
             => false,
         };
     }
@@ -298,6 +311,11 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
                     // return @call(.always_tail, nextTokenType, .{scanner});
                     return scanner.nextTokenType();
                 },
+                'D' => {
+                    scanner.state = .@"<!D";
+                    scanner.index += 1;
+                    return scanner.nextTokenType();
+                },
                 else => return .invalid_markup,
             }
         },
@@ -334,6 +352,45 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
         .@"comment,--->" => {
             scanner.state = .check_next_tok_type;
             return .invalid_comment_end_triple_dash;
+        },
+
+        inline //
+        .@"<!D",
+        .@"<!DO",
+        .@"<!DOC",
+        .@"<!DOCT",
+        .@"<!DOCTY",
+        => |tag| {
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.eof_specified) return error.BufferUnderrun;
+                return .invalid_markup;
+            }
+            const next_state: State, const expected_char: u8 = comptime switch (tag) {
+                .@"<!D" => .{ .@"<!DO", 'O' },
+                .@"<!DO" => .{ .@"<!DOC", 'C' },
+                .@"<!DOC" => .{ .@"<!DOCT", 'T' },
+                .@"<!DOCT" => .{ .@"<!DOCTY", 'Y' },
+                .@"<!DOCTY" => .{ .@"<!DOCTYP", 'P' },
+                else => unreachable,
+            };
+            if (scanner.src[scanner.index] != expected_char) return .invalid_markup;
+            scanner.state = next_state;
+            scanner.index += 1;
+            // return @call(.always_tail, nextTokenType, .{scanner});
+            return scanner.nextTokenType();
+        },
+        .@"<!DOCTYP" => {
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.eof_specified) return error.BufferUnderrun;
+                return .invalid_markup;
+            }
+            if (scanner.src[scanner.index] != 'E') return .invalid_markup;
+            scanner.state = .doctype_decl;
+            scanner.index += 1;
+            return .doctype_decl;
+        },
+        .doctype_decl => {
+            @panic("TODO");
         },
 
         inline //
@@ -453,10 +510,7 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
                     scanner.index += 1;
                     return .element_open_end_close_inline;
                 },
-                else => {
-                    scanner.state = .check_next_tok_type;
-                    return .invalid_markup;
-                },
+                else => return .invalid_markup,
             }
         },
 
@@ -764,6 +818,12 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
         },
         .@"comment,--->" => return null,
 
+        .@"<!D", .@"<!DO", .@"<!DOC", .@"<!DOCT", .@"<!DOCTY", .@"<!DOCTYP" => |tag| {
+            scanner.state = .check_next_tok_type;
+            return @tagName(tag);
+        },
+        .doctype_decl => unreachable,
+
         .@"<![", .@"<![C", .@"<![CD", .@"<![CDA", .@"<![CDAT", .@"<![CDATA" => |tag| {
             scanner.state = .check_next_tok_type;
             return @tagName(tag);
@@ -840,7 +900,10 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
             return scanner.src[str_start..scanner.index];
         },
 
-        .@"element_open,/" => unreachable,
+        .@"element_open,/" => {
+            scanner.state = .check_next_tok_type;
+            return "/";
+        },
 
         inline //
         .attr_value_sq,
@@ -936,6 +999,14 @@ const State = enum {
     @"comment,-->",
     @"comment,---",
     @"comment,--->",
+
+    @"<!D",
+    @"<!DO",
+    @"<!DOC",
+    @"<!DOCT",
+    @"<!DOCTY",
+    @"<!DOCTYP",
+    doctype_decl,
 
     @"<![",
     @"<![C",

@@ -366,6 +366,10 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
                 }
             },
 
+            .doctype_decl => @panic("TODO"),
+            .doctype_decl_whitespace => unreachable,
+            .doctype_name => unreachable,
+
             .comment => {
                 const new_range_idx = tree.buf_ranges.items.len;
                 const new_range = try tree.buf_ranges.addOne(allocator);
