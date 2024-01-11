@@ -303,13 +303,15 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
         switch (try rs.nextTokenType()) {
             .eof => break,
 
-            .invalid_markup,
+            .tag_whitespace => assert(try rs.nextStringStream(std.io.null_writer)),
+
+            .invalid_token,
             .char_ent_ref,
             .text_data,
             .cdata,
             => |tag| {
                 const child_type: ChildData.Type = switch (tag) {
-                    .invalid_markup => .invalid_markup,
+                    .invalid_token => .invalid_markup,
                     .char_ent_ref => .char_ent_ref,
                     .text_data => .text_data,
                     .cdata => .cdata,
@@ -366,9 +368,27 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
                 }
             },
 
-            .doctype_decl => @panic("TODO"),
-            .doctype_decl_whitespace => unreachable,
-            .doctype_name => unreachable,
+            .dtd => @panic("TODO"),
+
+            .dtd_token => unreachable,
+            .dtd_literal_quote_single => unreachable,
+            .dtd_literal_quote_double => unreachable,
+            .dtd_literal_end => unreachable,
+            .dtd_int_subset => unreachable,
+            .dtd_int_subset_pe_ref => unreachable,
+
+            .dtd_int_subset_element => unreachable,
+            .dtd_int_subset_element_end => unreachable,
+
+            .dtd_int_subset_entity => unreachable,
+            .dtd_int_subset_entity_end => unreachable,
+
+            .dtd_int_subset_attlist => unreachable,
+            .dtd_int_subset_attlist_end => unreachable,
+
+            .dtd_int_subset_end => unreachable,
+
+            .dtd_end => unreachable,
 
             .comment => {
                 const new_range_idx = tree.buf_ranges.items.len;
@@ -449,7 +469,6 @@ pub fn parse(src_reader: anytype, options: ParseOptions) !Tree {
             .element_open_end => {},
             .element_open_end_close_inline => current_element -= 1,
 
-            .element_tag_whitespace => assert(try rs.nextStringStream(std.io.null_writer)),
             .attr_name => {
                 const attributes: *DataRange = &tree.elements.items(.attributes)[current_element];
                 if (attributes.start == 0 and attributes.end == 0) {

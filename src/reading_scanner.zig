@@ -18,7 +18,7 @@ pub fn ReadingScanner(comptime SrcReader: type) type {
         pub fn init(src_reader: SrcReader, read_buffer: []u8) Self {
             assert(read_buffer.len != 0);
             return .{
-                .scanner = xml.Scanner.initStreaming(""),
+                .scanner = xml.Scanner.initStreaming(),
                 .src = src_reader,
                 .buffer = read_buffer,
             };
@@ -114,7 +114,7 @@ test ReadingScanner {
         .{ .str = "\n  Lorem ipsum\n  " },
         .{ .tt = .element_open },
         .{ .str = "bar" },
-        .{ .tt = .element_tag_whitespace },
+        .{ .tt = .tag_whitespace },
         .{ .str = " " },
         .{ .tt = .attr_name },
         .{ .str = "fizz" },
