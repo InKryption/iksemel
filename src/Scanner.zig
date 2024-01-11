@@ -1,11 +1,12 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const builtin = @import("builtin");
 
 const Scanner = @This();
 src: []const u8,
 index: usize,
-state: State,
 flags: Flags,
+state: State,
 
 /// The set of codepoints defined as whitespace. They are all
 /// exactly one byte in size.
@@ -82,14 +83,15 @@ pub const TokenType = enum {
     /// returns null to retrieve the whitespace.
     tag_whitespace,
 
-    /// The opening of a character/entity reference '&' in the
-    /// midst of regular text data.
-    ///
-    /// Call `nextString` repeatedly to get segments of the numeric
-    /// value or entity name token until it returns `null`.
-    ///
-    /// No validation is  performed.
-    char_ent_ref,
+    /// Encountered the '&' token, indicating the start of a character or entity reference.
+    /// Call `nextString` until it returns null to retrieve the text up until the semicolon,
+    /// or the first invalid but terminating character (whitespace, '<', another '&').
+    reference,
+    /// Encountered the ';' token, indicating the valid end of a character or entity reference.
+    reference_close,
+    /// Encountered a terminating character (or EOF) other than the ';' token after the ampersand.
+    reference_close_invalid,
+
     /// Plain non-markup text data.
     ///
     /// Call `nextString` repeatedly to get segments of the text data,
@@ -129,6 +131,51 @@ pub const TokenType = enum {
     invalid_comment_end_triple_dash,
     /// Indicates '-->' after a comment.
     comment_end,
+
+    /// The markup tag is a CDATA Section ('<![CDATA[').
+    ///
+    /// Call `nextString` to get the CDATA text segments until it returns `null`.
+    cdata,
+    /// Indicates ']]>' without a preceding '<![CDATA[' token in the midst of text data.
+    invalid_cdata_stray_end,
+
+    /// Indicates the start of an element tag `'<' Name`.
+    /// Call `nextString` to get segments of the element name until it returns `null`.
+    element_open,
+    /// Indicates '>', terminating the latest `.element_open` tag.
+    element_open_end,
+    /// Indicates '/>', terminating the latest `.element_open` tag and closing
+    /// the element inline.
+    element_open_end_close_inline,
+
+    /// Indicates an attribute name.
+    /// Call `nextString` to get the segments of the attribute name until it returns `null`.
+    /// No validation is performed on the name, it is simply a string of non-whitespace,
+    /// non-quote and non-equals symbols. Invalid invariants are left to the caller to
+    /// verify.
+    attr_name,
+    /// Indicates '=' in an element tag.
+    attr_eql,
+    /// Indicates the start of a quoted attribute value (single quotes).
+    /// Call `nextTokenType`, and then also `nextString` as appropriate, until
+    /// encountering `.attr_value_end`.
+    attr_value_quote_single,
+    /// Indicates the start of a quoted attribute value (double quotes).
+    /// Equivalent to `.attr_value_quote_single`, save for the quotes.
+    attr_value_quote_double,
+    /// Encountered the '<' token inside an attribute value.
+    invalid_attr_value_left_angle_bracket,
+    /// Indicates the end of a quoted attribute value, with whether
+    /// it's a single or double quote being based off of the latest
+    /// opened attribute value quote.
+    attr_value_end,
+
+    /// Indicates the start of an element closing tag `'</' Name`.
+    /// Call `nextString` to get segments of the element name until it returns `null`.
+    /// Unlike for `element_open`, this may include whitespace after the name,
+    /// and any other stray characters before the '>', for the purposes of allowing
+    /// the caller to handle invalid invariants of `</.*>`.
+    element_close,
 
     /// Encountered token '<!DOCTYPE'.
     /// The next two tokens should be `.tag_whitespace` and then `.dtd_name`,
@@ -170,63 +217,15 @@ pub const TokenType = enum {
     /// Indicates the end of the DTD (the '>' token).
     dtd_end,
 
-    /// The markup tag is a CDATA Section ('<![CDATA[').
-    ///
-    /// Call `nextString` to get the CDATA text segments until it returns `null`.
-    cdata,
-    /// Indicates ']]>' without a preceding '<![CDATA[' token.
-    /// This can be ignored, and resume calling `nextString` as described for `.text_data`,
-    /// hence the error may be reported at a later time when it can be discerned
-    /// into possibly more useful information, or grouped with other errors.
-    invalid_cdata_stray_end,
-
-    /// Indicates the start of an element tag `'<' Name`.
-    /// Call `nextString` to get segments of the element name until it returns `null`.
-    element_open,
-    /// Indicates '>', terminating the latest `.element_open` tag.
-    element_open_end,
-    /// Indicates '/>', terminating the latest `.element_open` tag and closing
-    /// the element inline.
-    element_open_end_close_inline,
-
-    /// Indicates an attribute name.
-    /// Call `nextString` to get the segments of the attribute name until it returns `null`.
-    /// No validation is performed on the name, it is simply a string of non-whitespace,
-    /// non-quote and non-equals symbols. Invalid invariants are left to the caller to
-    /// verify.
-    attr_name,
-    /// Indicates '=' in an element tag.
-    attr_eql,
-    /// Indicates the start of a quoted attribute value (single quotes).
-    /// First call `nextString` until it returns null, and then `nextTokenType` will
-    /// either return:
-    /// * `.attr_value_end`: indicating the end of the attribute value.
-    /// * `.char_ent_ref`: indicating a character/entity reference in the attribute value,
-    ///   which should be tokenized as normal, before calling `nextString` again, and
-    ///   repeating the process.
-    attr_value_quote_single,
-    /// Indicates the start of a quoted attribute value (double quotes).
-    /// Equivalent to `.attr_value_quote_single`, save for the quotes.
-    attr_value_quote_double,
-    /// Indicates the end of a quoted attribute value, with whether
-    /// it's a single or double quote being based off of the latest
-    /// opened attribute value quote.
-    attr_value_end,
-
-    /// Indicates the start of an element closing tag `'</' Name`.
-    /// Call `nextString` to get segments of the element name until it returns `null`.
-    /// Unlike for `element_open`, this may include whitespace after the name,
-    /// and any other stray characters before the '>', for the purposes of allowing
-    /// the caller to handle invalid invariants of `</.*>`.
-    element_close,
-
     /// Whether or not this token should be followed up by a call to `nextString`.
     /// `.eof` returns false.
     pub inline fn hasString(token_type: TokenType) bool {
         return switch (token_type) {
             .invalid_token,
             .tag_whitespace,
-            .char_ent_ref,
+
+            .reference,
+
             .text_data,
             .pi_target,
             .pi_data,
@@ -236,8 +235,6 @@ pub const TokenType = enum {
 
             .element_open,
             .attr_name,
-            .attr_value_quote_single,
-            .attr_value_quote_double,
             .element_close,
 
             .dtd_token,
@@ -251,9 +248,15 @@ pub const TokenType = enum {
             .comment_end,
             .invalid_cdata_stray_end,
 
+            .reference_close,
+            .reference_close_invalid,
+
             .element_open_end,
             .element_open_end_close_inline,
             .attr_eql,
+            .attr_value_quote_single,
+            .attr_value_quote_double,
+            .invalid_attr_value_left_angle_bracket,
             .attr_value_end,
 
             .dtd,
@@ -295,7 +298,13 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
                 '&' => {
                     scanner.state = .ref_segment;
                     scanner.index += 1;
-                    return .char_ent_ref;
+                    return .reference;
+                },
+                ']' => {
+                    scanner.state = .@"text_data,]";
+                    scanner.index += 1;
+                    // return @call(.always_tail, nextTokenType, .{scanner});
+                    return scanner.nextTokenType();
                 },
                 else => {
                     scanner.state = .text_data;
@@ -305,14 +314,40 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
         },
 
         .text_data => unreachable,
-        .@"text_data,]" => unreachable,
-        .@"text_data,]]" => unreachable,
-        .@"text_data,]]>" => unreachable,
-        .text_data_end => unreachable,
-        .text_data_end_eof => unreachable,
-
-        .ref_segment => unreachable,
-        .ref_semicolon => unreachable,
+        .@"text_data,]" => {
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.flags.eof_specified) return error.BufferUnderrun;
+                return .text_data;
+            }
+            switch (scanner.src[scanner.index]) {
+                ']' => {
+                    scanner.state = .@"text_data,]]";
+                    scanner.index += 1;
+                    // return @call(.always_tail, nextTokenType, .{scanner});
+                    return scanner.nextTokenType();
+                },
+                else => return .text_data,
+            }
+        },
+        .@"text_data,]]" => {
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.flags.eof_specified) return error.BufferUnderrun;
+                return .text_data;
+            }
+            switch (scanner.src[scanner.index]) {
+                '>' => {
+                    scanner.state = .check_next_tok_type;
+                    scanner.index += 1;
+                    return .invalid_cdata_stray_end;
+                },
+                ']' => return .text_data,
+                else => return .text_data,
+            }
+        },
+        .@"text_data,]]>" => {
+            scanner.state = .check_next_tok_type;
+            return .invalid_cdata_stray_end;
+        },
 
         .markup_tag => {
             if (scanner.index == scanner.src.len) {
@@ -407,6 +442,166 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
         .@"comment,--->" => {
             scanner.state = .check_next_tok_type;
             return .invalid_comment_end_triple_dash;
+        },
+
+        inline //
+        .@"<![",
+        .@"<![C",
+        .@"<![CD",
+        .@"<![CDA",
+        .@"<![CDAT",
+        => |tag| {
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.flags.eof_specified) return error.BufferUnderrun;
+                return .invalid_token;
+            }
+            const next_state: State, const expected_char: u8 = comptime switch (tag) {
+                .@"<![" => .{ .@"<![C", 'C' },
+                .@"<![C" => .{ .@"<![CD", 'D' },
+                .@"<![CD" => .{ .@"<![CDA", 'A' },
+                .@"<![CDA" => .{ .@"<![CDAT", 'T' },
+                .@"<![CDAT" => .{ .@"<![CDATA", 'A' },
+                else => unreachable,
+            };
+            if (scanner.src[scanner.index] != expected_char) return .invalid_token;
+            scanner.state = next_state;
+            scanner.index += 1;
+            // return @call(.always_tail, nextTokenType, .{scanner});
+            return scanner.nextTokenType();
+        },
+        .@"<![CDATA" => {
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.flags.eof_specified) return error.BufferUnderrun;
+                return .invalid_token;
+            }
+            if (scanner.src[scanner.index] != '[') return .invalid_token;
+            scanner.state = .cdata;
+            scanner.index += 1;
+            return .cdata;
+        },
+        .cdata => unreachable,
+        .@"cdata,]" => unreachable,
+        .@"cdata,]]" => unreachable,
+
+        .element_open => {
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.flags.eof_specified) return error.BufferUnderrun;
+                scanner.state = .check_next_tok_type;
+                return .eof;
+            }
+
+            switch (scanner.src[scanner.index]) {
+                '=' => {
+                    scanner.index += 1;
+                    return .attr_eql;
+                },
+                '\'' => {
+                    scanner.state = .attr_val_sq;
+                    scanner.index += 1;
+                    return .attr_value_quote_single;
+                },
+                '\"' => {
+                    scanner.state = .attr_val_dq;
+                    scanner.index += 1;
+                    return .attr_value_quote_double;
+                },
+                '>' => {
+                    scanner.state = .check_next_tok_type;
+                    scanner.index += 1;
+                    return .element_open_end;
+                },
+                '/' => {
+                    scanner.state = .@"element_open,/";
+                    scanner.index += 1;
+                    return scanner.nextTokenType();
+                },
+                else => {
+                    if (std.mem.indexOfScalar(u8, whitespace_set, scanner.src[scanner.index]) != null) {
+                        scanner.state = .element_open_whitespace;
+                        return .tag_whitespace;
+                    }
+                    scanner.state = .attr_name;
+                    return .attr_name;
+                },
+            }
+        },
+        .element_open_whitespace => unreachable,
+        .attr_name => unreachable,
+        .@"element_open,/" => {
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.flags.eof_specified) return error.BufferUnderrun;
+                return .invalid_token;
+            }
+            switch (scanner.src[scanner.index]) {
+                '>' => {
+                    scanner.state = .check_next_tok_type;
+                    scanner.index += 1;
+                    return .element_open_end_close_inline;
+                },
+                else => return .invalid_token,
+            }
+        },
+
+        .@"</" => unreachable,
+        .element_close_end => unreachable,
+
+        inline //
+        .attr_val_sq,
+        .attr_val_dq,
+        => |tag| {
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.flags.eof_specified) return error.BufferUnderrun;
+                scanner.state = .check_next_tok_type;
+                return .eof;
+            }
+            const matching_quote: u8 = comptime switch (tag) {
+                .attr_val_sq => '\'',
+                .attr_val_dq => '\"',
+                else => unreachable,
+            };
+            switch (scanner.src[scanner.index]) {
+                '<' => {
+                    scanner.index += 1;
+                    return .invalid_attr_value_left_angle_bracket;
+                },
+                '&' => {
+                    scanner.state = comptime switch (tag) {
+                        .attr_val_sq => .attr_val_sq_ref_segment,
+                        .attr_val_dq => .attr_val_dq_ref_segment,
+                        else => unreachable,
+                    };
+                    scanner.index += 1;
+                    return .reference;
+                },
+                matching_quote => {
+                    scanner.state = .element_open;
+                    scanner.index += 1;
+                    return .attr_value_end;
+                },
+                else => return .text_data,
+            }
+        },
+
+        inline //
+        .attr_val_sq_ref_segment,
+        .attr_val_dq_ref_segment,
+        .ref_segment,
+        => |tag| {
+            scanner.state = comptime switch (tag) {
+                .attr_val_sq_ref_segment => .attr_val_sq,
+                .attr_val_dq_ref_segment => .attr_val_dq,
+                .ref_segment => .check_next_tok_type,
+                else => unreachable,
+            };
+            if (scanner.index == scanner.src.len) {
+                assert(scanner.flags.eof_specified);
+                return .reference_close_invalid;
+            }
+            if (scanner.src[scanner.index] != ';') {
+                return .reference_close_invalid;
+            }
+            scanner.index += 1;
+            return .reference_close;
         },
 
         inline //
@@ -734,130 +929,6 @@ pub fn nextTokenType(scanner: *Scanner) NextTokenTypeError!TokenType {
         .dtd_int_subset_attlist => @panic("TODO"),
         .dtd_int_subset_attlist_whitespace => unreachable,
         .dtd_int_subset_attlist_token => unreachable,
-
-        inline //
-        .@"<![",
-        .@"<![C",
-        .@"<![CD",
-        .@"<![CDA",
-        .@"<![CDAT",
-        => |tag| {
-            if (scanner.index == scanner.src.len) {
-                if (!scanner.flags.eof_specified) return error.BufferUnderrun;
-                return .invalid_token;
-            }
-            const next_state: State, const expected_char: u8 = comptime switch (tag) {
-                .@"<![" => .{ .@"<![C", 'C' },
-                .@"<![C" => .{ .@"<![CD", 'D' },
-                .@"<![CD" => .{ .@"<![CDA", 'A' },
-                .@"<![CDA" => .{ .@"<![CDAT", 'T' },
-                .@"<![CDAT" => .{ .@"<![CDATA", 'A' },
-                else => unreachable,
-            };
-            if (scanner.src[scanner.index] != expected_char) return .invalid_token;
-            scanner.state = next_state;
-            scanner.index += 1;
-            // return @call(.always_tail, nextTokenType, .{scanner});
-            return scanner.nextTokenType();
-        },
-        .@"<![CDATA" => {
-            if (scanner.index == scanner.src.len) {
-                if (!scanner.flags.eof_specified) return error.BufferUnderrun;
-                return .invalid_token;
-            }
-            if (scanner.src[scanner.index] != '[') return .invalid_token;
-            scanner.state = .cdata;
-            scanner.index += 1;
-            return .cdata;
-        },
-        .cdata => unreachable,
-        .@"cdata,]" => unreachable,
-        .@"cdata,]]" => unreachable,
-
-        .element_open => unreachable,
-        .element_open_name_end => {
-            try scanner.checkForEof();
-            if (std.mem.indexOfScalar(u8, whitespace_set, scanner.src[scanner.index]) != null) {
-                scanner.state = .element_open_name_ws;
-                return .tag_whitespace;
-            }
-            switch (scanner.src[scanner.index]) {
-                else => {
-                    if (std.mem.indexOfScalar(u8, whitespace_set, scanner.src[scanner.index]) != null) {
-                        scanner.state = .element_open_name_ws;
-                        return .tag_whitespace;
-                    }
-                    scanner.state = .attr_name;
-                    return .attr_name;
-                },
-                '=' => {
-                    scanner.index += 1;
-                    return .attr_eql;
-                },
-                '\'' => {
-                    scanner.state = .attr_value_sq;
-                    scanner.index += 1;
-                    return .attr_value_quote_single;
-                },
-                '\"' => {
-                    scanner.state = .attr_value_dq;
-                    scanner.index += 1;
-                    return .attr_value_quote_double;
-                },
-                '>' => {
-                    scanner.state = .check_next_tok_type;
-                    scanner.index += 1;
-                    return .element_open_end;
-                },
-                '/' => {
-                    scanner.state = .@"element_open,/";
-                    scanner.index += 1;
-                    return scanner.nextTokenType();
-                },
-            }
-        },
-        .element_open_name_ws => unreachable,
-
-        .attr_name => unreachable,
-
-        .attr_val_sq_ref_segment => unreachable,
-        .attr_val_dq_ref_segment => unreachable,
-        .attr_val_sq_ref_semicolon => unreachable,
-        .attr_val_dq_ref_semicolon => unreachable,
-
-        .attr_value_sq => unreachable,
-        .attr_value_dq => unreachable,
-
-        inline //
-        .attr_value_sq_ref,
-        .attr_value_dq_ref,
-        => |itag| {
-            scanner.state = comptime switch (itag) {
-                .attr_value_sq_ref => .attr_val_sq_ref_segment,
-                .attr_value_dq_ref => .attr_val_dq_ref_segment,
-                else => unreachable,
-            };
-            return .char_ent_ref;
-        },
-        .attr_value_end => {
-            scanner.state = .element_open_name_end;
-            return .attr_value_end;
-        },
-
-        .@"element_open,/" => {
-            try scanner.checkForEof();
-            switch (scanner.src[scanner.index]) {
-                '>' => {
-                    scanner.state = .check_next_tok_type;
-                    scanner.index += 1;
-                    return .element_open_end_close_inline;
-                },
-                else => return .invalid_token,
-            }
-        },
-
-        .@"</" => unreachable,
-        .element_close_end => unreachable,
     }
 }
 
@@ -872,67 +943,44 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
         .check_next_tok_type => return null,
 
         .text_data => {
-            try scanner.checkForEof();
-            const str_start = scanner.index;
-            while (std.mem.indexOfAnyPos(u8, scanner.src, scanner.index, &.{ '&', '<', ']' })) |idx| {
-                scanner.index = idx;
-                switch (scanner.src[scanner.index]) {
-                    '<', '&' => {
-                        if (str_start != idx) break;
-                        scanner.state = .text_data_end;
-                        // return @call(.always_tail, nextString, .{scanner});
-                        return scanner.nextString();
-                    },
-                    ']' => {},
-                    else => unreachable,
-                }
-
-                scanner.index += 1;
-                if (scanner.index == scanner.src.len) {
-                    if (scanner.flags.eof_specified) {
-                        scanner.state = .text_data_end;
-                        break;
-                    }
-                    scanner.state = .@"text_data,]";
-                    // if (str_start == idx) return @call(.always_tail, nextString, .{scanner});
-                    if (str_start == idx) return scanner.nextString();
-                    return scanner.src[str_start..idx];
-                }
-                if (scanner.src[scanner.index] != ']') continue;
-
-                scanner.index += 1;
-                if (scanner.index == scanner.src.len) {
-                    if (scanner.flags.eof_specified) {
-                        scanner.state = .text_data_end;
-                        break;
-                    }
-                    scanner.state = .@"text_data,]]";
-                    if (str_start == idx) return scanner.nextString();
-                    return scanner.src[str_start..idx];
-                }
-                if (scanner.src[scanner.index] != '>') continue;
-                scanner.state = .@"text_data,]]>";
-                scanner.index += 1;
-                if (str_start != idx) return scanner.src[str_start..idx];
-                // return @call(.always_tail, nextString, .{scanner});
-                return scanner.nextString();
-            } else {
-                scanner.state = .text_data_end_eof;
-                scanner.index = scanner.src.len;
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.flags.eof_specified) return error.BufferUnderrun;
+                scanner.state = .check_next_tok_type;
+                return null;
             }
-            return scanner.src[str_start..scanner.index];
+            const str_start = scanner.index;
+            const str_end = std.mem.indexOfAnyPos(u8, scanner.src, scanner.index, &.{ '&', ']', '<' }) orelse {
+                scanner.index = scanner.src.len;
+                return scanner.src[str_start..];
+            };
+            scanner.index = str_end;
+            switch (scanner.src[scanner.index]) {
+                '&', '<' => {
+                    scanner.state = .check_next_tok_type;
+                    if (str_start == str_end) return null;
+                    return scanner.src[str_start..str_end];
+                },
+                ']' => {
+                    scanner.state = .@"text_data,]";
+                    scanner.index += 1;
+                    if (str_start != str_end) return scanner.src[str_start..str_end];
+                    // return @call(.always_tail, nextString, .{scanner});
+                    return scanner.nextString();
+                },
+                else => unreachable,
+            }
         },
         .@"text_data,]" => {
             if (scanner.index == scanner.src.len) {
                 if (!scanner.flags.eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data_end;
+                scanner.state = .check_next_tok_type;
                 return "]";
             }
             if (scanner.src[scanner.index] != ']') {
                 scanner.state = .text_data;
                 return "]";
             }
-            scanner.state = .@"cdata,]]";
+            scanner.state = .@"text_data,]]";
             scanner.index += 1;
             // return @call(.always_tail, nextString, .{scanner});
             return scanner.nextString();
@@ -940,14 +988,14 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
         .@"text_data,]]" => {
             if (scanner.index == scanner.src.len) {
                 if (!scanner.flags.eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data_end;
+                scanner.state = .check_next_tok_type;
                 return "]]";
             }
             switch (scanner.src[scanner.index]) {
                 '>' => {
-                    scanner.state = .text_data;
+                    scanner.state = .@"text_data,]]>";
                     scanner.index += 1;
-                    return "]]>";
+                    return null;
                 },
                 ']' => {
                     scanner.index += 1;
@@ -959,65 +1007,54 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
                 },
             }
         },
-        .@"text_data,]]>" => {
-            if (!scanner.flags.eof_specified and scanner.index == scanner.src.len) return error.BufferUnderrun;
-            scanner.state = if (scanner.flags.eof_specified and scanner.index == scanner.src.len) .text_data_end else .text_data;
-            return "]]>";
-        },
-        .text_data_end => {
-            scanner.state = .check_next_tok_type;
-            return null;
-        },
-        .text_data_end_eof => {
-            if (scanner.index != scanner.src.len) {
-                scanner.state = .text_data;
-                // return @call(.always_tail, nextString, .{scanner});
-                return scanner.nextString();
-            }
-            if (scanner.flags.eof_specified) {
+        .@"text_data,]]>" => unreachable,
+
+        .attr_val_sq,
+        .attr_val_dq,
+        => |tag| {
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.flags.eof_specified) return error.BufferUnderrun;
                 scanner.state = .check_next_tok_type;
                 return null;
             }
-            return error.BufferUnderrun;
+            const matching_quote: u8 = switch (tag) {
+                .attr_val_sq => '\'',
+                .attr_val_dq => '\"',
+                else => unreachable,
+            };
+            const str_start = scanner.index;
+            const str_end = std.mem.indexOfAnyPos(u8, scanner.src, scanner.index, whitespace_set ++ &[_]u8{ '<', '&', matching_quote }) orelse {
+                scanner.index = scanner.src.len;
+                return scanner.src[str_start..];
+            };
+            scanner.index = str_end;
+            if (str_start == str_end) return null;
+            return scanner.src[str_start..str_end];
         },
 
         inline //
-        .ref_segment,
         .attr_val_sq_ref_segment,
         .attr_val_dq_ref_segment,
-        => |itag| {
-            try scanner.checkForEof();
-            const segment: State, const semicolon: State = switch (itag) {
-                .ref_segment => .{ .ref_segment, .ref_semicolon },
-                .attr_val_sq_ref_segment => .{ .attr_val_sq_ref_segment, .attr_val_sq_ref_semicolon },
-                .attr_val_dq_ref_segment => .{ .attr_val_dq_ref_segment, .attr_val_dq_ref_semicolon },
+        .ref_segment,
+        => |tag| {
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.flags.eof_specified) return error.BufferUnderrun;
+                return null;
+            }
+            const terminating_set: []const u8 = comptime switch (tag) {
+                .attr_val_sq_ref_segment => whitespace_set ++ &[_]u8{ ';', '\'', '<', '&' },
+                .attr_val_dq_ref_segment => whitespace_set ++ &[_]u8{ ';', '\"', '<', '&' },
+                .ref_segment => whitespace_set ++ &[_]u8{ ';', '<', '&', ']' },
                 else => unreachable,
             };
-
             const str_start = scanner.index;
-            const semicolon_idx = std.mem.indexOfScalarPos(u8, scanner.src, scanner.index, ';');
-
-            scanner.state = if (semicolon_idx == null) segment else semicolon;
-            scanner.index = if (semicolon_idx) |idx| idx else scanner.src.len;
-            if (str_start != scanner.index) return scanner.src[str_start..scanner.index];
-            // return @call(.always_tail, nextString, .{scanner});
-            return scanner.nextString();
-        },
-
-        inline //
-        .ref_semicolon,
-        .attr_val_sq_ref_semicolon,
-        .attr_val_dq_ref_semicolon,
-        => |itag| {
-            assert(scanner.src[scanner.index] == ';');
-            scanner.state = comptime switch (itag) {
-                .ref_semicolon => .check_next_tok_type,
-                .attr_val_sq_ref_semicolon => .attr_value_sq,
-                .attr_val_dq_ref_semicolon => .attr_value_dq,
-                else => unreachable,
+            const str_end = std.mem.indexOfAnyPos(u8, scanner.src, scanner.index, terminating_set) orelse {
+                scanner.index = scanner.src.len;
+                return scanner.src[str_start..];
             };
-            scanner.index += 1;
-            return null;
+            scanner.index = str_end;
+            if (str_start == str_end) return null;
+            return scanner.src[str_start..str_end];
         },
 
         .markup_tag => {
@@ -1161,6 +1198,111 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
             }
         },
         .@"comment,--->" => return null,
+
+        .@"<![", .@"<![C", .@"<![CD", .@"<![CDA", .@"<![CDAT", .@"<![CDATA" => |tag| {
+            scanner.state = .check_next_tok_type;
+            return @tagName(tag);
+        },
+        .cdata => {
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.flags.eof_specified) return error.BufferUnderrun;
+                scanner.state = .check_next_tok_type;
+                return null;
+            }
+            const str_start = scanner.index;
+            while (std.mem.indexOfScalarPos(u8, scanner.src, scanner.index, ']')) |idx| {
+                scanner.state = .@"cdata,]";
+                scanner.index = idx + 1;
+                if (str_start != idx) return scanner.src[str_start..idx];
+                return scanner.nextString();
+            }
+            scanner.index = scanner.src.len;
+            return scanner.src[str_start..];
+        },
+        .@"cdata,]" => {
+            try scanner.checkForEof();
+            if (scanner.src[scanner.index] != ']') {
+                scanner.state = .cdata;
+                return "]";
+            }
+            scanner.state = .@"cdata,]]";
+            scanner.index += 1;
+            // return @call(.always_tail, nextString, .{scanner});
+            return scanner.nextString();
+        },
+        .@"cdata,]]" => {
+            try scanner.checkForEof();
+            switch (scanner.src[scanner.index]) {
+                '>' => {
+                    scanner.state = .check_next_tok_type;
+                    scanner.index += 1;
+                    return null;
+                },
+                ']' => {
+                    scanner.index += 1;
+                    return "]";
+                },
+                else => {
+                    scanner.state = .cdata;
+                    return "]]";
+                },
+            }
+        },
+
+        .element_open, .attr_name => {
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.flags.eof_specified) return error.BufferUnderrun;
+                scanner.state = .check_next_tok_type;
+                return null;
+            }
+            const str_start = scanner.index;
+            const str_end = std.mem.indexOfAnyPos(u8, scanner.src, scanner.index, whitespace_set ++ &[_]u8{ '/', '>', '=', '\'', '\"' }) orelse {
+                scanner.index = scanner.src.len;
+                return scanner.src[str_start..];
+            };
+            scanner.state = .element_open;
+            scanner.index = str_end;
+            if (str_start == str_end) return null;
+            return scanner.src[str_start..str_end];
+        },
+        .element_open_whitespace => {
+            const str_start = scanner.index;
+            const str_end = std.mem.indexOfNonePos(u8, scanner.src, scanner.index, whitespace_set) orelse {
+                scanner.index = scanner.src.len;
+                return scanner.src[str_start..];
+            };
+            scanner.index = str_end;
+            if (str_start != str_end) return scanner.src[str_start..str_end];
+            scanner.state = .element_open;
+            return null;
+        },
+
+        .@"element_open,/" => {
+            scanner.state = .element_open;
+            return "/";
+        },
+
+        .@"</" => {
+            if (scanner.index == scanner.src.len) {
+                if (!scanner.flags.eof_specified) return error.BufferUnderrun;
+                scanner.state = .check_next_tok_type;
+                return null;
+            }
+            const str_start = scanner.index;
+            const idx = std.mem.indexOfScalarPos(u8, scanner.src, scanner.index, '>') orelse {
+                scanner.index = scanner.src.len;
+                return scanner.src[str_start..];
+            };
+            scanner.state = .element_close_end;
+            scanner.index = idx + 1;
+            if (str_start != idx) return scanner.src[str_start..idx];
+            // return @call(.always_tail, nextString, .{scanner});
+            return scanner.nextString();
+        },
+        .element_close_end => {
+            scanner.state = .check_next_tok_type;
+            return null;
+        },
 
         .@"<!D", .@"<!DO", .@"<!DOC", .@"<!DOCT", .@"<!DOCTY", .@"<!DOCTYP" => |tag| {
             scanner.state = .check_next_tok_type;
@@ -1327,143 +1469,6 @@ pub fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
         .dtd_int_subset_attlist => unreachable,
         .dtd_int_subset_attlist_whitespace => unreachable,
         .dtd_int_subset_attlist_token => unreachable,
-
-        .@"<![", .@"<![C", .@"<![CD", .@"<![CDA", .@"<![CDAT", .@"<![CDATA" => |tag| {
-            scanner.state = .check_next_tok_type;
-            return @tagName(tag);
-        },
-        .cdata => {
-            if (scanner.index == scanner.src.len) {
-                if (!scanner.flags.eof_specified) return error.BufferUnderrun;
-                scanner.state = .check_next_tok_type;
-                return null;
-            }
-            const str_start = scanner.index;
-            while (std.mem.indexOfScalarPos(u8, scanner.src, scanner.index, ']')) |idx| {
-                scanner.state = .@"cdata,]";
-                scanner.index = idx + 1;
-                if (str_start != idx) return scanner.src[str_start..idx];
-                return scanner.nextString();
-            }
-            scanner.index = scanner.src.len;
-            return scanner.src[str_start..];
-        },
-        .@"cdata,]" => {
-            try scanner.checkForEof();
-            if (scanner.src[scanner.index] != ']') {
-                scanner.state = .cdata;
-                return "]";
-            }
-            scanner.state = .@"cdata,]]";
-            scanner.index += 1;
-            // return @call(.always_tail, nextString, .{scanner});
-            return scanner.nextString();
-        },
-        .@"cdata,]]" => {
-            try scanner.checkForEof();
-            switch (scanner.src[scanner.index]) {
-                '>' => {
-                    scanner.state = .check_next_tok_type;
-                    scanner.index += 1;
-                    return null;
-                },
-                ']' => {
-                    scanner.index += 1;
-                    return "]";
-                },
-                else => {
-                    scanner.state = .cdata;
-                    return "]]";
-                },
-            }
-        },
-
-        .element_open, .attr_name => {
-            try scanner.checkForEof();
-            const str_start = scanner.index;
-            while (scanner.index != scanner.src.len) : (scanner.index += 1) {
-                const idx = scanner.index;
-                const char = scanner.src[idx];
-
-                // terminate on '=', '\'', and '\"' as well and let caller
-                // handle the fact that it doesn't make sense.
-                const terminators = whitespace_set ++ &[_]u8{
-                    '/',  '>',  '=',
-                    '\'', '\"',
-                };
-                if (std.mem.indexOfScalar(u8, terminators, char) == null) continue;
-                scanner.state = .element_open_name_end;
-                break;
-            }
-            if (str_start != scanner.index) return scanner.src[str_start..scanner.index];
-            return null;
-        },
-        .element_open_name_end => return null,
-        .element_open_name_ws => {
-            assert(std.mem.indexOfScalar(u8, whitespace_set, scanner.src[scanner.index]) != null);
-            const str_start = scanner.index;
-            scanner.state = .element_open_name_end;
-            scanner.index = std.mem.indexOfNonePos(u8, scanner.src, scanner.index, whitespace_set) orelse scanner.src.len;
-            if (str_start == scanner.index) return null;
-            return scanner.src[str_start..scanner.index];
-        },
-
-        .@"element_open,/" => {
-            scanner.state = .check_next_tok_type;
-            return "/";
-        },
-
-        .attr_value_sq,
-        .attr_value_dq,
-        => |tag| {
-            try scanner.checkForEof();
-            const matching_quote: u8, const attr_val_ref: State = switch (tag) {
-                .attr_value_sq => .{ '\'', .attr_value_sq_ref },
-                .attr_value_dq => .{ '\"', .attr_value_dq_ref },
-                else => unreachable,
-            };
-            const str_start = scanner.index;
-            while (std.mem.indexOfAnyPos(u8, scanner.src, scanner.index, &.{ '&', matching_quote })) |idx| {
-                scanner.index = idx;
-                if (scanner.src[idx] != matching_quote) {
-                    assert(scanner.src[idx] == '&');
-                    scanner.state = attr_val_ref;
-                    scanner.index += 1;
-                    if (str_start != idx) return scanner.src[str_start..idx];
-                    // return @call(.always_tail, nextString, .{scanner});
-                    return scanner.nextString();
-                }
-                scanner.state = .attr_value_end;
-                scanner.index += 1;
-                if (str_start != idx) return scanner.src[str_start..idx];
-                // return @call(.always_tail, nextString, .{scanner});
-                return scanner.nextString();
-            }
-            scanner.index = scanner.src.len;
-            return scanner.src[str_start..scanner.index];
-        },
-        .attr_value_sq_ref,
-        .attr_value_dq_ref,
-        => return null,
-        .attr_value_end => return null,
-
-        .@"</" => {
-            try scanner.checkForEof();
-            const str_start = scanner.index;
-            const idx = std.mem.indexOfScalarPos(u8, scanner.src, scanner.index, '>') orelse {
-                scanner.index = scanner.src.len;
-                return scanner.src[str_start..];
-            };
-            scanner.state = .element_close_end;
-            scanner.index = idx + 1;
-            if (str_start != idx) return scanner.src[str_start..idx];
-            // return @call(.always_tail, nextString, .{scanner});
-            return scanner.nextString();
-        },
-        .element_close_end => {
-            scanner.state = .check_next_tok_type;
-            return null;
-        },
     }
 }
 
@@ -1485,8 +1490,6 @@ const State = enum {
     @"text_data,]",
     @"text_data,]]",
     @"text_data,]]>",
-    text_data_end,
-    text_data_end_eof,
 
     markup_tag,
 
@@ -1505,6 +1508,31 @@ const State = enum {
     @"comment,-->",
     @"comment,---",
     @"comment,--->",
+
+    @"<![",
+    @"<![C",
+    @"<![CD",
+    @"<![CDA",
+    @"<![CDAT",
+    @"<![CDATA",
+    cdata,
+    @"cdata,]",
+    @"cdata,]]",
+
+    element_open,
+    element_open_whitespace,
+    @"element_open,/",
+
+    attr_val_sq_ref_segment,
+    attr_val_dq_ref_segment,
+    ref_segment,
+
+    attr_name,
+    attr_val_sq,
+    attr_val_dq,
+
+    @"</",
+    element_close_end,
 
     @"<!D",
     @"<!DO",
@@ -1548,39 +1576,6 @@ const State = enum {
     dtd_int_subset_attlist,
     dtd_int_subset_attlist_whitespace,
     dtd_int_subset_attlist_token,
-
-    @"<![",
-    @"<![C",
-    @"<![CD",
-    @"<![CDA",
-    @"<![CDAT",
-    @"<![CDATA",
-    cdata,
-    @"cdata,]",
-    @"cdata,]]",
-
-    element_open,
-    element_open_name_end,
-    element_open_name_ws,
-    @"element_open,/",
-
-    attr_val_sq_ref_segment,
-    attr_val_dq_ref_segment,
-    ref_segment,
-
-    attr_val_sq_ref_semicolon,
-    attr_val_dq_ref_semicolon,
-    ref_semicolon,
-
-    attr_name,
-    attr_value_sq,
-    attr_value_dq,
-    attr_value_sq_ref,
-    attr_value_dq_ref,
-    attr_value_end,
-
-    @"</",
-    element_close_end,
 };
 
 fn testingPrint(comptime fmt_str: []const u8, args: anytype) void {
@@ -1594,24 +1589,12 @@ fn testingPrint(comptime fmt_str: []const u8, args: anytype) void {
 fn expectNextTokenType(scanner: *Scanner, expected: NextTokenTypeError!TokenType) !void {
     switch (scanner.state) {
         .text_data,
-        .text_data_end,
-        .text_data_end_eof,
-        .ref_segment,
-        .ref_semicolon,
         .pi_target,
         .pi_target_qm,
         .pi_data_qm,
         .comment,
         .cdata,
-        .element_open,
-        .element_open_name_ws,
         .attr_name,
-        .attr_val_sq_ref_segment,
-        .attr_val_dq_ref_segment,
-        .attr_val_sq_ref_semicolon,
-        .attr_val_dq_ref_semicolon,
-        .attr_value_sq,
-        .attr_value_dq,
         .element_close_end,
         => |tag| {
             testingPrint("expected to be able to obtain next token type, but state is .{}\n", .{std.zig.fmtId(@tagName(tag))});
@@ -1954,6 +1937,349 @@ test "Scanner Comments" {
     try scanner.expectNextTokenType(.eof);
 }
 
+test "Scanner CDATA Sections" {
+    var scanner: Scanner = undefined;
+
+    scanner = Scanner.initComplete("<![CDATA[" ++ "]]>");
+    try scanner.expectNextTokenType(.cdata);
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("<![CDATA[" ++ " foo " ++ "]]>");
+    try scanner.expectNextTokenType(.cdata);
+    try scanner.expectNextStringSeq(&.{ " foo ", null });
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("<![CDATA[" ++ "]]" ++ "]]>");
+    try scanner.expectNextTokenType(.cdata);
+    try scanner.expectNextStringSeq(&.{ "]", "]", null });
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("<![CDATA[" ++ "]]]" ++ "]]>");
+    try scanner.expectNextTokenType(.cdata);
+    try scanner.expectNextStringSeq(&.{ "]", "]", "]", null });
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("<![CDATA[" ++ "]>" ++ "]]>");
+    try scanner.expectNextTokenType(.cdata);
+    try scanner.expectNextStringSeq(&.{ "]", ">", null });
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initStreaming();
+    for ("<![CDATA[") |c| {
+        try scanner.expectNextTokenType(error.BufferUnderrun);
+        scanner.feedInput(&.{c});
+    }
+    try scanner.expectNextTokenType(.cdata);
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput("foo");
+    try scanner.expectNextString("foo");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput("]]");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput("]");
+    try scanner.expectNextString("]");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput("]]]");
+    try scanner.expectNextStringSeq(&.{ "]", "]", "]", error.BufferUnderrun }); // from the first to `feedInput`s, not the latest one
+    scanner.feedInput(">");
+    try scanner.expectNextString(null);
+    scanner.feedEof();
+    try scanner.expectNextTokenType(.eof);
+}
+
+test "Scanner Character/Entity References" {
+    var scanner: Scanner = undefined;
+
+    scanner = Scanner.initComplete("&abc;");
+    try scanner.expectNextTokenType(.reference);
+    try scanner.expectNextStringSeq(&.{ "abc", null });
+    try scanner.expectNextTokenType(.reference_close);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("&;");
+    try scanner.expectNextTokenType(.reference);
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.reference_close);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("&");
+    try scanner.expectNextTokenStringSeq(.reference, &.{null});
+    try scanner.expectNextTokenType(.reference_close_invalid);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("&foo");
+    try scanner.expectNextTokenStringSeq(.reference, &.{ "foo", null });
+    try scanner.expectNextTokenType(.reference_close_invalid);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("&foo ");
+    try scanner.expectNextTokenStringSeq(.reference, &.{ "foo", null });
+    try scanner.expectNextTokenType(.reference_close_invalid);
+    try scanner.expectNextTokenStringSeq(.text_data, &.{ " ", null });
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initStreaming();
+    scanner.feedInput("&");
+    try scanner.expectNextTokenType(.reference);
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(";");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.reference_close);
+    try scanner.expectNextTokenType(error.BufferUnderrun);
+    scanner.feedEof();
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initStreaming();
+    scanner.feedInput("&");
+    try scanner.expectNextTokenType(.reference);
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput("foo");
+    try scanner.expectNextString("foo");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput("bar");
+    try scanner.expectNextString("bar");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(";");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.reference_close);
+    try scanner.expectNextTokenType(error.BufferUnderrun);
+    scanner.feedEof();
+    try scanner.expectNextTokenType(.eof);
+}
+
+test "Scanner Text Data" {
+    var scanner: Scanner = undefined;
+
+    scanner = Scanner.initComplete("");
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initStreaming();
+    scanner.feedEof();
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("foo bar");
+    try scanner.expectNextTokenType(.text_data);
+    try scanner.expectNextString("foo bar");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("foo bar");
+    try scanner.expectNextTokenType(.text_data);
+    try scanner.expectNextString("foo bar");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initStreaming();
+    scanner.feedInput("foo");
+    try scanner.expectNextTokenType(.text_data);
+    try scanner.expectNextString("foo");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput(" bar");
+    try scanner.expectNextString(" bar");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedEof();
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("]]>");
+    try scanner.expectNextTokenType(.invalid_cdata_stray_end);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initStreaming();
+    scanner.feedInput("]]>");
+    try scanner.expectNextTokenType(.invalid_cdata_stray_end);
+    try scanner.expectNextTokenType(error.BufferUnderrun);
+    scanner.feedInput("foo");
+    try scanner.expectNextTokenType(.text_data);
+    try scanner.expectNextString("foo");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedEof();
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("foo]]> bar");
+    try scanner.expectNextTokenStringSeq(.text_data, &.{ "foo", null });
+    try scanner.expectNextTokenType(.invalid_cdata_stray_end);
+    try scanner.expectNextTokenStringSeq(.text_data, &.{ " bar", null });
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initStreaming();
+    scanner.feedInput("]");
+    try scanner.expectNextTokenType(error.BufferUnderrun);
+    scanner.feedEof();
+    try scanner.expectNextTokenStringSeq(.text_data, &.{ "]", null });
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initStreaming();
+    scanner.feedInput("]]");
+    try scanner.expectNextTokenType(error.BufferUnderrun);
+    scanner.feedEof();
+    try scanner.expectNextTokenStringSeq(.text_data, &.{ "]]", null });
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initStreaming();
+    scanner.feedInput("]]>");
+    try scanner.expectNextTokenType(.invalid_cdata_stray_end);
+    try scanner.expectNextTokenType(error.BufferUnderrun);
+    scanner.feedEof();
+    try scanner.expectNextTokenType(.eof);
+}
+
+test "Scanner Element Closing Tags" {
+    var scanner: Scanner = undefined;
+
+    scanner = Scanner.initComplete("</foo>");
+    try scanner.expectNextTokenType(.element_close);
+    try scanner.expectNextString("foo");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("</foo >");
+    try scanner.expectNextTokenType(.element_close);
+    try scanner.expectNextString("foo ");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("</ >");
+    try scanner.expectNextTokenType(.element_close);
+    try scanner.expectNextString(" ");
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("</>");
+    try scanner.expectNextTokenType(.element_close);
+    try scanner.expectNextString(null);
+    try scanner.expectNextTokenType(.eof);
+}
+
+test "Scanner Element Opening Tags" {
+    var scanner: Scanner = undefined;
+
+    scanner = Scanner.initComplete("<foo  />");
+    try scanner.expectNextTokenStringSeq(.element_open, &.{ "foo", null });
+    try scanner.expectNextTokenStringSeq(.tag_whitespace, &.{ "  ", null });
+    try scanner.expectNextTokenType(.element_open_end_close_inline);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("<foo  >");
+    try scanner.expectNextTokenStringSeq(.element_open, &.{ "foo", null });
+    try scanner.expectNextTokenStringSeq(.tag_whitespace, &.{ "  ", null });
+    try scanner.expectNextTokenType(.element_open_end);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("<foo  / >");
+    try scanner.expectNextTokenStringSeq(.element_open, &.{ "foo", null });
+    try scanner.expectNextTokenStringSeq(.tag_whitespace, &.{ "  ", null });
+    try scanner.expectNextTokenStringSeq(.invalid_token, &.{ "/", null });
+    try scanner.expectNextTokenStringSeq(.tag_whitespace, &.{ " ", null });
+    try scanner.expectNextTokenType(.element_open_end);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("<foo bar='fizz'>");
+    try scanner.expectNextTokenStringSeq(.element_open, &.{ "foo", null });
+    try scanner.expectNextTokenStringSeq(.tag_whitespace, &.{ " ", null });
+    try scanner.expectNextTokenStringSeq(.attr_name, &.{ "bar", null });
+    try scanner.expectNextTokenType(.attr_eql);
+    try scanner.expectNextTokenType(.attr_value_quote_single);
+    try scanner.expectNextTokenStringSeq(.text_data, &.{ "fizz", null });
+    try scanner.expectNextTokenType(.attr_value_end);
+    try scanner.expectNextTokenType(.element_open_end);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("<foo bar = 'fizz' >");
+    try scanner.expectNextTokenStringSeq(.element_open, &.{ "foo", null });
+    try scanner.expectNextTokenStringSeq(.tag_whitespace, &.{ " ", null });
+    try scanner.expectNextTokenStringSeq(.attr_name, &.{ "bar", null });
+    try scanner.expectNextTokenStringSeq(.tag_whitespace, &.{ " ", null });
+    try scanner.expectNextTokenType(.attr_eql);
+    try scanner.expectNextTokenStringSeq(.tag_whitespace, &.{ " ", null });
+    try scanner.expectNextTokenType(.attr_value_quote_single);
+    try scanner.expectNextTokenStringSeq(.text_data, &.{ "fizz", null });
+    try scanner.expectNextTokenType(.attr_value_end);
+    try scanner.expectNextTokenStringSeq(.tag_whitespace, &.{ " ", null });
+    try scanner.expectNextTokenType(.element_open_end);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("<foo bar=\"fizz\">");
+    try scanner.expectNextTokenStringSeq(.element_open, &.{ "foo", null });
+    try scanner.expectNextTokenStringSeq(.tag_whitespace, &.{ " ", null });
+    try scanner.expectNextTokenStringSeq(.attr_name, &.{ "bar", null });
+    try scanner.expectNextTokenType(.attr_eql);
+    try scanner.expectNextTokenType(.attr_value_quote_double);
+    try scanner.expectNextStringSeq(&.{ "fizz", null });
+    try scanner.expectNextTokenType(.attr_value_end);
+    try scanner.expectNextTokenType(.element_open_end);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("<foo bar='&baz;'>");
+    try scanner.expectNextTokenStringSeq(.element_open, &.{ "foo", null });
+    try scanner.expectNextTokenStringSeq(.tag_whitespace, &.{ " ", null });
+    try scanner.expectNextTokenStringSeq(.attr_name, &.{ "bar", null });
+    try scanner.expectNextTokenType(.attr_eql);
+    try scanner.expectNextTokenType(.attr_value_quote_single);
+    try scanner.expectNextTokenType(.reference);
+    try scanner.expectNextStringSeq(&.{ "baz", null });
+    try scanner.expectNextTokenType(.reference_close);
+    try scanner.expectNextTokenType(.attr_value_end);
+    try scanner.expectNextTokenType(.element_open_end);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initComplete("<foo  bar='fizz&baz;buzz'>");
+    try scanner.expectNextTokenStringSeq(.element_open, &.{ "foo", null });
+    try scanner.expectNextTokenStringSeq(.tag_whitespace, &.{ "  ", null });
+    try scanner.expectNextTokenStringSeq(.attr_name, &.{ "bar", null });
+    try scanner.expectNextTokenType(.attr_eql);
+    try scanner.expectNextTokenType(.attr_value_quote_single);
+    try scanner.expectNextTokenStringSeq(.text_data, &.{ "fizz", null });
+    try scanner.expectNextTokenType(.reference);
+    try scanner.expectNextStringSeq(&.{ "baz", null });
+    try scanner.expectNextTokenType(.reference_close);
+    try scanner.expectNextTokenStringSeq(.text_data, &.{ "buzz", null });
+    try scanner.expectNextTokenType(.attr_value_end);
+    try scanner.expectNextTokenType(.element_open_end);
+    try scanner.expectNextTokenType(.eof);
+
+    scanner = Scanner.initStreaming();
+    scanner.feedInput("<fo");
+    try scanner.expectNextTokenType(.element_open);
+    try scanner.expectNextStringSeq(&.{ "fo", error.BufferUnderrun });
+    scanner.feedInput("o  ba");
+    try scanner.expectNextStringSeq(&.{ "o", null });
+
+    try scanner.expectNextTokenStringSeq(.tag_whitespace, &.{ "  ", null });
+
+    try scanner.expectNextTokenStringSeq(.attr_name, &.{ "ba", error.BufferUnderrun });
+    scanner.feedInput("r='fi");
+    try scanner.expectNextStringSeq(&.{ "r", null });
+
+    try scanner.expectNextTokenType(.attr_eql);
+
+    try scanner.expectNextTokenType(.attr_value_quote_single);
+    try scanner.expectNextTokenStringSeq(.text_data, &.{ "fi", error.BufferUnderrun });
+    scanner.feedInput("zz&ba");
+    try scanner.expectNextStringSeq(&.{ "zz", null });
+
+    try scanner.expectNextTokenType(.reference);
+    try scanner.expectNextString("ba");
+    try scanner.expectNextString(error.BufferUnderrun);
+    scanner.feedInput("z;bu");
+    try scanner.expectNextStringSeq(&.{ "z", null });
+    try scanner.expectNextTokenType(.reference_close);
+
+    try scanner.expectNextTokenStringSeq(.text_data, &.{ "bu", error.BufferUnderrun });
+    scanner.feedInput("zz'");
+    try scanner.expectNextStringSeq(&.{ "zz", null });
+    try scanner.expectNextTokenType(.attr_value_end);
+
+    try scanner.expectNextTokenType(error.BufferUnderrun);
+    scanner.feedInput(">");
+    try scanner.expectNextTokenType(.element_open_end);
+    try scanner.expectNextTokenType(error.BufferUnderrun);
+    scanner.feedEof();
+    try scanner.expectNextTokenType(.eof);
+}
+
 test "Scanner Document Type Definition" {
     var scanner: Scanner = undefined;
 
@@ -2082,444 +2408,12 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextTokenType(.dtd_int_subset_end);
     try scanner.expectNextTokenType(.dtd_end);
     try scanner.expectNextTokenType(.eof);
-}
 
-test "Scanner CDATA Sections" {
-    var scanner: Scanner = undefined;
-
-    scanner = Scanner.initComplete("<![CDATA[" ++ "]]>");
-    try scanner.expectNextTokenType(.cdata);
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("<![CDATA[" ++ " foo " ++ "]]>");
-    try scanner.expectNextTokenType(.cdata);
-    try scanner.expectNextStringSeq(&.{ " foo ", null });
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("<![CDATA[" ++ "]]" ++ "]]>");
-    try scanner.expectNextTokenType(.cdata);
-    try scanner.expectNextStringSeq(&.{ "]", "]", null });
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("<![CDATA[" ++ "]]]" ++ "]]>");
-    try scanner.expectNextTokenType(.cdata);
-    try scanner.expectNextStringSeq(&.{ "]", "]", "]", null });
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("<![CDATA[" ++ "]>" ++ "]]>");
-    try scanner.expectNextTokenType(.cdata);
-    try scanner.expectNextStringSeq(&.{ "]", ">", null });
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initStreaming();
-    for ("<![CDATA[") |c| {
-        try scanner.expectNextTokenType(error.BufferUnderrun);
-        scanner.feedInput(&.{c});
-    }
-    try scanner.expectNextTokenType(.cdata);
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedInput("foo");
-    try scanner.expectNextString("foo");
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedInput("]]");
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedInput("]");
-    try scanner.expectNextString("]");
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedInput("]]]");
-    try scanner.expectNextStringSeq(&.{ "]", "]", "]", error.BufferUnderrun }); // from the first to `feedInput`s, not the latest one
-    scanner.feedInput(">");
-    try scanner.expectNextString(null);
-    scanner.feedEof();
-    try scanner.expectNextTokenType(.eof);
-}
-
-test "Scanner Character/Entity References" {
-    var scanner: Scanner = undefined;
-
-    scanner = Scanner.initComplete("&abc;");
-    try scanner.expectNextTokenType(.char_ent_ref);
-    try scanner.expectNextStringSeq(&.{ "abc", null });
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("&;");
-    try scanner.expectNextTokenType(.char_ent_ref);
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("&");
-    try scanner.expectNextTokenType(.char_ent_ref);
-    try scanner.expectNextString(error.PrematureEof);
-
-    scanner = Scanner.initComplete("&foo");
-    try scanner.expectNextTokenType(.char_ent_ref);
-    try scanner.expectNextString("foo");
-    try scanner.expectNextString(error.PrematureEof);
-
-    scanner = Scanner.initStreaming();
-    scanner.feedInput("&");
-    try scanner.expectNextTokenType(.char_ent_ref);
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedInput(";");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(error.BufferUnderrun);
-    scanner.feedEof();
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initStreaming();
-    scanner.feedInput("&");
-    try scanner.expectNextTokenType(.char_ent_ref);
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedInput("foo");
-    try scanner.expectNextString("foo");
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedInput("bar");
-    try scanner.expectNextString("bar");
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedInput(";");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(error.BufferUnderrun);
-    scanner.feedEof();
-    try scanner.expectNextTokenType(.eof);
-}
-
-test "Scanner Text Data" {
-    var scanner: Scanner = undefined;
-
-    scanner = Scanner.initComplete("");
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initStreaming();
-    scanner.feedEof();
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("foo bar");
-    try scanner.expectNextTokenType(.text_data);
-    try scanner.expectNextString("foo bar");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("foo bar");
-    try scanner.expectNextTokenType(.text_data);
-    try scanner.expectNextString("foo bar");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initStreaming();
-    scanner.feedInput("foo");
-    try scanner.expectNextTokenType(.text_data);
-    try scanner.expectNextString("foo");
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedInput(" bar");
-    try scanner.expectNextString(" bar");
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedEof();
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("]]>");
-    try scanner.expectNextTokenType(.text_data);
-    try scanner.expectNextString("]]>");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initStreaming();
-    scanner.feedInput("]]>");
-    try scanner.expectNextTokenType(.text_data);
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedInput("foo");
-    try scanner.expectNextString("]]>");
-    try scanner.expectNextString("foo");
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedEof();
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("foo]]> bar");
-    try scanner.expectNextTokenType(.text_data);
-    try scanner.expectNextString("foo");
-    try scanner.expectNextString("]]>");
-    try scanner.expectNextString(" bar");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initStreaming();
-    scanner.feedInput("]");
-    try scanner.expectNextTokenType(.text_data);
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedEof();
-    try scanner.expectNextString("]");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initStreaming();
-    scanner.feedInput("]]");
-    try scanner.expectNextTokenType(.text_data);
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedEof();
-    try scanner.expectNextString("]]");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initStreaming();
-    scanner.feedInput("]]>");
-    try scanner.expectNextTokenType(.text_data);
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedEof();
-    try scanner.expectNextString("]]>");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initStreaming();
-    scanner.feedInput("]]");
-    try scanner.expectNextTokenType(.text_data);
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedEof();
-    try scanner.expectNextString("]]");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.eof);
-}
-
-test "Scanner Element Closing Tags" {
-    var scanner: Scanner = undefined;
-
-    scanner = Scanner.initComplete("</foo>");
-    try scanner.expectNextTokenType(.element_close);
-    try scanner.expectNextString("foo");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("</foo >");
-    try scanner.expectNextTokenType(.element_close);
-    try scanner.expectNextString("foo ");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("</ >");
-    try scanner.expectNextTokenType(.element_close);
-    try scanner.expectNextString(" ");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("</>");
-    try scanner.expectNextTokenType(.element_close);
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.eof);
-}
-
-test "Scanner Element Opening Tags" {
-    var scanner: Scanner = undefined;
-
-    scanner = Scanner.initComplete("<foo  />");
-    try scanner.expectNextTokenType(.element_open);
-    try scanner.expectNextString("foo");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.tag_whitespace);
-    try scanner.expectNextString("  ");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.element_open_end_close_inline);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("<foo  >");
-    try scanner.expectNextTokenType(.element_open);
-    try scanner.expectNextString("foo");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.tag_whitespace);
-    try scanner.expectNextString("  ");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.element_open_end);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("<foo bar='fizz'>");
-    try scanner.expectNextTokenType(.element_open);
-    try scanner.expectNextString("foo");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.tag_whitespace);
-    try scanner.expectNextString(" ");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.attr_name);
-    try scanner.expectNextString("bar");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.attr_eql);
-
-    try scanner.expectNextTokenType(.attr_value_quote_single);
-    try scanner.expectNextString("fizz");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.attr_value_end);
-
-    try scanner.expectNextTokenType(.element_open_end);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("<foo bar = 'fizz' >");
-    try scanner.expectNextTokenType(.element_open);
-    try scanner.expectNextString("foo");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.tag_whitespace);
-    try scanner.expectNextString(" ");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.attr_name);
-    try scanner.expectNextString("bar");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.tag_whitespace);
-    try scanner.expectNextString(" ");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.attr_eql);
-
-    try scanner.expectNextTokenType(.tag_whitespace);
-    try scanner.expectNextString(" ");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.attr_value_quote_single);
-    try scanner.expectNextString("fizz");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.attr_value_end);
-
-    try scanner.expectNextTokenType(.tag_whitespace);
-    try scanner.expectNextString(" ");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.element_open_end);
-
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("<foo bar=\"fizz\">");
-    try scanner.expectNextTokenType(.element_open);
-    try scanner.expectNextString("foo");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.tag_whitespace);
-    try scanner.expectNextString(" ");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.attr_name);
-    try scanner.expectNextString("bar");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.attr_eql);
-
-    try scanner.expectNextTokenType(.attr_value_quote_double);
-    try scanner.expectNextString("fizz");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.attr_value_end);
-
-    try scanner.expectNextTokenType(.element_open_end);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("<foo bar='&baz;'>");
-    try scanner.expectNextTokenType(.element_open);
-    try scanner.expectNextString("foo");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.tag_whitespace);
-    try scanner.expectNextString(" ");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.attr_name);
-    try scanner.expectNextString("bar");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.attr_eql);
-
-    try scanner.expectNextTokenType(.attr_value_quote_single);
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.char_ent_ref);
-    try scanner.expectNextString("baz");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.attr_value_end);
-
-    try scanner.expectNextTokenType(.element_open_end);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initComplete("<foo  bar='fizz&baz;buzz'>");
-    try scanner.expectNextTokenType(.element_open);
-    try scanner.expectNextString("foo");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.tag_whitespace);
-    try scanner.expectNextString("  ");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.attr_name);
-    try scanner.expectNextString("bar");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.attr_eql);
-
-    try scanner.expectNextTokenType(.attr_value_quote_single);
-    try scanner.expectNextString("fizz");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.char_ent_ref);
-    try scanner.expectNextString("baz");
-    try scanner.expectNextString(null);
-    try scanner.expectNextString("buzz");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.attr_value_end);
-
-    try scanner.expectNextTokenType(.element_open_end);
-    try scanner.expectNextTokenType(.eof);
-
-    scanner = Scanner.initStreaming();
-    scanner.feedInput("<fo");
-    try scanner.expectNextTokenType(.element_open);
-    try scanner.expectNextString("fo");
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedInput("o  ba");
-    try scanner.expectNextString("o");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.tag_whitespace);
-    try scanner.expectNextString("  ");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.attr_name);
-    try scanner.expectNextString("ba");
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedInput("r='fi");
-    try scanner.expectNextString("r");
-    try scanner.expectNextString(null);
-
-    try scanner.expectNextTokenType(.attr_eql);
-
-    try scanner.expectNextTokenType(.attr_value_quote_single);
-    try scanner.expectNextString("fi");
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedInput("zz&ba");
-    try scanner.expectNextString("zz");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.char_ent_ref);
-    try scanner.expectNextString("ba");
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedInput("z;bu");
-    try scanner.expectNextString("z");
-    try scanner.expectNextString(null);
-    try scanner.expectNextString("bu");
-    try scanner.expectNextString(error.BufferUnderrun);
-    scanner.feedInput("zz'");
-    try scanner.expectNextString("zz");
-    try scanner.expectNextString(null);
-    try scanner.expectNextTokenType(.attr_value_end);
-
-    try scanner.expectNextTokenType(error.BufferUnderrun);
-    scanner.feedInput(">");
-    try scanner.expectNextTokenType(.element_open_end);
-    try scanner.expectNextTokenType(error.BufferUnderrun);
-    scanner.feedEof();
-    try scanner.expectNextTokenType(.eof);
+    scanner = Scanner.initComplete(
+        \\<!DOCTYPE [
+        \\  <!ELEMENT foo
+        \\]>
+    );
 }
 
 test Scanner {
