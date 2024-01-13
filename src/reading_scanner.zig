@@ -3,9 +3,9 @@ const assert = std.debug.assert;
 
 const xml = @import("xml.zig");
 
-pub inline fn readingScanner(src_reader: anytype, read_buffer: []u8) ReadingScanner(@TypeOf(src_reader)) {
+pub inline fn readingScanner(src_reader: anytype, read_buffer: []u8, options: xml.Scanner.InitOptions) ReadingScanner(@TypeOf(src_reader)) {
     const Rs = ReadingScanner(@TypeOf(src_reader));
-    return Rs.init(src_reader, read_buffer);
+    return Rs.init(src_reader, read_buffer, options);
 }
 
 pub fn ReadingScanner(comptime SrcReader: type) type {
@@ -15,24 +15,23 @@ pub fn ReadingScanner(comptime SrcReader: type) type {
         buffer: []u8,
         const Self = @This();
 
-        pub fn init(src_reader: SrcReader, read_buffer: []u8) Self {
+        pub inline fn init(src_reader: SrcReader, read_buffer: []u8, options: xml.Scanner.InitOptions) Self {
             assert(read_buffer.len != 0);
             return .{
-                .scanner = xml.Scanner.initStreaming(),
+                .scanner = xml.Scanner.initStreaming(options),
                 .src = src_reader,
                 .buffer = read_buffer,
             };
         }
 
-        pub const Error = xml.Scanner.EofError || SrcReader.Error;
+        pub const Error = SrcReader.Error;
+
         pub fn nextTokenType(rs: *Self) Error!xml.Scanner.TokenType {
             assert(rs.buffer.len != 0);
-            return rs.scanner.nextTokenType() catch |err_1| return switch (err_1) {
-                error.PrematureEof => |e| e,
+            return rs.scanner.nextType() catch |err_1| return switch (err_1) {
                 error.BufferUnderrun => while (true) {
                     try rs.feed();
-                    break rs.scanner.nextTokenType() catch |err_2| return switch (err_2) {
-                        error.PrematureEof => |e| e,
+                    break rs.scanner.nextType() catch |err_2| return switch (err_2) {
                         error.BufferUnderrun => continue,
                     };
                 },
@@ -43,11 +42,9 @@ pub fn ReadingScanner(comptime SrcReader: type) type {
         pub fn nextString(rs: *Self) Error!?[]const u8 {
             assert(rs.buffer.len != 0);
             return rs.scanner.nextString() catch |err_1| return switch (err_1) {
-                error.PrematureEof => |e| e,
                 error.BufferUnderrun => while (true) {
                     try rs.feed();
                     break rs.scanner.nextString() catch |err_2| return switch (err_2) {
-                        error.PrematureEof => |e| e,
                         error.BufferUnderrun => continue,
                     };
                 },
@@ -101,23 +98,47 @@ test ReadingScanner {
     };
 
     const expected_tt_or_str_list: []const TokTypeOrStr = &.{
-        .{ .tt = .pi_target },               .{ .str = "xml" },
-        .{ .tt = .pi_data },                 .{ .str = " version=\"1.0\" encoding=\"UTF-8\"" },
-        .{ .tt = .text_data },               .{ .str = "\n\n" },
-        .{ .tt = .element_open },            .{ .str = "foo" },
-        .{ .tt = .element_open_end },        .{ .tt = .text_data },
-        .{ .str = "\n  Lorem ipsum\n  " },   .{ .tt = .element_open },
-        .{ .str = "bar" },                   .{ .tt = .tag_whitespace },
-        .{ .str = " " },                     .{ .tt = .attr_name },
-        .{ .str = "fizz" },                  .{ .tt = .attr_eql },
-        .{ .tt = .attr_value_quote_single }, .{ .tt = .text_data },
-        .{ .str = "buzz" },                  .{ .tt = .attr_value_end },
-        .{ .tt = .element_open_end },        .{ .tt = .element_open },
-        .{ .str = "baz" },                   .{ .tt = .element_open_end_close_inline },
-        .{ .tt = .element_close },           .{ .str = "bar" },
-        .{ .tt = .text_data },               .{ .str = "\n" },
-        .{ .tt = .element_close },           .{ .str = "foo" },
-        .{ .tt = .text_data },               .{ .str = "\n" },
+        .{ .tt = .pi },
+        .{ .tt = .text_data },
+        .{ .str = "xml version=\"1.0\" encoding=\"UTF-8\"" },
+        .{ .tt = .pi_end },
+        .{ .tt = .text_data },
+        .{ .str = "\n\n" },
+        .{ .tt = .element_open },
+        .{ .tt = .tag_token },
+        .{ .str = "foo" },
+        .{ .tt = .tag_basic_close },
+        .{ .tt = .text_data },
+        .{ .str = "\n  Lorem ipsum\n  " },
+        .{ .tt = .element_open },
+        .{ .tt = .tag_token },
+        .{ .str = "bar" },
+        .{ .tt = .tag_whitespace },
+        .{ .str = " " },
+        .{ .tt = .tag_token },
+        .{ .str = "fizz" },
+        .{ .tt = .attr_eql },
+        .{ .tt = .quote_single },
+        .{ .tt = .text_data },
+        .{ .str = "buzz" },
+        .{ .tt = .quote_single },
+        .{ .tt = .tag_basic_close },
+        .{ .tt = .element_open },
+        .{ .tt = .tag_token },
+        .{ .str = "baz" },
+        .{ .tt = .tag_slash_close },
+        .{ .tt = .element_close },
+        .{ .tt = .tag_token },
+        .{ .str = "bar" },
+        .{ .tt = .tag_basic_close },
+        .{ .tt = .text_data },
+        .{ .str = "\n" },
+        .{ .tt = .element_close },
+        .{ .tt = .tag_token },
+        .{ .str = "foo" },
+        .{ .tt = .tag_basic_close },
+        .{ .tt = .text_data },
+        .{ .str = "\n" },
         .{ .tt = .eof },
     };
     var fbs = std.io.fixedBufferStream(
@@ -131,7 +152,7 @@ test ReadingScanner {
     );
 
     var rs_buffer: [2]u8 = undefined;
-    var rs = readingScanner(fbs.reader(), &rs_buffer);
+    var rs = readingScanner(fbs.reader(), &rs_buffer, .{});
 
     var tt_or_str_list = std.ArrayList(TokTypeOrStr).init(std.testing.allocator);
     defer tt_or_str_list.deinit();
