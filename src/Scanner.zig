@@ -1,3 +1,6 @@
+//! The lowest level API for interpreting an XML document.
+//! While simple, it provides little to no safety in the event of API misuse.
+
 const std = @import("std");
 const assert = std.debug.assert;
 const builtin = @import("builtin");
@@ -5,64 +8,25 @@ const builtin = @import("builtin");
 const Scanner = @This();
 src: []const u8,
 index: usize,
-/// *Some* of the fields in this struct may be modified directly; read
-/// the associated doc comments. This is for fairly niche use cases.
-flags: Flags,
 state: State,
-
-/// The set of codepoints defined as whitespace. They are all
-/// exactly one byte in size.
-pub const whitespace_set: []const u8 = &[_]u8{
-    '\u{20}',
-    '\u{09}',
-    '\u{0D}',
-    '\u{0A}',
-};
-
-pub const InitOptions = struct {
-    comment: Comment = .normal,
-    doc_type: DocType = .{
-        .recover_on_incomplete_token = false,
-    },
-
-    pub const Comment = enum {
-        /// '--' doesn't terminate the comment, and '--->'
-        /// terminates the comment text.
-        normal,
-        /// '--' will be assumed to end the comment.
-        dash_dash_terminates,
-        /// '--->' will be tokenized as '--', and
-        /// then '->' as part of the comment text.
-        ignore_end_triple_dash,
-    };
-
-    pub const DocType = packed struct {
-        /// After receiving `nextType() = .invalid_token`, where `nextString()` returns
-        /// an incomplete slice of '<!DOCTYPE' (starting from '<!D' up to '<!DOCTYP'),
-        /// if this is true, it scanning will continue as though it was a complete token.
-        recover_on_incomplete_token: bool,
-    };
-};
+eof_specified: bool,
 
 /// Initializes the `Scanner` with the full input.
 /// Calling `feedInput` or `feedEof` is illegal.
-pub inline fn initComplete(options: InitOptions, src: []const u8) Scanner {
-    var scanner = Scanner.initStreaming(options);
+/// Treating `error.BufferUnderrun` as `unreachable` is safe.
+pub inline fn initComplete(src: []const u8) Scanner {
+    var scanner = Scanner.initStreaming();
     scanner.feedInput(src);
     scanner.feedEof();
     return scanner;
 }
 
-pub inline fn initStreaming(options: InitOptions) Scanner {
+pub inline fn initStreaming() Scanner {
     return .{
         .src = "",
         .index = 0,
         .state = .text_data,
-        .flags = .{
-            .eof_specified = false,
-            .comment = options.comment,
-            .doc_type = options.doc_type,
-        },
+        .eof_specified = false,
     };
 }
 
@@ -75,8 +39,8 @@ pub inline fn initStreaming(options: InitOptions) Scanner {
 /// The memory pointed to by `src` must remain valid until
 /// the next call to `feedInput`, or until the last call to
 /// `nextString` after a call to `feedEof`.
-pub fn feedInput(scanner: *Scanner, src: []const u8) void {
-    assert(!scanner.flags.eof_specified);
+pub inline fn feedInput(scanner: *Scanner, src: []const u8) void {
+    assert(!scanner.eof_specified);
     assert(scanner.index == scanner.src.len);
     scanner.src = src;
     scanner.index = 0;
@@ -87,9 +51,48 @@ pub fn feedInput(scanner: *Scanner, src: []const u8) void {
 /// encountering `error.BufferUnderrun`.
 /// Subsequent calls to this are illegal after the first call.
 pub fn feedEof(scanner: *Scanner) void {
-    assert(!scanner.flags.eof_specified);
+    assert(!scanner.eof_specified);
     assert(scanner.index == 0 or scanner.index == scanner.src.len);
-    scanner.flags.eof_specified = true;
+    scanner.eof_specified = true;
+}
+
+pub const BufferError = error{BufferUnderrun};
+
+pub const NextTypeError = BufferError;
+/// Returns type of the next token. There are two possibilities:
+/// * The token type represents a builtin syntactic construct for which
+///   there is no further textual information to retrieve.
+///   In this case, the caller should simply call `nextType` again to
+///   obtain the following token type.
+///
+/// * The token indicates some textual information which isn't a builtin
+///   syntactic construct, like identifiers in markup and textual data.
+///   In this case, the caller should call `nextSrc` until it returns null.
+///   The caller may interchangeably use `nextString` and `nextSrc`.
+pub inline fn nextType(scanner: *Scanner) NextTypeError!TokenType {
+    return scanner.nextTypeImpl();
+}
+
+pub const NextSrcError = BufferError;
+/// The returned token reference is either a range referencing the current `scanner.src` value,
+/// which will remain valid for as long as the referenced slice is valid and accessible.
+/// It should be called repeatedly until it returns `null`. If `error.BufferUnderrun` is returned,
+/// the caller should invoke `feedInput`, and then proceed.
+pub inline fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
+    return scanner.nextSrcImpl();
+}
+
+pub const NextStringError = NextSrcError;
+/// Helper function for returning the result of `nextSrc` directly as a string.
+/// The returned string is either a string literal or a reference to `scanner.src`,
+/// meaning it is only guaranteed to remain valid for as long as `scanner.src` is.
+/// All other behaviour remains equivalent to `nextSrc`.
+pub inline fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
+    const maybe_tok_src = try scanner.nextSrc();
+    return switch (maybe_tok_src orelse return null) {
+        .range => |range| scanner.src[range.start..range.end],
+        .literal => |literal| literal.toStr(),
+    };
 }
 
 pub const TokenType = enum {
@@ -128,8 +131,6 @@ pub const TokenType = enum {
 
     /// Indicates '=' in an element tag.
     attr_eql,
-
-    // -- complex tokens --
 
     /// The '\'' token.
     ///
@@ -283,46 +284,42 @@ pub const TokenType = enum {
     /// Ends DTD Internal Subset, or is an invalid token if not preceeded by a matching `.dtd_int_subset` token.
     dtd_int_subset_end,
 
-    /// Whether or not this token should be followed up by a call to `nextSrc`/`nextString`.
+    /// Whether or not the token represents any text to be returned by `nextSrc`/`nextString`.
     pub inline fn hasString(token_type: TokenType) bool {
         return switch (token_type) {
-            .eof => false,
-
-            .invalid_token => true,
-
+            .invalid_token,
             .text_data,
             .tag_whitespace,
             .tag_token,
             => true,
 
-            .tag_basic_close => false,
+            .eof,
+            .tag_basic_close,
 
-            .attr_eql => false,
+            .attr_eql,
 
             .quote_single,
             .quote_double,
-            => false,
 
             .reference,
             .pe_reference,
             .reference_end,
             .reference_end_invalid,
-            => false,
 
-            .pi, .pi_end => false,
+            .pi,
+            .pi_end,
 
             .comment,
             .invalid_comment_dash_dash,
             .invalid_comment_end_triple_dash,
             .comment_end,
-            => false,
 
             .element_open,
             .element_close,
             .tag_slash_close,
-            => false,
 
-            .cdata, .cdata_end => false,
+            .cdata,
+            .cdata_end,
 
             .dtd,
             .dtd_int_subset,
@@ -335,36 +332,32 @@ pub const TokenType = enum {
     }
 };
 
-pub const BufferError = error{BufferUnderrun};
+/// The set of codepoints defined as whitespace. They are all
+/// exactly one byte in size.
+pub const whitespace_set: []const u8 = &[_]u8{
+    '\u{20}',
+    '\u{09}',
+    '\u{0D}',
+    '\u{0A}',
+};
 
-pub const NextTypeError = BufferError;
-/// Returns type of the next token. There are two possibilities:
-/// * The token type represents a builtin syntactic construct for which
-///   there is no further textual information to retrieve.
-///   In this case, the caller should simply call `nextType` again to
-///   obtain the following token type.
-///
-/// * The token indicates some textual information which isn't a builtin
-///   syntactic construct, like identifiers in markup and textual data.
-///   In this case, the caller should call `nextSrc` until it returns null.
-///   The caller may interchangeably use `nextString` and `nextSrc`.
-pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
-    // TODO: Use `@call(.always_tail, nextType, .{scanner})` in this function once that
+fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
+    // TODO: Use `@call(.always_tail, nextTypeImpl, .{scanner})` in this function once that
     // works for this return type.
     const src = scanner.src;
-    const flags = scanner.flags;
+    const eof_specified = scanner.eof_specified;
     switch (scanner.state) {
         .text_data => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return .eof;
             }
             switch (src[scanner.index]) {
                 ']' => {
                     scanner.state = .@"text_data,]";
                     scanner.index += 1;
-                    // return @call(.always_tail, nextType, .{scanner});
-                    return scanner.nextType();
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
                 },
                 '&' => {
                     scanner.state = .@"text_data,&";
@@ -374,15 +367,15 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
                 '<' => {
                     scanner.state = .@"text_data,<";
                     scanner.index += 1;
-                    // return @call(.always_tail, nextType, .{scanner});
-                    return scanner.nextType();
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
                 },
                 else => return .text_data,
             }
         },
         .@"text_data,]" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return .text_data;
             }
             if (src[scanner.index] != ']') {
@@ -390,12 +383,12 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
             }
             scanner.state = .@"text_data,]]";
             scanner.index += 1;
-            // return @call(.always_tail, nextType, .{scanner});
-            return scanner.nextType();
+            // return @call(.always_tail, nextTypeImpl, .{scanner});
+            return scanner.nextTypeImpl();
         },
         .@"text_data,]]" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return .text_data;
             }
             if (src[scanner.index] != '>') {
@@ -407,7 +400,7 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
         },
         .@"text_data,&" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 scanner.state = .text_data;
                 return .reference_end_invalid;
             }
@@ -424,7 +417,7 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
         },
         .@"text_data,<" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 scanner.state = .text_data;
                 return .element_open;
             }
@@ -442,8 +435,8 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
                 '!' => {
                     scanner.state = .@"text_data,<!";
                     scanner.index += 1;
-                    // return @call(.always_tail, nextType, .{scanner});
-                    return scanner.nextType();
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
                 },
                 else => {
                     scanner.state = .element_tag;
@@ -451,31 +444,37 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
                 },
             }
         },
+
         .@"text_data,<!" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return .invalid_token;
             }
             switch (src[scanner.index]) {
                 '-' => {
                     scanner.state = .@"text_data,<!-";
                     scanner.index += 1;
-                    // return @call(.always_tail, nextType, .{scanner});
-                    return scanner.nextType();
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
                 },
                 'D' => {
                     scanner.state = .@"<!D";
                     scanner.index += 1;
-                    // return @call(.always_tail, nextType, .{scanner});
-                    return scanner.nextType();
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
                 },
-                '[' => @panic("TODO"),
+                '[' => {
+                    scanner.state = .@"<![";
+                    scanner.index += 1;
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
+                },
                 else => return .invalid_token,
             }
         },
         .@"text_data,<!-" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return .invalid_token;
             }
             if (src[scanner.index] != '-') {
@@ -488,7 +487,7 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
 
         .pi => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return .eof;
             }
             if (src[scanner.index] != '?') {
@@ -496,12 +495,12 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
             }
             scanner.state = .@"pi,?";
             scanner.index += 1;
-            // return @call(.always_tail, nextType, .{scanner});
-            return scanner.nextType();
+            // return @call(.always_tail, nextTypeImpl, .{scanner});
+            return scanner.nextTypeImpl();
         },
         .@"pi,?" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return .text_data;
             }
             if (src[scanner.index] != '>') {
@@ -514,7 +513,7 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
 
         .element_tag => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 scanner.state = .text_data;
                 return .eof;
             }
@@ -537,8 +536,8 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
                 '/' => {
                     scanner.state = .@"element_tag,/";
                     scanner.index += 1;
-                    // return @call(.always_tail, nextType, .{scanner});
-                    return scanner.nextType();
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
                 },
                 '=' => {
                     scanner.index += 1;
@@ -555,7 +554,7 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
         .@"element_tag,whitespace" => unreachable,
         .@"element_tag,/" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return .tag_token;
             }
             if (src[scanner.index] != '>') {
@@ -570,7 +569,7 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
         .element_tag_dq,
         => |tag| {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return .eof;
             }
             const matching_quote_char: u8, //
@@ -604,7 +603,7 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
         .@"element_tag_dq,&",
         => |tag| {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return .eof;
             }
             const matching_quote_char: u8, //
@@ -630,48 +629,34 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
 
         .comment => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 scanner.state = .text_data;
                 return .eof;
             }
             if (src[scanner.index] == '-') {
                 scanner.state = .@"comment,-";
                 scanner.index += 1;
-                // return @call(.always_tail, nextType, .{scanner});
-                return scanner.nextType();
+                // return @call(.always_tail, nextTypeImpl, .{scanner});
+                return scanner.nextTypeImpl();
             }
             return .text_data;
         },
         .@"comment,-" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return .text_data;
             }
             if (src[scanner.index] != '-') {
                 return .text_data;
             }
-            switch (flags.comment) {
-                .normal => {
-                    scanner.state = .@"comment,--";
-                    scanner.index += 1;
-                    // return @call(.always_tail, nextType, .{scanner});
-                    return scanner.nextType();
-                },
-                .dash_dash_terminates => {
-                    scanner.state = .text_data;
-                    scanner.index += 1;
-                    return .invalid_comment_dash_dash;
-                },
-                .ignore_end_triple_dash => {
-                    scanner.state = .comment;
-                    scanner.index += 1;
-                    return .invalid_comment_dash_dash;
-                },
-            }
+            scanner.state = .@"comment,--";
+            scanner.index += 1;
+            // return @call(.always_tail, nextTypeImpl, .{scanner});
+            return scanner.nextTypeImpl();
         },
         .@"comment,--" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 scanner.state = .text_data;
                 return .invalid_comment_dash_dash;
             }
@@ -679,8 +664,8 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
                 '-' => {
                     scanner.state = .@"comment,---";
                     scanner.index += 1;
-                    // return @call(.always_tail, nextType, .{scanner});
-                    return scanner.nextType();
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
                 },
                 '>' => {
                     scanner.state = .text_data;
@@ -695,7 +680,7 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
         },
         .@"comment,---" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 scanner.state = .@"comment,-";
                 return .invalid_comment_dash_dash;
             }
@@ -718,6 +703,84 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
         },
 
         inline //
+        .@"<![",
+        .@"<![C",
+        .@"<![CD",
+        .@"<![CDA",
+        .@"<![CDAT",
+        => |tag| {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                return .invalid_token;
+            }
+            const expected_char: u8, const state_on_match = comptime switch (tag) {
+                .@"<![" => .{ 'C', .@"<![C" },
+                .@"<![C" => .{ 'D', .@"<![CD" },
+                .@"<![CD" => .{ 'A', .@"<![CDA" },
+                .@"<![CDA" => .{ 'T', .@"<![CDAT" },
+                .@"<![CDAT" => .{ 'A', .@"<![CDATA" },
+                else => unreachable,
+            };
+            if (src[scanner.index] != expected_char) {
+                return .invalid_token;
+            }
+            scanner.state = state_on_match;
+            scanner.index += 1;
+            // return @call(.always_tail, nextTypeImpl, .{scanner});
+            return scanner.nextTypeImpl();
+        },
+        .@"<![CDATA" => {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                return .invalid_token;
+            }
+            if (src[scanner.index] != '[') {
+                return .invalid_token;
+            }
+            scanner.state = .cdata;
+            scanner.index += 1;
+            return .cdata;
+        },
+        .cdata => {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                return .eof;
+            }
+            if (src[scanner.index] != ']') {
+                return .text_data;
+            }
+            scanner.state = .@"cdata,]";
+            scanner.index += 1;
+            // return @call(.always_tail, nextTypeImpl, .{scanner});
+            return scanner.nextTypeImpl();
+        },
+        .@"cdata,]" => {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                return .text_data;
+            }
+            if (src[scanner.index] != ']') {
+                return .text_data;
+            }
+            scanner.state = .@"cdata,]]";
+            scanner.index += 1;
+            // return @call(.always_tail, nextTypeImpl, .{scanner});
+            return scanner.nextTypeImpl();
+        },
+        .@"cdata,]]" => {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                return .text_data;
+            }
+            if (src[scanner.index] != '>') {
+                return .text_data;
+            }
+            scanner.state = .text_data;
+            scanner.index += 1;
+            return .cdata_end;
+        },
+
+        inline //
         .@"<!D",
         .@"<!DO",
         .@"<!DOC",
@@ -725,7 +788,7 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
         .@"<!DOCTY",
         => |tag| {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return .invalid_token;
             }
             const expected_char: u8, const state_on_match = comptime switch (tag) {
@@ -741,12 +804,12 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
             }
             scanner.state = state_on_match;
             scanner.index += 1;
-            // return @call(.always_tail, nextType, .{scanner});
-            return scanner.nextType();
+            // return @call(.always_tail, nextTypeImpl, .{scanner});
+            return scanner.nextTypeImpl();
         },
         .@"<!DOCTYP" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return .invalid_token;
             }
             if (src[scanner.index] != 'E') {
@@ -757,30 +820,16 @@ pub fn nextType(scanner: *Scanner) NextTypeError!TokenType {
             return .dtd;
         },
         .dtd => @panic("TODO"),
+
+        .@"<!:incomplete" => @panic("TODO"),
+        .@"<!--:incomplete" => @panic("TODO"),
+        .@"<![CDATA[:incomplete" => @panic("TODO"),
+        .@"<!DOCTYPE:incomplete" => @panic("TODO"),
     }
 }
 
-pub const NextStringError = NextSrcError;
-/// Helper function for returning the result of `nextSrc` directly as a string.
-/// The returned string is either a string literal or a reference to `scanner.src`,
-/// meaning it is only guaranteed to remain valid for as long as `scanner.src` is.
-/// All other behaviour remains equivalent to `nextSrc`.
-pub inline fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
-    const maybe_tok_src = try scanner.nextSrc();
-    return switch (maybe_tok_src orelse return null) {
-        .range => |range| scanner.src[range.start..range.end],
-        .literal => |literal| literal.toStr(),
-    };
-}
-
-pub const NextSrcError = BufferError;
-/// The returned token reference is either a range referencing the current `scanner.src` value,
-/// which will remain valid for as long as the referenced slice is valid and accessible.
-/// It should be called repeatedly until it returns `null`. If `error.BufferUnderrun` is returned,
-/// the caller should invoke `feedInput`, and then proceed.
-pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
-    // TODO: Make calling this when it's already returned null be checked illegal behaviour.
-    // TODO: Use `@call(.always_tail, nextSrc, .{scanner})` in this function once that
+fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
+    // TODO: Use `@call(.always_tail, nextSrcImpl, .{scanner})` in this function once that
     // works for this return type.
 
     const helper = struct {
@@ -793,11 +842,11 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
     };
 
     const src = scanner.src;
-    const flags = scanner.flags;
+    const eof_specified = scanner.eof_specified;
     switch (scanner.state) {
         .text_data => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return null;
             }
             const str_start = scanner.index;
@@ -810,7 +859,7 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
                 ']' => {
                     scanner.state = .@"text_data,]";
                     scanner.index += 1;
-                    // return @call(.always_tail, nextSrc, .{scanner});
+                    // return @call(.always_tail, nextSrcImpl, .{scanner});
                     return scanner.nextSrc();
                 },
                 '&', '<' => {},
@@ -820,7 +869,7 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
         },
         .@"text_data,]" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 scanner.state = .text_data;
                 return helper.literalInit(.@"]");
             }
@@ -830,12 +879,12 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
             }
             scanner.state = .@"text_data,]]";
             scanner.index += 1;
-            // return @call(.always_tail, nextSrc, .{scanner});
+            // return @call(.always_tail, nextSrcImpl, .{scanner});
             return scanner.nextSrc();
         },
         .@"text_data,]]" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 scanner.state = .text_data;
                 return helper.literalInit(.@"]]");
             }
@@ -847,7 +896,7 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
         },
         .@"text_data,&" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return null;
             }
             const str_start = scanner.index;
@@ -862,7 +911,7 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
 
         .pi => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return null;
             }
 
@@ -874,12 +923,12 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
             }
             scanner.state = .@"pi,?";
             scanner.index += 1;
-            // return @call(.always_tail, nextSrc, .{scanner});
+            // return @call(.always_tail, nextSrcImpl, .{scanner});
             return scanner.nextSrc();
         },
         .@"pi,?" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 scanner.state = .pi;
                 return helper.literalInit(.@"?");
             }
@@ -892,7 +941,7 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
 
         .element_tag => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return null;
             }
             const str_start = scanner.index;
@@ -905,7 +954,7 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
         },
         .@"element_tag,whitespace" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return null;
             }
             const str_start = scanner.index;
@@ -926,7 +975,7 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
         .element_tag_dq,
         => |tag| {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return null;
             }
             const matching_quote_char: u8 = comptime switch (tag) {
@@ -947,7 +996,7 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
         .@"element_tag_dq,&",
         => |tag| {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return null;
             }
             const matching_quote_char: u8 = comptime switch (tag) {
@@ -966,7 +1015,7 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
 
         .comment => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return null;
             }
             const str_start = scanner.index;
@@ -978,14 +1027,14 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
             if (src[scanner.index] == '-') {
                 scanner.state = .@"comment,-";
                 scanner.index += 1;
-                // return @call(.always_tail, nextSrc, .{scanner});
+                // return @call(.always_tail, nextSrcImpl, .{scanner});
                 return scanner.nextSrc();
             }
             return null;
         },
         .@"comment,-" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 scanner.state = .comment;
                 return helper.literalInit(.@"-");
             }
@@ -995,12 +1044,12 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
             }
             scanner.state = .@"comment,--";
             scanner.index += 1;
-            // return @call(.always_tail, nextSrc, .{scanner});
+            // return @call(.always_tail, nextSrcImpl, .{scanner});
             return scanner.nextSrc();
         },
         .@"comment,--" => {
             if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
+                if (!eof_specified) return error.BufferUnderrun;
                 return null;
             }
             switch (src[scanner.index]) {
@@ -1014,16 +1063,89 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
         },
         .@"comment,---" => unreachable,
 
+        .cdata => {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .text_data;
+                return null;
+            }
+            const str_start = scanner.index;
+            const str_end = std.mem.indexOfScalarPos(u8, src, scanner.index, ']') orelse src.len;
+            scanner.index = str_end;
+            if (str_start != str_end) {
+                return helper.rangeInit(str_start, str_end);
+            }
+            scanner.state = .@"cdata,]";
+            scanner.index += 1;
+            // return @call(.always_tail, nextSrcImpl, .{scanner});
+            return scanner.nextSrc();
+        },
+        .@"cdata,]" => {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .text_data;
+                return helper.literalInit(.@"]");
+            }
+            if (src[scanner.index] != ']') {
+                scanner.state = .cdata;
+                return helper.literalInit(.@"]");
+            }
+            scanner.state = .@"cdata,]]";
+            scanner.index += 1;
+            // return @call(.always_tail, nextSrcImpl, .{scanner});
+            return scanner.nextSrc();
+        },
+        .@"cdata,]]" => {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .text_data;
+                return helper.literalInit(.@"]]");
+            }
+            switch (src[scanner.index]) {
+                '>' => return null,
+                ']' => {
+                    scanner.index += 1;
+                    return helper.literalInit(.@"]");
+                },
+                else => {
+                    scanner.state = .cdata;
+                    return helper.literalInit(.@"]]");
+                },
+            }
+        },
+
         .dtd => @panic("TODO"),
 
         // invalid tokens
 
-        inline //
-        .@"text_data,<!",
-        .@"text_data,<!-",
+        .@"text_data,<!" => {
+            scanner.state = .@"<!:incomplete";
+            return helper.literalInit(.@"<!");
+        },
+        .@"text_data,<!-" => {
+            scanner.state = .@"<!--:incomplete";
+            return helper.literalInit(.@"<!-");
+        },
+
+        .@"<![",
+        .@"<![C",
+        .@"<![CD",
+        .@"<![CDA",
+        .@"<![CDAT",
+        .@"<![CDATA",
         => |tag| {
-            comptime assert(std.mem.startsWith(u8, @tagName(tag), "text_data,"));
-            return helper.literalInit(@field(TokenSrc.Literal, @tagName(tag)["text_data,".len..]));
+            scanner.state = .@"<![CDATA[:incomplete";
+            return helper.literalInit(switch (tag) {
+                inline //
+                .@"<![",
+                .@"<![C",
+                .@"<![CD",
+                .@"<![CDA",
+                .@"<![CDAT",
+                .@"<![CDATA",
+                => |itag| @field(TokenSrc.Literal, @tagName(itag)),
+                else => unreachable,
+            });
         },
 
         .@"<!D",
@@ -1033,10 +1155,7 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
         .@"<!DOCTY",
         .@"<!DOCTYP",
         => |tag| {
-            if (scanner.index == src.len) {
-                if (!flags.eof_specified) return error.BufferUnderrun;
-                return null;
-            }
+            scanner.state = .@"<!DOCTYPE:incomplete";
             return helper.literalInit(switch (tag) {
                 inline //
                 .@"<!D",
@@ -1049,6 +1168,11 @@ pub fn nextSrc(scanner: *Scanner) NextSrcError!?TokenSrc {
                 else => unreachable,
             });
         },
+
+        .@"<!:incomplete" => return null,
+        .@"<!--:incomplete" => return null,
+        .@"<![CDATA[:incomplete" => return null,
+        .@"<!DOCTYPE:incomplete" => return null,
     }
 }
 
@@ -1061,8 +1185,7 @@ pub const TokenSrc = union(enum) {
         start: usize,
         end: usize,
 
-        pub inline fn getStr(tok_range: Range, scanner: *const Scanner) ?[]const u8 {
-            if (tok_range.isSentinel()) return null;
+        pub inline fn getStr(tok_range: Range, scanner: *const Scanner) []const u8 {
             return scanner.src[tok_range.start..tok_range.end];
         }
     };
@@ -1074,14 +1197,24 @@ pub const TokenSrc = union(enum) {
         @"]]",
         @"/",
         @"?",
+
         @"<!",
         @"<!-",
+
+        @"<![",
+        @"<![C",
+        @"<![CD",
+        @"<![CDA",
+        @"<![CDAT",
+        @"<![CDATA",
+
         @"<!D",
         @"<!DO",
         @"<!DOC",
         @"<!DOCT",
         @"<!DOCTY",
         @"<!DOCTYP",
+
         @"-",
 
         pub inline fn toStr(literal_tok: Literal) []const u8 {
@@ -1096,19 +1229,6 @@ pub const TokenSrc = union(enum) {
             return scanner.src[scanner.index - len ..][0..len];
         }
     };
-};
-
-const Flags = packed struct {
-    /// Do not be modify directly. See `feedEof`.
-    eof_specified: bool,
-
-    /// May be modified before the next call to `nextType` or
-    /// after the call to `nextString`/`nextSrc` which returns null.
-    comment: InitOptions.Comment,
-
-    /// May be modified before the next call to `nextType` or
-    /// after the call to `nextString`/`nextSrc` which returns null.
-    doc_type: InitOptions.DocType,
 };
 
 const State = enum {
@@ -1136,6 +1256,16 @@ const State = enum {
     @"comment,--",
     @"comment,---",
 
+    @"<![",
+    @"<![C",
+    @"<![CD",
+    @"<![CDA",
+    @"<![CDAT",
+    @"<![CDATA",
+    cdata,
+    @"cdata,]",
+    @"cdata,]]",
+
     @"<!D",
     @"<!DO",
     @"<!DOC",
@@ -1143,6 +1273,145 @@ const State = enum {
     @"<!DOCTY",
     @"<!DOCTYP",
     dtd,
+
+    @"<!:incomplete",
+    @"<!--:incomplete",
+    @"<![CDATA[:incomplete",
+    @"<!DOCTYPE:incomplete",
+};
+
+/// A checked version of the scanner, mainly used for testing and debugging.
+/// Panics on API misuse instead of reacting with undefined behaviour.
+/// Acts as a drop-in replacement to facilitate this use case.
+pub const CheckedScanner = struct {
+    raw: Scanner,
+    is_streaming: bool,
+    prev_output: PrevOutput,
+
+    const PrevOutput = union(enum) {
+        init,
+        tok: TokenType,
+        str: enum { non_null, null },
+    };
+
+    pub inline fn initComplete(src: []const u8) CheckedScanner {
+        return .{
+            .raw = Scanner.initComplete(src),
+            .is_streaming = false,
+            .prev_output = .init,
+        };
+    }
+
+    pub inline fn initStreaming() CheckedScanner {
+        return .{
+            .raw = Scanner.initStreaming(),
+            .is_streaming = true,
+            .prev_output = .init,
+        };
+    }
+
+    pub fn feedInput(checked: *CheckedScanner, src: []const u8) void {
+        if (!checked.is_streaming) @panic("Can't feed input to a non-streaming scanner");
+        checked.raw.feedInput(src);
+    }
+
+    pub fn feedEof(checked: *CheckedScanner) void {
+        if (!checked.is_streaming) @panic("Can't feed input to a non-streaming scanner");
+        checked.raw.feedEof();
+    }
+
+    pub fn nextType(checked: *CheckedScanner) NextTypeError!TokenType {
+        switch (checked.prev_output) {
+            .init => {},
+            .tok => |prev| if (prev.hasString()) @panic(switch (prev) {
+                inline else => |tag| "Can't call `nextType` when the previous token '." ++ @tagName(tag) ++
+                    "' has a string pending - call `nextSrc` or `nextString` first.",
+            }),
+            .str => |str| switch (str) {
+                .non_null => @panic("Can't call `nextType` when there is still a string pending - call `nextSrc` or `nextString` until they return null."),
+                .null => {},
+            },
+        }
+        const tok_type = try checked.raw.nextType();
+        checked.prev_output = .{ .tok = tok_type };
+        return tok_type;
+    }
+
+    pub fn nextSrc(checked: *CheckedScanner) NextSrcError!?TokenSrc {
+        switch (checked.prev_output) {
+            .init => {},
+            .tok => |prev| if (!prev.hasString()) @panic(switch (prev) {
+                inline else => |tag| "Can't call `nextSrc`/`nextString` for token type '." ++ @tagName(tag) ++ "'. Call `nextType` instead.",
+            }),
+            .str => |str| switch (str) {
+                .non_null => {},
+                .null => @panic("Can't call `nextSrc` or `nextString` after one of them have already returned null. Call `nextType` instead."),
+            },
+        }
+        const tok_src = try checked.raw.nextSrc();
+        checked.prev_output = .{ .str = if (tok_src != null) .non_null else .null };
+        return tok_src;
+    }
+
+    pub fn nextString(checked: *CheckedScanner) NextStringError!?[]const u8 {
+        const tok_src = try checked.nextSrc();
+        return switch (tok_src orelse return null) {
+            .range => |range| range.getStr(&checked.raw),
+            .literal => |literal| literal.toStr(),
+        };
+    }
+
+    pub fn expectNextType(scanner: *CheckedScanner, expected: NextTypeError!TokenType) !void {
+        comptime assert(builtin.is_test);
+        const actual = scanner.nextType();
+        try std.testing.expectEqual(expected, actual);
+    }
+    pub fn expectNextString(scanner: *CheckedScanner, expected: NextSrcError!?[]const u8) !void {
+        comptime assert(builtin.is_test);
+        const actual = scanner.nextString();
+
+        const maybe_expected = expected catch |expected_err| {
+            const maybe_actual = actual catch |actual_err| {
+                return try std.testing.expectEqual(expected_err, actual_err);
+            };
+            testingPrint("expected {[expected]}, found {[actual_quote]s}{[actual]?}{[actual_quote]s}\n", .{
+                .expected = expected_err,
+                .actual_quote = if (maybe_actual == null) "" else "'",
+                .actual = if (maybe_actual) |actual_unwrapped| std.zig.fmtEscapes(actual_unwrapped) else null,
+            });
+            return error.TestExpectedEqual;
+        };
+        const maybe_actual = actual catch |actual_err| {
+            testingPrint("expected {[expected_quote]s}{[expected]?}{[expected_quote]s}, found {[actual]}\n", .{
+                .expected_quote = if (maybe_expected == null) "" else "'",
+                .expected = if (maybe_expected) |expected_unwrapped| std.zig.fmtEscapes(expected_unwrapped) else null,
+                .actual = actual_err,
+            });
+            return error.TestExpectedEqual;
+        };
+
+        const expected_unwrapped = maybe_expected orelse {
+            if (maybe_actual) |actual_unwrapped| {
+                testingPrint("expected null, found '{}'\n", .{std.zig.fmtEscapes(actual_unwrapped)});
+                return error.TestExpectedEqual;
+            }
+            return;
+        };
+        const actual_unwrapped = maybe_actual orelse {
+            testingPrint("expected '{}', found null\n", .{std.zig.fmtEscapes(expected_unwrapped)});
+            return error.TestExpectedEqual;
+        };
+
+        try std.testing.expectEqualStrings(expected_unwrapped, actual_unwrapped);
+    }
+    pub fn expectNextStringSeq(scanner: *CheckedScanner, expected_list: []const NextSrcError!?[]const u8) !void {
+        for (expected_list) |expected| try scanner.expectNextString(expected);
+    }
+    pub fn expectNextTypeStringSeq(scanner: *CheckedScanner, expected_tt: TokenType, expected_list: []const NextSrcError!?[]const u8) !void {
+        try scanner.expectNextType(expected_tt);
+        try std.testing.expect(expected_tt.hasString());
+        try scanner.expectNextStringSeq(expected_list);
+    }
 };
 
 fn testingPrint(comptime fmt_str: []const u8, args: anytype) void {
@@ -1153,59 +1422,9 @@ fn testingPrint(comptime fmt_str: []const u8, args: anytype) void {
     }
 }
 
-fn expectNextType(scanner: *Scanner, expected: NextTypeError!TokenType) !void {
-    const actual = scanner.nextType();
-    try std.testing.expectEqual(expected, actual);
-}
-fn expectNextString(scanner: *Scanner, expected: NextSrcError!?[]const u8) !void {
-    const actual = scanner.nextString();
-
-    const maybe_expected = expected catch |expected_err| {
-        const maybe_actual = actual catch |actual_err| {
-            return try std.testing.expectEqual(expected_err, actual_err);
-        };
-        testingPrint("expected {[expected]}, found {[actual_quote]s}{[actual]?}{[actual_quote]s}\n", .{
-            .expected = expected_err,
-            .actual_quote = if (maybe_actual == null) "" else "'",
-            .actual = if (maybe_actual) |actual_unwrapped| std.zig.fmtEscapes(actual_unwrapped) else null,
-        });
-        return error.TestExpectedEqual;
-    };
-    const maybe_actual = actual catch |actual_err| {
-        testingPrint("expected {[expected_quote]s}{[expected]?}{[expected_quote]s}, found {[actual]}\n", .{
-            .expected_quote = if (maybe_expected == null) "" else "'",
-            .expected = if (maybe_expected) |expected_unwrapped| std.zig.fmtEscapes(expected_unwrapped) else null,
-            .actual = actual_err,
-        });
-        return error.TestExpectedEqual;
-    };
-
-    const expected_unwrapped = maybe_expected orelse {
-        if (maybe_actual) |actual_unwrapped| {
-            testingPrint("expected null, found '{}'\n", .{std.zig.fmtEscapes(actual_unwrapped)});
-            return error.TestExpectedEqual;
-        }
-        return;
-    };
-    const actual_unwrapped = maybe_actual orelse {
-        testingPrint("expected '{}', found null\n", .{std.zig.fmtEscapes(expected_unwrapped)});
-        return error.TestExpectedEqual;
-    };
-
-    try std.testing.expectEqualStrings(expected_unwrapped, actual_unwrapped);
-}
-fn expectNextStringSeq(scanner: *Scanner, expected_list: []const NextSrcError!?[]const u8) !void {
-    for (expected_list) |expected| try scanner.expectNextString(expected);
-}
-fn expectNextTypeStringSeq(scanner: *Scanner, expected_tt: TokenType, expected_list: []const NextSrcError!?[]const u8) !void {
-    try scanner.expectNextType(expected_tt);
-    try std.testing.expect(expected_tt.hasString());
-    try scanner.expectNextStringSeq(expected_list);
-}
-
-test "Scanner Invalid Markup ('<'/'<![CDATA['/'<!DOCTYPE')" {
+test "Scanner Incomplete Markup ('<!--'/'<![CDATA['/'<!DOCTYPE')" {
     if (true) return error.SkipZigTest;
-    var scanner: Scanner = undefined;
+    var scanner: CheckedScanner = undefined;
 
     for ([_][]const u8{
         "<!",
@@ -1223,13 +1442,13 @@ test "Scanner Invalid Markup ('<'/'<![CDATA['/'<!DOCTYPE')" {
         "<!DOCTY",
         "<!DOCTYP",
     }) |incomplete_mk_str| {
-        scanner = Scanner.initComplete(.{}, incomplete_mk_str);
+        scanner = CheckedScanner.initComplete(incomplete_mk_str);
         try scanner.expectNextType(.invalid_token);
         try scanner.expectNextString(incomplete_mk_str);
         try scanner.expectNextString(null);
         try scanner.expectNextType(.eof);
 
-        scanner = Scanner.initStreaming(.{});
+        scanner = CheckedScanner.initStreaming();
         for (0..incomplete_mk_str.len) |i| {
             scanner.feedInput(incomplete_mk_str[i..][0..1]);
             try scanner.expectNextType(error.BufferUnderrun);
@@ -1253,7 +1472,18 @@ test "Scanner Invalid Markup ('<'/'<![CDATA['/'<!DOCTYPE')" {
         try scanner.expectNextType(.eof);
     }
 
-    scanner = Scanner.initComplete(.{}, "<![CDATAR a");
+    scanner = CheckedScanner.initComplete("<! a <");
+    try scanner.expectNextTypeStringSeq(.invalid_token, &.{ "<!", null });
+    try scanner.expectNextTypeStringSeq(.text_data, &.{ " a ", null });
+    try scanner.expectNextType(.element_open);
+    try scanner.expectNextType(.eof);
+
+    scanner = CheckedScanner.initComplete("<! a");
+    try scanner.expectNextTypeStringSeq(.invalid_token, &.{ "<!", null });
+    try scanner.expectNextTypeStringSeq(.text_data, &.{ " a", null });
+    try scanner.expectNextType(.eof);
+
+    scanner = CheckedScanner.initComplete("<![CDATAR a");
     try scanner.expectNextType(.invalid_token);
     try scanner.expectNextString("<![CDATA");
     try scanner.expectNextString(null);
@@ -1262,7 +1492,7 @@ test "Scanner Invalid Markup ('<'/'<![CDATA['/'<!DOCTYPE')" {
     try scanner.expectNextString(null);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<!DOCTYPR a");
+    scanner = CheckedScanner.initComplete("<!DOCTYPR a");
     try scanner.expectNextType(.invalid_token);
     try scanner.expectNextString("<!DOCTYP");
     try scanner.expectNextString(null);
@@ -1273,48 +1503,48 @@ test "Scanner Invalid Markup ('<'/'<![CDATA['/'<!DOCTYPE')" {
 }
 
 test "Scanner Processing Instructions" {
-    var scanner: Scanner = undefined;
+    var scanner: CheckedScanner = undefined;
 
-    scanner = Scanner.initComplete(.{}, "<??>");
+    scanner = CheckedScanner.initComplete("<??>");
     try scanner.expectNextType(.pi);
     try scanner.expectNextType(.pi_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<?");
+    scanner = CheckedScanner.initComplete("<?");
     try scanner.expectNextType(.pi);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<? ?>");
+    scanner = CheckedScanner.initComplete("<? ?>");
     try scanner.expectNextType(.pi);
     try scanner.expectNextTypeStringSeq(.text_data, &.{ " ", null });
     try scanner.expectNextType(.pi_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<?foo?>");
+    scanner = CheckedScanner.initComplete("<?foo?>");
     try scanner.expectNextType(.pi);
     try scanner.expectNextTypeStringSeq(.text_data, &.{ "foo", null });
     try scanner.expectNextType(.pi_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<?foo ?>");
+    scanner = CheckedScanner.initComplete("<?foo ?>");
     try scanner.expectNextType(.pi);
     try scanner.expectNextTypeStringSeq(.text_data, &.{ "foo ", null });
     try scanner.expectNextType(.pi_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<?foo bar?>");
+    scanner = CheckedScanner.initComplete("<?foo bar?>");
     try scanner.expectNextType(.pi);
     try scanner.expectNextTypeStringSeq(.text_data, &.{ "foo bar", null });
     try scanner.expectNextType(.pi_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<?" ++ "???" ++ "?>");
+    scanner = CheckedScanner.initComplete("<?" ++ "???" ++ "?>");
     try scanner.expectNextType(.pi);
     try scanner.expectNextTypeStringSeq(.text_data, &.{ "?", "?", "?", null });
     try scanner.expectNextType(.pi_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("<?foo");
     try scanner.expectNextType(.pi);
     try scanner.expectNextTypeStringSeq(.text_data, &.{ "foo", error.BufferUnderrun });
@@ -1325,7 +1555,7 @@ test "Scanner Processing Instructions" {
     scanner.feedEof();
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("<?foo");
     try scanner.expectNextType(.pi);
     try scanner.expectNextTypeStringSeq(.text_data, &.{ "foo", error.BufferUnderrun });
@@ -1338,7 +1568,7 @@ test "Scanner Processing Instructions" {
     scanner.feedEof();
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("<?");
     try scanner.expectNextType(.pi);
     try scanner.expectNextType(error.BufferUnderrun);
@@ -1349,7 +1579,7 @@ test "Scanner Processing Instructions" {
     scanner.feedEof();
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("<?bar");
     try scanner.expectNextType(.pi);
     try scanner.expectNextTypeStringSeq(.text_data, &.{ "bar", error.BufferUnderrun });
@@ -1366,7 +1596,7 @@ test "Scanner Processing Instructions" {
     scanner.feedEof();
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     try scanner.expectNextType(error.BufferUnderrun);
     scanner.feedInput("<");
     try scanner.expectNextType(error.BufferUnderrun);
@@ -1396,39 +1626,37 @@ test "Scanner Processing Instructions" {
 }
 
 test "Scanner Comments" {
-    var scanner: Scanner = undefined;
+    var scanner: CheckedScanner = undefined;
 
-    scanner = Scanner.initComplete(.{}, "<!--" ++ "-->");
+    scanner = CheckedScanner.initComplete("<!--" ++ "-->");
     try scanner.expectNextType(.comment);
-    try scanner.expectNextString(null);
     try scanner.expectNextType(.comment_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<!--" ++ "-" ++ "-->");
+    scanner = CheckedScanner.initComplete("<!--" ++ "-" ++ "-->");
     try scanner.expectNextType(.comment);
-    try scanner.expectNextString(null);
     try scanner.expectNextType(.invalid_comment_end_triple_dash);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<!--" ++ "--" ++ "-->");
+    scanner = CheckedScanner.initComplete("<!--" ++ "--" ++ "-->");
     try scanner.expectNextType(.comment);
     try scanner.expectNextType(.invalid_comment_dash_dash);
     try scanner.expectNextType(.comment_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<!--" ++ "--" ++ "-" ++ "-->");
+    scanner = CheckedScanner.initComplete("<!--" ++ "--" ++ "-" ++ "-->");
     try scanner.expectNextType(.comment);
     try scanner.expectNextType(.invalid_comment_dash_dash);
     try scanner.expectNextType(.invalid_comment_end_triple_dash);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<!-- <foo bar> -->");
+    scanner = CheckedScanner.initComplete("<!-- <foo bar> -->");
     try scanner.expectNextType(.comment);
     try scanner.expectNextTypeStringSeq(.text_data, &.{ " <foo bar> ", null });
     try scanner.expectNextType(.comment_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("<!--");
     try scanner.expectNextType(.comment);
     try scanner.expectNextType(error.BufferUnderrun);
@@ -1440,7 +1668,7 @@ test "Scanner Comments" {
     scanner.feedEof();
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("<");
     try scanner.expectNextType(error.BufferUnderrun);
     scanner.feedInput("!");
@@ -1460,10 +1688,10 @@ test "Scanner Comments" {
     scanner.feedEof();
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("<!--");
     try scanner.expectNextType(.comment);
-    try scanner.expectNextString(error.BufferUnderrun);
+    try scanner.expectNextType(error.BufferUnderrun);
     scanner.feedInput("--a");
     try scanner.expectNextType(.invalid_comment_dash_dash);
     try scanner.expectNextTypeStringSeq(.text_data, &.{ "a", error.BufferUnderrun });
@@ -1476,43 +1704,46 @@ test "Scanner Comments" {
 }
 
 test "Scanner CDATA Sections" {
-    if (true) return error.SkipZigTest;
-    var scanner: Scanner = undefined;
+    var scanner: CheckedScanner = undefined;
 
-    scanner = Scanner.initComplete(.{}, "<![CDATA[" ++ "]]>");
+    scanner = CheckedScanner.initComplete("<![CDATA[" ++ "]]>");
     try scanner.expectNextType(.cdata);
-    try scanner.expectNextString(null);
+    try scanner.expectNextType(.cdata_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<![CDATA[" ++ " foo " ++ "]]>");
+    scanner = CheckedScanner.initComplete("<![CDATA[" ++ " foo " ++ "]]>");
     try scanner.expectNextType(.cdata);
-    try scanner.expectNextStringSeq(&.{ " foo ", null });
+    try scanner.expectNextTypeStringSeq(.text_data, &.{ " foo ", null });
+    try scanner.expectNextType(.cdata_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<![CDATA[" ++ "]]" ++ "]]>");
+    scanner = CheckedScanner.initComplete("<![CDATA[" ++ "]]" ++ "]]>");
     try scanner.expectNextType(.cdata);
-    try scanner.expectNextStringSeq(&.{ "]", "]", null });
+    try scanner.expectNextTypeStringSeq(.text_data, &.{ "]", "]", null });
+    try scanner.expectNextType(.cdata_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<![CDATA[" ++ "]]]" ++ "]]>");
+    scanner = CheckedScanner.initComplete("<![CDATA[" ++ "]" ++ "]]" ++ "]]>");
     try scanner.expectNextType(.cdata);
-    try scanner.expectNextStringSeq(&.{ "]", "]", "]", null });
+    try scanner.expectNextTypeStringSeq(.text_data, &.{ "]", "]", "]", null });
+    try scanner.expectNextType(.cdata_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<![CDATA[" ++ "]>" ++ "]]>");
+    scanner = CheckedScanner.initComplete("<![CDATA[" ++ "]>" ++ "]]>");
     try scanner.expectNextType(.cdata);
-    try scanner.expectNextStringSeq(&.{ "]", ">", null });
+    try scanner.expectNextTypeStringSeq(.text_data, &.{ "]", ">", null });
+    try scanner.expectNextType(.cdata_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     for ("<![CDATA[") |c| {
         try scanner.expectNextType(error.BufferUnderrun);
         scanner.feedInput(&.{c});
     }
     try scanner.expectNextType(.cdata);
-    try scanner.expectNextString(error.BufferUnderrun);
+    try scanner.expectNextType(error.BufferUnderrun);
     scanner.feedInput("foo");
-    try scanner.expectNextString("foo");
+    try scanner.expectNextTypeStringSeq(.text_data, &.{ "foo", error.BufferUnderrun });
     try scanner.expectNextString(error.BufferUnderrun);
     scanner.feedInput("]]");
     try scanner.expectNextString(error.BufferUnderrun);
@@ -1523,43 +1754,45 @@ test "Scanner CDATA Sections" {
     try scanner.expectNextStringSeq(&.{ "]", "]", "]", error.BufferUnderrun }); // from the first to `feedInput`s, not the latest one
     scanner.feedInput(">");
     try scanner.expectNextString(null);
+    try scanner.expectNextType(.cdata_end);
+    try scanner.expectNextType(error.BufferUnderrun);
     scanner.feedEof();
     try scanner.expectNextType(.eof);
 }
 
 test "Scanner Character/Entity References" {
-    var scanner: Scanner = undefined;
+    var scanner: CheckedScanner = undefined;
 
-    scanner = Scanner.initComplete(.{}, "&abc;");
+    scanner = CheckedScanner.initComplete("&abc;");
     try scanner.expectNextType(.reference);
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "abc", null });
     try scanner.expectNextType(.reference_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "&;");
+    scanner = CheckedScanner.initComplete("&;");
     try scanner.expectNextType(.reference);
     try scanner.expectNextType(.reference_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "&");
+    scanner = CheckedScanner.initComplete("&");
     try scanner.expectNextType(.reference);
     try scanner.expectNextType(.reference_end_invalid);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "&foo");
+    scanner = CheckedScanner.initComplete("&foo");
     try scanner.expectNextType(.reference);
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextType(.reference_end_invalid);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "&foo ");
+    scanner = CheckedScanner.initComplete("&foo ");
     try scanner.expectNextType(.reference);
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextType(.reference_end_invalid);
     try scanner.expectNextTypeStringSeq(.text_data, &.{ " ", null });
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("&");
     try scanner.expectNextType(.reference);
     try scanner.expectNextType(error.BufferUnderrun);
@@ -1569,10 +1802,10 @@ test "Scanner Character/Entity References" {
     scanner.feedEof();
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("&");
     try scanner.expectNextType(.reference);
-    try scanner.expectNextString(error.BufferUnderrun);
+    try scanner.expectNextType(error.BufferUnderrun);
     scanner.feedInput("foo");
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", error.BufferUnderrun });
     scanner.feedInput("bar");
@@ -1582,10 +1815,10 @@ test "Scanner Character/Entity References" {
     try scanner.expectNextType(.reference_end_invalid);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("&");
     try scanner.expectNextType(.reference);
-    try scanner.expectNextString(error.BufferUnderrun);
+    try scanner.expectNextType(error.BufferUnderrun);
     scanner.feedInput("foo");
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", error.BufferUnderrun });
     scanner.feedInput("bar");
@@ -1597,10 +1830,10 @@ test "Scanner Character/Entity References" {
     scanner.feedEof();
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("&");
     try scanner.expectNextType(.reference);
-    try scanner.expectNextString(error.BufferUnderrun);
+    try scanner.expectNextType(error.BufferUnderrun);
     scanner.feedInput("foo");
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", error.BufferUnderrun });
     scanner.feedInput("bar");
@@ -1615,28 +1848,28 @@ test "Scanner Character/Entity References" {
 }
 
 test "Scanner Text Data" {
-    var scanner: Scanner = undefined;
+    var scanner: CheckedScanner = undefined;
 
-    scanner = Scanner.initComplete(.{}, "");
+    scanner = CheckedScanner.initComplete("");
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedEof();
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "foo bar");
+    scanner = CheckedScanner.initComplete("foo bar");
     try scanner.expectNextType(.text_data);
     try scanner.expectNextString("foo bar");
     try scanner.expectNextString(null);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "foo bar");
+    scanner = CheckedScanner.initComplete("foo bar");
     try scanner.expectNextType(.text_data);
     try scanner.expectNextString("foo bar");
     try scanner.expectNextString(null);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("foo");
     try scanner.expectNextType(.text_data);
     try scanner.expectNextString("foo");
@@ -1648,11 +1881,11 @@ test "Scanner Text Data" {
     try scanner.expectNextString(null);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "]]>");
+    scanner = CheckedScanner.initComplete("]]>");
     try scanner.expectNextType(.cdata_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("]]>");
     try scanner.expectNextType(.cdata_end);
     try scanner.expectNextType(error.BufferUnderrun);
@@ -1664,27 +1897,27 @@ test "Scanner Text Data" {
     try scanner.expectNextString(null);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "foo]]> bar");
+    scanner = CheckedScanner.initComplete("foo]]> bar");
     try scanner.expectNextTypeStringSeq(.text_data, &.{ "foo", null });
     try scanner.expectNextType(.cdata_end);
     try scanner.expectNextTypeStringSeq(.text_data, &.{ " bar", null });
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("]");
     try scanner.expectNextType(error.BufferUnderrun);
     scanner.feedEof();
     try scanner.expectNextTypeStringSeq(.text_data, &.{ "]", null });
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("]]");
     try scanner.expectNextType(error.BufferUnderrun);
     scanner.feedEof();
     try scanner.expectNextTypeStringSeq(.text_data, &.{ "]]", null });
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("]]>");
     try scanner.expectNextType(.cdata_end);
     try scanner.expectNextType(error.BufferUnderrun);
@@ -1693,55 +1926,55 @@ test "Scanner Text Data" {
 }
 
 test "Scanner Element Closing Tags" {
-    var scanner: Scanner = undefined;
+    var scanner: CheckedScanner = undefined;
 
-    scanner = Scanner.initComplete(.{}, "</foo>");
+    scanner = CheckedScanner.initComplete("</foo>");
     try scanner.expectNextType(.element_close);
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "</foo >");
+    scanner = CheckedScanner.initComplete("</foo >");
     try scanner.expectNextType(.element_close);
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
     try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "</ >");
+    scanner = CheckedScanner.initComplete("</ >");
     try scanner.expectNextType(.element_close);
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
     try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "</>");
+    scanner = CheckedScanner.initComplete("</>");
     try scanner.expectNextType(.element_close);
     try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
 }
 
 test "Scanner Element Opening Tags" {
-    var scanner: Scanner = undefined;
+    var scanner: CheckedScanner = undefined;
 
-    scanner = Scanner.initComplete(.{}, "<");
+    scanner = CheckedScanner.initComplete("<");
     try scanner.expectNextType(.element_open);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<foo  />");
+    scanner = CheckedScanner.initComplete("<foo  />");
     try scanner.expectNextType(.element_open);
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ "  ", null });
     try scanner.expectNextType(.tag_slash_close);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<foo  >");
+    scanner = CheckedScanner.initComplete("<foo  >");
     try scanner.expectNextType(.element_open);
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ "  ", null });
     try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<foo  / >");
+    scanner = CheckedScanner.initComplete("<foo  / >");
     try scanner.expectNextType(.element_open);
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ "  ", null });
@@ -1750,7 +1983,7 @@ test "Scanner Element Opening Tags" {
     try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<foo bar='fizz'>");
+    scanner = CheckedScanner.initComplete("<foo bar='fizz'>");
     try scanner.expectNextType(.element_open);
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
@@ -1762,7 +1995,7 @@ test "Scanner Element Opening Tags" {
     try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<foo bar = 'fizz' >");
+    scanner = CheckedScanner.initComplete("<foo bar = 'fizz' >");
     try scanner.expectNextType(.element_open);
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
@@ -1777,7 +2010,7 @@ test "Scanner Element Opening Tags" {
     try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<foo bar=\"fizz\">");
+    scanner = CheckedScanner.initComplete("<foo bar=\"fizz\">");
     try scanner.expectNextType(.element_open);
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
@@ -1789,7 +2022,7 @@ test "Scanner Element Opening Tags" {
     try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<foo bar='&baz;'>");
+    scanner = CheckedScanner.initComplete("<foo bar='&baz;'>");
     try scanner.expectNextType(.element_open);
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
@@ -1797,13 +2030,13 @@ test "Scanner Element Opening Tags" {
     try scanner.expectNextType(.attr_eql);
     try scanner.expectNextType(.quote_single);
     try scanner.expectNextType(.reference);
-    try scanner.expectNextStringSeq(&.{ "baz", null });
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "baz", null });
     try scanner.expectNextType(.reference_end);
     try scanner.expectNextType(.quote_single);
     try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<foo  bar='fizz&baz;buzz'>");
+    scanner = CheckedScanner.initComplete("<foo  bar='fizz&baz;buzz'>");
     try scanner.expectNextType(.element_open);
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ "  ", null });
@@ -1812,14 +2045,14 @@ test "Scanner Element Opening Tags" {
     try scanner.expectNextType(.quote_single);
     try scanner.expectNextTypeStringSeq(.text_data, &.{ "fizz", null });
     try scanner.expectNextType(.reference);
-    try scanner.expectNextStringSeq(&.{ "baz", null });
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "baz", null });
     try scanner.expectNextType(.reference_end);
     try scanner.expectNextTypeStringSeq(.text_data, &.{ "buzz", null });
     try scanner.expectNextType(.quote_single);
     try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("<fo");
     try scanner.expectNextType(.element_open);
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "fo", error.BufferUnderrun });
@@ -1840,7 +2073,7 @@ test "Scanner Element Opening Tags" {
     try scanner.expectNextStringSeq(&.{ "zz", null });
 
     try scanner.expectNextType(.reference);
-    try scanner.expectNextString("ba");
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "ba", error.BufferUnderrun });
     try scanner.expectNextString(error.BufferUnderrun);
     scanner.feedInput("z;bu");
     try scanner.expectNextStringSeq(&.{ "z", null });
@@ -1861,23 +2094,23 @@ test "Scanner Element Opening Tags" {
 
 test "Scanner Document Type Definition" {
     if (true) return error.SkipZigTest;
-    var scanner: Scanner = undefined;
+    var scanner: CheckedScanner = undefined;
 
-    scanner = Scanner.initComplete(.{}, "<!DOCTYPE");
+    scanner = CheckedScanner.initComplete("<!DOCTYPE");
     try scanner.expectNextType(.dtd);
     try scanner.expectNextType(.eof);
-    scanner = Scanner.initComplete(.{}, "<!DOCTYPE>");
+    scanner = CheckedScanner.initComplete("<!DOCTYPE>");
     try scanner.expectNextType(.dtd);
     try scanner.expectNextType(.dtd_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<!DOCTYPEfoo");
+    scanner = CheckedScanner.initComplete("<!DOCTYPEfoo");
     try scanner.expectNextType(.dtd);
     try scanner.expectNextType(.dtd_token);
     try scanner.expectNextStringSeq(&.{ "foo", null });
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initStreaming(.{});
+    scanner = CheckedScanner.initStreaming();
     scanner.feedInput("<!DOCTYPEfoo");
     try scanner.expectNextType(.dtd);
     try scanner.expectNextType(.dtd_token);
@@ -1886,7 +2119,7 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextString(null);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<!DOCTYPE foo SYSTEM 'bar");
+    scanner = CheckedScanner.initComplete("<!DOCTYPE foo SYSTEM 'bar");
     try scanner.expectNextType(.dtd);
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
     try scanner.expectNextTypeStringSeq(.dtd_token, &.{ "foo", null });
@@ -1897,7 +2130,7 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextStringSeq(&.{ "bar", null });
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<!DOCTYPE foo SYSTEM 'bar' >");
+    scanner = CheckedScanner.initComplete("<!DOCTYPE foo SYSTEM 'bar' >");
     try scanner.expectNextType(.dtd);
 
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
@@ -1914,7 +2147,7 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextType(.dtd_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<!DOCTYPE []>");
+    scanner = CheckedScanner.initComplete("<!DOCTYPE []>");
     try scanner.expectNextType(.dtd);
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
     try scanner.expectNextType(.dtd_int_subset);
@@ -1922,7 +2155,7 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextType(.dtd_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<!DOCTYPE [ asdf ]>");
+    scanner = CheckedScanner.initComplete("<!DOCTYPE [ asdf ]>");
     try scanner.expectNextType(.dtd);
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
     try scanner.expectNextType(.dtd_int_subset);
@@ -1933,7 +2166,7 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextType(.dtd_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<!DOCTYPE [ asdf%foo; ]>");
+    scanner = CheckedScanner.initComplete("<!DOCTYPE [ asdf%foo; ]>");
     try scanner.expectNextType(.dtd);
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
     try scanner.expectNextType(.dtd_int_subset);
@@ -1945,7 +2178,7 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextType(.dtd_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(.{}, "<!DOCTYPE foo PUBLIC 'bar' [\n\n] >");
+    scanner = CheckedScanner.initComplete("<!DOCTYPE foo PUBLIC 'bar' [\n\n] >");
     try scanner.expectNextType(.dtd);
 
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
@@ -1969,7 +2202,7 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextType(.dtd_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(
+    scanner = CheckedScanner.initComplete(
         \\<!DOCTYPE [
         \\  <!ELEMENT foo EMPTY>
         \\]>
@@ -1989,7 +2222,7 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextType(.dtd_end);
     try scanner.expectNextType(.eof);
 
-    scanner = Scanner.initComplete(
+    scanner = CheckedScanner.initComplete(
         \\<!DOCTYPE [
         \\  <!ELEMENT foo
         \\]>
@@ -2007,7 +2240,7 @@ test Scanner {
         \\
     , 2, 2);
 
-    var scanner = Scanner.initStreaming(.{});
+    var scanner = CheckedScanner.initStreaming();
     try scanner.expectNextType(error.BufferUnderrun);
     scanner.feedInput(feeder.next().?);
     try scanner.expectNextType(.pi);
@@ -2020,31 +2253,28 @@ test Scanner {
         try scanner.expectNextStringSeq(&.{ expected, error.BufferUnderrun });
         scanner.feedInput(feeder.next().?);
     }
+    try scanner.expectNextString(null);
     try scanner.expectNextType(.pi_end);
 
     try scanner.expectNextType(error.BufferUnderrun);
     scanner.feedInput(feeder.next().?);
     try scanner.expectNextTypeStringSeq(.text_data, &.{ "\n\n", error.BufferUnderrun });
-    try scanner.expectNextType(error.BufferUnderrun);
     scanner.feedInput(feeder.next().?);
+    try scanner.expectNextString(null);
 
     try scanner.expectNextType(.element_open);
-    try scanner.expectNextString("f");
-    try scanner.expectNextString(error.BufferUnderrun);
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "f", error.BufferUnderrun });
     scanner.feedInput(feeder.next().?);
-    try scanner.expectNextString("oo");
-    try scanner.expectNextString(error.BufferUnderrun);
+    try scanner.expectNextStringSeq(&.{ "oo", error.BufferUnderrun });
     scanner.feedInput(feeder.next().?);
     try scanner.expectNextString(null);
     try scanner.expectNextType(.tag_basic_close);
 
-    try scanner.expectNextType(.text_data);
-    try scanner.expectNextString("\n");
+    try scanner.expectNextTypeStringSeq(.text_data, &.{ "\n", error.BufferUnderrun });
 
     for (comptime &[_]*const [2:0]u8{
         "  ", "Lo", "re", "m ", "ip", "su", "m\n", "  ",
     }) |expected| {
-        try scanner.expectNextString(error.BufferUnderrun);
         scanner.feedInput(feeder.next().?);
         try scanner.expectNextString(expected);
     }
@@ -2106,19 +2336,14 @@ test Scanner {
     try scanner.expectNextString(null);
 
     try scanner.expectNextType(.element_close);
-    try scanner.expectNextString(error.BufferUnderrun);
+    try scanner.expectNextType(error.BufferUnderrun);
     scanner.feedInput(feeder.next().?);
-    try scanner.expectNextType(.tag_token);
-    try scanner.expectNextString("fo");
-    try scanner.expectNextString(error.BufferUnderrun);
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "fo", error.BufferUnderrun });
     scanner.feedInput(feeder.next().?);
-    try scanner.expectNextString("o");
-    try scanner.expectNextString(null);
+    try scanner.expectNextStringSeq(&.{ "o", null });
     try scanner.expectNextType(.tag_basic_close);
     scanner.feedInput(feeder.next().?);
-    try scanner.expectNextType(.text_data);
-    try scanner.expectNextString("\n");
-    try scanner.expectNextString(error.BufferUnderrun);
+    try scanner.expectNextTypeStringSeq(.text_data, &.{ "\n", error.BufferUnderrun });
     scanner.feedEof();
     try scanner.expectNextString(null);
     try scanner.expectNextType(.eof);

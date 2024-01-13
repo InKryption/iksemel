@@ -3,9 +3,9 @@ const assert = std.debug.assert;
 
 const xml = @import("xml.zig");
 
-pub inline fn readingScanner(src_reader: anytype, read_buffer: []u8, options: xml.Scanner.InitOptions) ReadingScanner(@TypeOf(src_reader)) {
+pub inline fn readingScanner(src_reader: anytype, read_buffer: []u8) ReadingScanner(@TypeOf(src_reader)) {
     const Rs = ReadingScanner(@TypeOf(src_reader));
-    return Rs.init(src_reader, read_buffer, options);
+    return Rs.init(src_reader, read_buffer);
 }
 
 pub fn ReadingScanner(comptime SrcReader: type) type {
@@ -15,10 +15,10 @@ pub fn ReadingScanner(comptime SrcReader: type) type {
         buffer: []u8,
         const Self = @This();
 
-        pub inline fn init(src_reader: SrcReader, read_buffer: []u8, options: xml.Scanner.InitOptions) Self {
+        pub inline fn init(src_reader: SrcReader, read_buffer: []u8) Self {
             assert(read_buffer.len != 0);
             return .{
-                .scanner = xml.Scanner.initStreaming(options),
+                .scanner = xml.Scanner.initStreaming(),
                 .src = src_reader,
                 .buffer = read_buffer,
             };
@@ -53,14 +53,10 @@ pub fn ReadingScanner(comptime SrcReader: type) type {
 
         /// Writes the string to the stream.
         /// Returns true if there was any non-null component of the string, false otherwise.
-        pub fn nextStringStream(rs: *Self, out_writer: anytype) (Error || @TypeOf(out_writer).Error)!bool {
-            const first_str = (try rs.nextString()) orelse return false;
-            try out_writer.writeAll(first_str);
-
+        pub fn nextStringStream(rs: *Self, out_writer: anytype) (Error || @TypeOf(out_writer).Error)!void {
             while (try rs.nextString()) |str| {
                 try out_writer.writeAll(str);
             }
-            return true;
         }
 
         inline fn feed(rs: *Self) SrcReader.Error!void {
@@ -152,7 +148,7 @@ test ReadingScanner {
     );
 
     var rs_buffer: [2]u8 = undefined;
-    var rs = readingScanner(fbs.reader(), &rs_buffer, .{});
+    var rs = readingScanner(fbs.reader(), &rs_buffer);
 
     var tt_or_str_list = std.ArrayList(TokTypeOrStr).init(std.testing.allocator);
     defer tt_or_str_list.deinit();
