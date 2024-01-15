@@ -573,7 +573,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
                 return .eof;
             }
             const matching_quote_char: u8, //
-            const matching_type: TokenType, //
+            const matching_quote_type: TokenType, //
             const on_ref_state: State //
             = comptime switch (tag) {
                 .element_tag_sq => .{ '\'', .quote_single, .@"element_tag_sq,&" },
@@ -584,7 +584,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
                 matching_quote_char => {
                     scanner.state = .element_tag;
                     scanner.index += 1;
-                    return matching_type;
+                    return matching_quote_type;
                 },
                 '&' => {
                     scanner.state = on_ref_state;
@@ -819,7 +819,112 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
             scanner.index += 1;
             return .dtd;
         },
-        .dtd => @panic("TODO"),
+        .dtd => {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .text_data;
+                return .eof;
+            }
+            switch (src[scanner.index]) {
+                '>' => {
+                    scanner.state = .text_data;
+                    scanner.index += 1;
+                    return .tag_basic_close;
+                },
+                '\'' => {
+                    scanner.state = .dtd_sq;
+                    scanner.index += 1;
+                    return .quote_single;
+                },
+                '\"' => {
+                    scanner.state = .dtd_dq;
+                    scanner.index += 1;
+                    return .quote_double;
+                },
+                '[' => {
+                    scanner.state = .dtd_int_subset;
+                    scanner.index += 1;
+                    return .dtd_int_subset;
+                },
+                else => {
+                    const non_whitespace = std.mem.indexOfScalar(u8, whitespace_set, src[scanner.index]) == null;
+                    scanner.state = if (non_whitespace) .dtd_token else .dtd_whitespace;
+                    return if (non_whitespace) .tag_token else .tag_whitespace;
+                },
+            }
+        },
+
+        .dtd_sq,
+        .dtd_dq,
+        => |tag| {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .text_data;
+                return .eof;
+            }
+            const matching_quote_char: u8, //
+            const matching_quote_type: TokenType //
+            = switch (tag) {
+                .dtd_sq => .{ '\'', .quote_single },
+                .dtd_dq => .{ '\"', .quote_double },
+                else => unreachable,
+            };
+            if (src[scanner.index] != matching_quote_char) {
+                return .text_data;
+            }
+            scanner.state = .dtd;
+            scanner.index += 1;
+            return matching_quote_type;
+        },
+        .dtd_sq_ref => @panic("TODO"),
+        .dtd_dq_ref => @panic("TODO"),
+        .dtd_token => unreachable,
+        .dtd_whitespace => unreachable,
+
+        .dtd_int_subset => {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .text_data;
+                return .eof;
+            }
+            switch (src[scanner.index]) {
+                ']' => {
+                    scanner.state = .dtd;
+                    scanner.index += 1;
+                    return .dtd_int_subset_end;
+                },
+                '%' => {
+                    scanner.state = .dtd_int_subset_pe_reference;
+                    scanner.index += 1;
+                    return .pe_reference;
+                },
+                '<' => @panic("TODO"),
+                else => {
+                    const non_whitespace = std.mem.indexOfScalar(u8, whitespace_set, src[scanner.index]) == null;
+                    scanner.state = if (non_whitespace) .dtd_int_subset_token else .dtd_int_subset_whitespace;
+                    return if (non_whitespace) .invalid_token else .tag_whitespace;
+                },
+            }
+        },
+        .dtd_int_subset_token => unreachable,
+        .dtd_int_subset_whitespace => unreachable,
+        .dtd_int_subset_pe_reference => {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .text_data;
+                return .reference_end_invalid;
+            }
+            if (src[scanner.index] == ';') {
+                scanner.state = .dtd_int_subset;
+                scanner.index += 1;
+                return .reference_end;
+            }
+            if (std.mem.indexOfScalar(u8, whitespace_set ++ &[_]u8{ ']', '&', '<' }, src[scanner.index]) != null) {
+                scanner.state = .dtd_int_subset;
+                return .reference_end_invalid;
+            }
+            return .tag_token;
+        },
 
         .@"<!:incomplete" => @panic("TODO"),
         .@"<!--:incomplete" => @panic("TODO"),
@@ -1116,6 +1221,106 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
 
         .dtd => @panic("TODO"),
 
+        .dtd_sq,
+        .dtd_dq,
+        => |tag| {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .text_data;
+                return null;
+            }
+            const matching_quote_char: u8 = switch (tag) {
+                .dtd_sq => '\'',
+                .dtd_dq => '\"',
+                else => unreachable,
+            };
+            const str_start = scanner.index;
+            const str_end = std.mem.indexOfScalarPos(u8, src, scanner.index, matching_quote_char) orelse src.len;
+            scanner.index = str_end;
+            if (str_start != str_end) {
+                return helper.rangeInit(str_start, str_end);
+            }
+            return null;
+        },
+        .dtd_sq_ref => @panic("TODO"),
+        .dtd_dq_ref => @panic("TODO"),
+        .dtd_token => {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .text_data;
+                return null;
+            }
+            const str_start = scanner.index;
+            const str_end = std.mem.indexOfAnyPos(u8, src, scanner.index, whitespace_set ++ &[_]u8{ '>', '[', '\'', '\"' }) orelse src.len;
+            scanner.index = str_end;
+            if (str_start != str_end) {
+                return helper.rangeInit(str_start, str_end);
+            }
+            scanner.state = .dtd;
+            return null;
+        },
+        .dtd_whitespace => {
+            if (scanner.index == src.len) {
+                if (eof_specified) return error.BufferUnderrun;
+                scanner.state = .text_data;
+                return null;
+            }
+            const str_start = scanner.index;
+            const str_end = std.mem.indexOfNonePos(u8, src, scanner.index, whitespace_set) orelse src.len;
+            scanner.index = str_end;
+            if (str_start != str_end) {
+                return helper.rangeInit(str_start, str_end);
+            }
+            scanner.state = .dtd;
+            return null;
+        },
+
+        .dtd_int_subset => @panic("TODO"),
+        .dtd_int_subset_token => {
+            if (scanner.index == src.len) {
+                if (eof_specified) return error.BufferUnderrun;
+                scanner.state = .text_data;
+                return null;
+            }
+            const str_start = scanner.index;
+            const str_end = std.mem.indexOfAnyPos(u8, src, scanner.index, whitespace_set ++ &[_]u8{ '%', ']', '>' }) orelse src.len;
+            scanner.index = str_end;
+            if (str_start != str_end) {
+                return helper.rangeInit(str_start, str_end);
+            }
+            scanner.state = .dtd_int_subset;
+            return null;
+        },
+        .dtd_int_subset_whitespace => {
+            if (scanner.index == src.len) {
+                if (eof_specified) return error.BufferUnderrun;
+                scanner.state = .text_data;
+                return null;
+            }
+            const str_start = scanner.index;
+            const str_end = std.mem.indexOfNonePos(u8, src, scanner.index, whitespace_set) orelse src.len;
+            scanner.index = str_end;
+            if (str_start != str_end) {
+                return helper.rangeInit(str_start, str_end);
+            }
+            scanner.state = .dtd_int_subset;
+            return null;
+        },
+        .dtd_int_subset_pe_reference => {
+            if (scanner.index == src.len) {
+                if (eof_specified) return error.BufferUnderrun;
+                scanner.state = .text_data;
+                return null;
+            }
+            const str_start = scanner.index;
+            const str_end = std.mem.indexOfAnyPos(u8, src, scanner.index, whitespace_set ++ &[_]u8{ ';', '%', '<', ']', '>' }) orelse src.len;
+            scanner.index = str_end;
+            if (str_start != str_end) {
+                return helper.rangeInit(str_start, str_end);
+            }
+            return null;
+        },
+
         // invalid tokens
 
         .@"text_data,<!" => {
@@ -1273,6 +1478,17 @@ const State = enum {
     @"<!DOCTY",
     @"<!DOCTYP",
     dtd,
+    dtd_sq,
+    dtd_dq,
+    dtd_sq_ref,
+    dtd_dq_ref,
+    dtd_token,
+    dtd_whitespace,
+
+    dtd_int_subset,
+    dtd_int_subset_token,
+    dtd_int_subset_whitespace,
+    dtd_int_subset_pe_reference,
 
     @"<!:incomplete",
     @"<!--:incomplete",
@@ -2093,7 +2309,7 @@ test "Scanner Element Opening Tags" {
 }
 
 test "Scanner Document Type Definition" {
-    if (true) return error.SkipZigTest;
+    // if (true) return error.SkipZigTest;
     var scanner: CheckedScanner = undefined;
 
     scanner = CheckedScanner.initComplete("<!DOCTYPE");
@@ -2101,20 +2317,18 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextType(.eof);
     scanner = CheckedScanner.initComplete("<!DOCTYPE>");
     try scanner.expectNextType(.dtd);
-    try scanner.expectNextType(.dtd_end);
+    try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
 
     scanner = CheckedScanner.initComplete("<!DOCTYPEfoo");
     try scanner.expectNextType(.dtd);
-    try scanner.expectNextType(.dtd_token);
-    try scanner.expectNextStringSeq(&.{ "foo", null });
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextType(.eof);
 
     scanner = CheckedScanner.initStreaming();
     scanner.feedInput("<!DOCTYPEfoo");
     try scanner.expectNextType(.dtd);
-    try scanner.expectNextType(.dtd_token);
-    try scanner.expectNextStringSeq(&.{ "foo", error.BufferUnderrun });
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", error.BufferUnderrun });
     scanner.feedEof();
     try scanner.expectNextString(null);
     try scanner.expectNextType(.eof);
@@ -2122,29 +2336,29 @@ test "Scanner Document Type Definition" {
     scanner = CheckedScanner.initComplete("<!DOCTYPE foo SYSTEM 'bar");
     try scanner.expectNextType(.dtd);
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try scanner.expectNextTypeStringSeq(.dtd_token, &.{ "foo", null });
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try scanner.expectNextTypeStringSeq(.dtd_token, &.{ "SYSTEM", null });
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "SYSTEM", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try scanner.expectNextType(.dtd_literal_quote_single);
-    try scanner.expectNextStringSeq(&.{ "bar", null });
+    try scanner.expectNextType(.quote_single);
+    try scanner.expectNextTypeStringSeq(.text_data, &.{ "bar", null });
     try scanner.expectNextType(.eof);
 
     scanner = CheckedScanner.initComplete("<!DOCTYPE foo SYSTEM 'bar' >");
     try scanner.expectNextType(.dtd);
 
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try scanner.expectNextTypeStringSeq(.dtd_token, &.{ "foo", null });
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try scanner.expectNextTypeStringSeq(.dtd_token, &.{ "SYSTEM", null });
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "SYSTEM", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
 
-    try scanner.expectNextType(.dtd_literal_quote_single);
-    try scanner.expectNextStringSeq(&.{ "bar", null });
-    try scanner.expectNextType(.dtd_literal_end);
+    try scanner.expectNextType(.quote_single);
+    try scanner.expectNextTypeStringSeq(.text_data, &.{ "bar", null });
+    try scanner.expectNextType(.quote_single);
 
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try scanner.expectNextType(.dtd_end);
+    try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
 
     scanner = CheckedScanner.initComplete("<!DOCTYPE []>");
@@ -2152,7 +2366,7 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
     try scanner.expectNextType(.dtd_int_subset);
     try scanner.expectNextType(.dtd_int_subset_end);
-    try scanner.expectNextType(.dtd_end);
+    try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
 
     scanner = CheckedScanner.initComplete("<!DOCTYPE [ asdf ]>");
@@ -2163,7 +2377,7 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextTypeStringSeq(.invalid_token, &.{ "asdf", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
     try scanner.expectNextType(.dtd_int_subset_end);
-    try scanner.expectNextType(.dtd_end);
+    try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
 
     scanner = CheckedScanner.initComplete("<!DOCTYPE [ asdf%foo; ]>");
@@ -2172,24 +2386,26 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextType(.dtd_int_subset);
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
     try scanner.expectNextTypeStringSeq(.invalid_token, &.{ "asdf", null });
-    try scanner.expectNextTypeStringSeq(.dtd_int_subset_pe_ref, &.{ "foo", null });
+    try scanner.expectNextType(.pe_reference);
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
+    try scanner.expectNextType(.reference_end);
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
     try scanner.expectNextType(.dtd_int_subset_end);
-    try scanner.expectNextType(.dtd_end);
+    try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
 
     scanner = CheckedScanner.initComplete("<!DOCTYPE foo PUBLIC 'bar' [\n\n] >");
     try scanner.expectNextType(.dtd);
 
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try scanner.expectNextTypeStringSeq(.dtd_token, &.{ "foo", null });
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try scanner.expectNextTypeStringSeq(.dtd_token, &.{ "PUBLIC", null });
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "PUBLIC", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
 
-    try scanner.expectNextType(.dtd_literal_quote_single);
-    try scanner.expectNextStringSeq(&.{ "bar", null });
-    try scanner.expectNextType(.dtd_literal_end);
+    try scanner.expectNextType(.quote_single);
+    try scanner.expectNextTypeStringSeq(.text_data, &.{ "bar", null });
+    try scanner.expectNextType(.quote_single);
 
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
 
@@ -2199,8 +2415,10 @@ test "Scanner Document Type Definition" {
 
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
 
-    try scanner.expectNextType(.dtd_end);
+    try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
+
+    if (true) return error.SkipZigTest;
 
     scanner = CheckedScanner.initComplete(
         \\<!DOCTYPE [
@@ -2213,20 +2431,14 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ "\n  ", null });
     try scanner.expectNextType(.dtd_int_subset_element);
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try scanner.expectNextTypeStringSeq(.dtd_token, &.{ "foo", null });
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try scanner.expectNextTypeStringSeq(.dtd_token, &.{ "EMPTY", null });
-    try scanner.expectNextType(.dtd_int_subset_element_end);
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "EMPTY", null });
+    try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ "\n", null });
     try scanner.expectNextType(.dtd_int_subset_end);
-    try scanner.expectNextType(.dtd_end);
+    try scanner.expectNextType(.tag_basic_close);
     try scanner.expectNextType(.eof);
-
-    scanner = CheckedScanner.initComplete(
-        \\<!DOCTYPE [
-        \\  <!ELEMENT foo
-        \\]>
-    );
 }
 
 test Scanner {
