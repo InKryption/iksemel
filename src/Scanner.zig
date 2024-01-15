@@ -713,7 +713,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
                 if (!eof_specified) return error.BufferUnderrun;
                 return .invalid_token;
             }
-            const expected_char: u8, const state_on_match = comptime switch (tag) {
+            const expected_char: u8, const state_on_match: State = comptime switch (tag) {
                 .@"<![" => .{ 'C', .@"<![C" },
                 .@"<![C" => .{ 'D', .@"<![CD" },
                 .@"<![CD" => .{ 'A', .@"<![CDA" },
@@ -898,7 +898,12 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
                     scanner.index += 1;
                     return .pe_reference;
                 },
-                '<' => @panic("TODO"),
+                '<' => {
+                    scanner.state = .@"dtd_int_subset,<";
+                    scanner.index += 1;
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
+                },
                 else => {
                     const non_whitespace = std.mem.indexOfScalar(u8, whitespace_set, src[scanner.index]) == null;
                     scanner.state = if (non_whitespace) .dtd_int_subset_token else .dtd_int_subset_whitespace;
@@ -925,6 +930,160 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
             }
             return .tag_token;
         },
+
+        .@"dtd_int_subset,<" => {
+            if (scanner.index == src.len) {
+                if (eof_specified) return error.BufferUnderrun;
+                return .invalid_token;
+            }
+            switch (src[scanner.index]) {
+                '?' => {
+                    scanner.state = .@"dtd_int_subset,<?";
+                    scanner.index += 1;
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
+                },
+                '!' => {
+                    scanner.state = .@"dtd_int_subset,<!";
+                    scanner.index += 1;
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
+                },
+                else => return .invalid_token,
+            }
+        },
+        .@"dtd_int_subset,<?" => @panic("TODO"),
+        .@"dtd_int_subset,<!" => {
+            if (scanner.index == src.len) {
+                if (eof_specified) return error.BufferUnderrun;
+                return .invalid_token;
+            }
+            switch (src[scanner.index]) {
+                'E' => {
+                    scanner.state = .@"dtd_int_subset,<!E";
+                    scanner.index += 1;
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
+                },
+                'A' => {
+                    scanner.state = .@"dtd_int_subset,<!A";
+                    scanner.index += 1;
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
+                },
+                else => return .invalid_token,
+            }
+        },
+
+        .@"dtd_int_subset,<!E" => {
+            if (scanner.index == src.len) {
+                if (eof_specified) return error.BufferUnderrun;
+                return .invalid_token;
+            }
+            switch (src[scanner.index]) {
+                'N' => {
+                    scanner.state = .@"dtd_int_subset,<!EN";
+                    scanner.index += 1;
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
+                },
+                'L' => {
+                    scanner.state = .@"dtd_int_subset,<!EL";
+                    scanner.index += 1;
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
+                },
+                else => return .invalid_token,
+            }
+        },
+
+        inline //
+        .@"dtd_int_subset,<!EN",
+        .@"dtd_int_subset,<!ENT",
+        .@"dtd_int_subset,<!ENTI",
+
+        .@"dtd_int_subset,<!EL",
+        .@"dtd_int_subset,<!ELE",
+        .@"dtd_int_subset,<!ELEM",
+        .@"dtd_int_subset,<!ELEME",
+
+        .@"dtd_int_subset,<!A",
+        .@"dtd_int_subset,<!AT",
+        .@"dtd_int_subset,<!ATT",
+        .@"dtd_int_subset,<!ATTL",
+        .@"dtd_int_subset,<!ATTLI",
+        => |tag| {
+            if (scanner.index == src.len) {
+                if (eof_specified) return error.BufferUnderrun;
+                return .invalid_token;
+            }
+            const expected_char: u8, const state_on_match: State = comptime switch (tag) {
+                .@"dtd_int_subset,<!EN" => .{ 'T', .@"dtd_int_subset,<!ENT" },
+                .@"dtd_int_subset,<!ENT" => .{ 'I', .@"dtd_int_subset,<!ENTI" },
+                .@"dtd_int_subset,<!ENTI" => .{ 'T', .@"dtd_int_subset,<!ENTIT" },
+
+                .@"dtd_int_subset,<!EL" => .{ 'E', .@"dtd_int_subset,<!ELE" },
+                .@"dtd_int_subset,<!ELE" => .{ 'M', .@"dtd_int_subset,<!ELEM" },
+                .@"dtd_int_subset,<!ELEM" => .{ 'E', .@"dtd_int_subset,<!ELEME" },
+                .@"dtd_int_subset,<!ELEME" => .{ 'N', .@"dtd_int_subset,<!ELEMEN" },
+
+                .@"dtd_int_subset,<!A" => .{ 'T', .@"dtd_int_subset,<!AT" },
+                .@"dtd_int_subset,<!AT" => .{ 'T', .@"dtd_int_subset,<!ATT" },
+                .@"dtd_int_subset,<!ATT" => .{ 'L', .@"dtd_int_subset,<!ATTL" },
+                .@"dtd_int_subset,<!ATTL" => .{ 'I', .@"dtd_int_subset,<!ATTLI" },
+                .@"dtd_int_subset,<!ATTLI" => .{ 'S', .@"dtd_int_subset,<!ATTLIS" },
+                else => unreachable,
+            };
+            if (src[scanner.index] != expected_char) {
+                return .invalid_token;
+            }
+            scanner.state = state_on_match;
+            scanner.index += 1;
+            // return @call(.always_tail, nextTypeImpl, .{scanner});
+            return scanner.nextTypeImpl();
+        },
+
+        .@"dtd_int_subset,<!ENTIT" => {
+            if (scanner.index == src.len) {
+                if (eof_specified) return error.BufferUnderrun;
+                return .invalid_token;
+            }
+            if (src[scanner.index] != 'Y') {
+                return .invalid_token;
+            }
+            scanner.state = .dtd_int_subset_entity;
+            scanner.index += 1;
+            return .dtd_int_subset_entity;
+        },
+        .dtd_int_subset_entity => @panic("TODO"),
+
+        .@"dtd_int_subset,<!ELEMEN" => {
+            if (scanner.index == src.len) {
+                if (eof_specified) return error.BufferUnderrun;
+                return .invalid_token;
+            }
+            if (src[scanner.index] != 'T') {
+                return .invalid_token;
+            }
+            scanner.state = .dtd_int_subset_element;
+            scanner.index += 1;
+            return .dtd_int_subset_element;
+        },
+        .dtd_int_subset_element => @panic("TODO"),
+
+        .@"dtd_int_subset,<!ATTLIS" => {
+            if (scanner.index == src.len) {
+                if (eof_specified) return error.BufferUnderrun;
+                return .invalid_token;
+            }
+            if (src[scanner.index] != 'T') {
+                return .invalid_token;
+            }
+            scanner.state = .dtd_int_subset_attlist;
+            scanner.index += 1;
+            return .dtd_int_subset_attlist;
+        },
+        .dtd_int_subset_attlist => @panic("TODO"),
 
         .@"<!:incomplete" => @panic("TODO"),
         .@"<!--:incomplete" => @panic("TODO"),
@@ -1275,7 +1434,7 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
             return null;
         },
 
-        .dtd_int_subset => @panic("TODO"),
+        .dtd_int_subset => unreachable,
         .dtd_int_subset_token => {
             if (scanner.index == src.len) {
                 if (eof_specified) return error.BufferUnderrun;
@@ -1373,6 +1532,35 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
                 else => unreachable,
             });
         },
+
+        .@"dtd_int_subset,<" => @panic("TODO"),
+
+        .@"dtd_int_subset,<?" => @panic("TODO"),
+        .@"dtd_int_subset,<!" => @panic("TODO"),
+
+        .@"dtd_int_subset,<!E" => @panic("TODO"),
+
+        .@"dtd_int_subset,<!EN" => @panic("TODO"),
+        .@"dtd_int_subset,<!ENT" => @panic("TODO"),
+        .@"dtd_int_subset,<!ENTI" => @panic("TODO"),
+        .@"dtd_int_subset,<!ENTIT" => @panic("TODO"),
+
+        .@"dtd_int_subset,<!EL" => @panic("TODO"),
+        .@"dtd_int_subset,<!ELE" => @panic("TODO"),
+        .@"dtd_int_subset,<!ELEM" => @panic("TODO"),
+        .@"dtd_int_subset,<!ELEME" => @panic("TODO"),
+        .@"dtd_int_subset,<!ELEMEN" => @panic("TODO"),
+
+        .@"dtd_int_subset,<!A" => @panic("TODO"),
+        .@"dtd_int_subset,<!AT" => @panic("TODO"),
+        .@"dtd_int_subset,<!ATT" => @panic("TODO"),
+        .@"dtd_int_subset,<!ATTL" => @panic("TODO"),
+        .@"dtd_int_subset,<!ATTLI" => @panic("TODO"),
+        .@"dtd_int_subset,<!ATTLIS" => @panic("TODO"),
+
+        .dtd_int_subset_entity => @panic("TODO"),
+        .dtd_int_subset_element => @panic("TODO"),
+        .dtd_int_subset_attlist => @panic("TODO"),
 
         .@"<!:incomplete" => return null,
         .@"<!--:incomplete" => return null,
@@ -1489,6 +1677,33 @@ const State = enum {
     dtd_int_subset_token,
     dtd_int_subset_whitespace,
     dtd_int_subset_pe_reference,
+
+    @"dtd_int_subset,<",
+    @"dtd_int_subset,<?",
+    @"dtd_int_subset,<!",
+
+    @"dtd_int_subset,<!E",
+
+    @"dtd_int_subset,<!EN",
+    @"dtd_int_subset,<!ENT",
+    @"dtd_int_subset,<!ENTI",
+    @"dtd_int_subset,<!ENTIT",
+    dtd_int_subset_entity,
+
+    @"dtd_int_subset,<!EL",
+    @"dtd_int_subset,<!ELE",
+    @"dtd_int_subset,<!ELEM",
+    @"dtd_int_subset,<!ELEME",
+    @"dtd_int_subset,<!ELEMEN",
+    dtd_int_subset_element,
+
+    @"dtd_int_subset,<!A",
+    @"dtd_int_subset,<!AT",
+    @"dtd_int_subset,<!ATT",
+    @"dtd_int_subset,<!ATTL",
+    @"dtd_int_subset,<!ATTLI",
+    @"dtd_int_subset,<!ATTLIS",
+    dtd_int_subset_attlist,
 
     @"<!:incomplete",
     @"<!--:incomplete",
