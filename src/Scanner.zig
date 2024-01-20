@@ -2006,7 +2006,10 @@ pub const TokenSrc = union(enum) {
         /// literal into a range immediately after receiving it.
         pub inline fn toRange(literal_tok: Literal, scanner: *const Scanner) Range {
             const len = literal_tok.toStr().len;
-            return scanner.src[scanner.index - len ..][0..len];
+            // return scanner.src[scanner.index - len ..][0..len];
+            const result: Range = .{ .start = scanner.index - len, .end = scanner.index };
+            assert(result.end - result.start == len);
+            return result;
         }
     };
 };

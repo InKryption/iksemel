@@ -11,9 +11,12 @@ pub inline fn readingScanner(src_reader: anytype, read_buffer: []u8) ReadingScan
 pub fn ReadingScanner(comptime SrcReader: type) type {
     return struct {
         scanner: xml.Scanner,
-        src: SrcReader,
+        src: Src,
         buffer: []u8,
         const Self = @This();
+
+        pub const Src = SrcReader;
+        pub const Error = Src.Error;
 
         pub inline fn init(src_reader: SrcReader, read_buffer: []u8) Self {
             assert(read_buffer.len != 0);
@@ -24,9 +27,7 @@ pub fn ReadingScanner(comptime SrcReader: type) type {
             };
         }
 
-        pub const Error = SrcReader.Error;
-
-        pub fn nextTokenType(rs: *Self) Error!xml.Scanner.TokenType {
+        pub fn nextType(rs: *Self) Error!xml.Scanner.TokenType {
             assert(rs.buffer.len != 0);
             return rs.scanner.nextType() catch |err_1| return switch (err_1) {
                 error.BufferUnderrun => while (true) {
@@ -161,7 +162,7 @@ test ReadingScanner {
     defer str_buffer.deinit();
 
     while (true) {
-        const tt = try rs.nextTokenType();
+        const tt = try rs.nextType();
         try tt_or_str_list.append(.{ .tt = tt });
         if (tt == .eof) break;
 
