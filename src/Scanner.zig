@@ -282,25 +282,43 @@ pub const TokenType = enum {
     /// * `.angle_bracket_right`.
     /// * `.eof`.
     dtd_start,
+
     /// The '<!ELEMENT' token.
     ///
     /// The subsequent token sequence will be one of:
-    /// TODO: Document
+    /// * `.tag_token`
+    /// * `.tag_whitespace`
+    /// * `.lparen`
+    /// * `.pipe`
+    /// * `.comma`
+    /// * `.rparen`
+    /// * `.qmark`
+    /// * `.asterisk`
+    /// * `.plus`
+    /// * `.percent`, where the subsequent token type will be one of:
+    ///    + `.tag_whitespace`, indicating that the percent is a standalone token (like in '<!ENTITY % foo ...').
+    ///    + `.tag_token`, indicating that the percent is the start of a Parsed Entity Reference.
+    ///    + `.semicolon`, indicating that the percent is the start of a Parsed Entity reference, ending the token sequence.
+    ///    + `.invalid_reference_end`, indicating that the percent is the start of a Parsed Entity Reference, ending the token sequence.
+    /// * `.quote_single`:
+    ///    + `.text_data`.
+    ///    + `.quote_single` ending the token sequence.
+    ///    + `.eof`.
+    /// * `.quote_double` following sequence is equivalent as for `.quote_single`, replacing it with `.quote_double`.
+    /// * `.angle_bracket_right`
+    /// * `.eof`
     element_decl,
     /// The '<!ENTITY' token.
     ///
-    /// The subsequent token sequence will be one of:
-    /// TODO: Document
+    /// The subsequent token sequence will be equivalent as for `.element_decl`.
     entity_decl,
     /// The '<!ATTLIST' token.
     ///
-    /// The subsequent token sequence will be one of:
-    /// TODO: Document
+    /// The subsequent token sequence will be equivalent as for `.element_decl`.
     attlist_decl,
     /// The '<!NOTATION' token.
     ///
-    /// The subsequent token sequence will be one of:
-    /// TODO: Document
+    /// The subsequent token sequence will be equivalent as for `.element_decl`.
     notation_decl,
 
     /// Whether or not the token represents any text to be returned by `nextSrc`/`nextString`.
@@ -1231,7 +1249,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
                     return .plus;
                 },
                 '%' => {
-                    scanner.state = .@"dtd_int_subset_tag,%";
+                    scanner.state = .dtd_int_subset_tag_pe_reference;
                     scanner.index += 1;
                     return .percent;
                 },
@@ -1282,10 +1300,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
             scanner.index += 1;
             return matching_quote_type;
         },
-        inline //
-        .@"dtd_int_subset_tag,%",
-        .dtd_int_subset_tag_pe_reference,
-        => |tag| {
+        .dtd_int_subset_tag_pe_reference => {
             if (scanner.index == src.len) {
                 if (eof_specified) return error.BufferUnderrun;
                 scanner.state = .text_data;
@@ -1299,22 +1314,11 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
                 },
                 '(', '|', ',', ')', '?', '*', '+', '%', '\'', '\"', '>' => {
                     scanner.state = .dtd_int_subset_tag;
-                    switch (tag) {
-                        .@"dtd_int_subset_tag,%" => {
-                            // return @call(.always_tail, nextTypeImpl, .{scanner});
-                            return scanner.nextTypeImpl();
-                        },
-                        .dtd_int_subset_tag_pe_reference => {
-                            return .invalid_reference_end;
-                        },
-                        else => comptime unreachable,
-                    }
+                    return .invalid_reference_end;
                 },
                 else => {
                     const non_whitespace = std.mem.indexOfScalar(u8, whitespace_set, src[scanner.index]) == null;
-                    if (non_whitespace) {
-                        return .tag_token;
-                    }
+                    if (non_whitespace) return .tag_token;
                     scanner.state = .dtd_int_subset_tag_whitespace;
                     return .tag_whitespace;
                 },
@@ -1807,7 +1811,7 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
             }
             return null;
         },
-        .@"dtd_int_subset_tag,%" => {
+        .dtd_int_subset_tag_pe_reference => {
             if (scanner.index == src.len) {
                 if (eof_specified) return error.BufferUnderrun;
                 scanner.state = .text_data;
@@ -1826,7 +1830,6 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
             scanner.state = .dtd_int_subset_tag_pe_reference;
             return null;
         },
-        .dtd_int_subset_tag_pe_reference => unreachable,
 
         .@"dtd_int_subset,<" => unreachable,
 
@@ -2112,7 +2115,6 @@ const State = enum {
     dtd_int_subset_tag_whitespace,
     dtd_int_subset_tag_quote_single,
     dtd_int_subset_tag_quote_double,
-    @"dtd_int_subset_tag,%",
     dtd_int_subset_tag_pe_reference,
 
     text_data_incomplete_tag,
@@ -3167,6 +3169,40 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextType(.angle_bracket_right);
 
     try scanner.expectNextTypeStringSeq(.text_data, &.{ "\n", null });
+    try scanner.expectNextType(.eof);
+
+    scanner = CheckedScanner.initComplete("<!DOCTYPE[<!ENTITY% >]>");
+    try scanner.expectNextType(.dtd_start);
+    try scanner.expectNextType(.square_bracket_left);
+    try scanner.expectNextType(.entity_decl);
+    try scanner.expectNextType(.percent);
+    try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
+    try scanner.expectNextType(.angle_bracket_right);
+    try scanner.expectNextType(.square_bracket_right);
+    try scanner.expectNextType(.angle_bracket_right);
+    try scanner.expectNextType(.eof);
+
+    scanner = CheckedScanner.initComplete("<!DOCTYPE[<!ENTITY%>]>");
+    try scanner.expectNextType(.dtd_start);
+    try scanner.expectNextType(.square_bracket_left);
+    try scanner.expectNextType(.entity_decl);
+    try scanner.expectNextType(.percent);
+    try scanner.expectNextType(.invalid_reference_end);
+    try scanner.expectNextType(.angle_bracket_right);
+    try scanner.expectNextType(.square_bracket_right);
+    try scanner.expectNextType(.angle_bracket_right);
+    try scanner.expectNextType(.eof);
+
+    scanner = CheckedScanner.initComplete("<!DOCTYPE[<!ENTITY %>]>");
+    try scanner.expectNextType(.dtd_start);
+    try scanner.expectNextType(.square_bracket_left);
+    try scanner.expectNextType(.entity_decl);
+    try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
+    try scanner.expectNextType(.percent);
+    try scanner.expectNextType(.invalid_reference_end);
+    try scanner.expectNextType(.angle_bracket_right);
+    try scanner.expectNextType(.square_bracket_right);
+    try scanner.expectNextType(.angle_bracket_right);
     try scanner.expectNextType(.eof);
 
     scanner = CheckedScanner.initComplete(
