@@ -121,6 +121,7 @@ pub const TokenType = enum {
     /// The end of the XML source.
     /// This is the last token that will appear.
     /// Terminates the token sequence.
+    /// The scanner will continue to return this after returning it once.
     eof,
 
     /// The '=' token.
@@ -240,7 +241,7 @@ pub const TokenType = enum {
     ///
     /// Starts a CDATA Section.
     /// The subsequent token sequence will be one of:
-    /// * `text_data`.
+    /// * `.text_data`.
     /// * `.cdata_end` ending the token sequence.
     /// * `.eof`.
     cdata_start,
@@ -2933,6 +2934,7 @@ test "Scanner Document Type Definition" {
     scanner = CheckedScanner.initComplete("<!DOCTYPE");
     try scanner.expectNextType(.dtd_start);
     try scanner.expectNextType(.eof);
+
     scanner = CheckedScanner.initComplete("<!DOCTYPE>");
     try scanner.expectNextType(.dtd_start);
     try scanner.expectNextType(.angle_bracket_right);

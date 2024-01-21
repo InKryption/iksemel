@@ -532,13 +532,34 @@ fn parseFromSource(
             },
             .pi_end => unreachable,
 
-            .cdata_start => @panic("TODO"),
-            .cdata_end => @panic("TODO"),
+            .cdata_start => {
+                try ast.nodes.ensureUnusedCapacity(allocator, 1);
+                const range: IndexPair = switch (try getNextNextTokenType(&scanner)) {
+                    .text_data => blk: {
+                        const range = try ast.nextStringRange(allocator, &scanner);
+                        switch (try getNextNextTokenType(&scanner)) {
+                            .cdata_end, .eof => {},
+                            else => unreachable,
+                        }
+                        break :blk range;
+                    },
+                    .cdata_end, .eof => .{ .lhs = 0, .rhs = 0 },
+                    else => unreachable,
+                };
+                const new_node_idx = ast.nodes.addOneAssumeCapacity();
+                ast.nodes.set(new_node_idx, .{
+                    .kind = .cdata,
+                    .idx_a = range.lhs,
+                    .idx_b = range.rhs,
+                    .next = 0,
+                });
+            },
+            .cdata_end => unreachable,
 
             .comment_start => @panic("TODO"),
-            .invalid_comment_dash_dash => @panic("TODO"),
-            .invalid_comment_end_triple_dash => @panic("TODO"),
-            .comment_end => @panic("TODO"),
+            .invalid_comment_dash_dash => unreachable,
+            .invalid_comment_end_triple_dash => unreachable,
+            .comment_end => unreachable,
 
             .dtd_start => @panic("TODO"),
             .element_decl => @panic("TODO"),
