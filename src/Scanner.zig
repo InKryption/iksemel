@@ -548,7 +548,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
             return .comment_start;
         },
 
-        .pi => {
+        inline .pi, .dtd_int_subset_pi => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
                 scanner.state = .text_data;
@@ -557,12 +557,16 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
             if (src[scanner.index] != '?') {
                 return .text_data;
             }
-            scanner.state = .@"pi,?";
+            scanner.state = comptime switch (tag) {
+                .pi => .@"pi,?",
+                .dtd_int_subset_pi => .@"dtd_int_subset_pi,?",
+                else => unreachable,
+            };
             scanner.index += 1;
             // return @call(.always_tail, nextTypeImpl, .{scanner});
             return scanner.nextTypeImpl();
         },
-        .@"pi,?" => {
+        inline .@"pi,?", .@"dtd_int_subset_pi,?" => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
                 return .text_data;
@@ -570,7 +574,11 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
             if (src[scanner.index] != '>') {
                 return .text_data;
             }
-            scanner.state = .text_data;
+            scanner.state = comptime switch (tag) {
+                .@"pi,?" => .text_data,
+                .@"dtd_int_subset_pi,?" => .dtd_int_subset,
+                else => unreachable,
+            };
             scanner.index += 1;
             return .pi_end;
         },
@@ -1038,7 +1046,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
             }
             switch (src[scanner.index]) {
                 '?' => {
-                    scanner.state = .@"dtd_int_subset,pi";
+                    scanner.state = .dtd_int_subset_pi;
                     scanner.index += 1;
                     return .pi_start;
                 },
@@ -1054,32 +1062,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
                 },
             }
         },
-        .@"dtd_int_subset,pi" => {
-            if (scanner.index == src.len) {
-                if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
-                return .eof;
-            }
-            if (src[scanner.index] != '?') {
-                return .text_data;
-            }
-            scanner.state = .@"dtd_int_subset,pi,?";
-            scanner.index += 1;
-            // return @call(.always_tail, nextTypeImpl, .{scanner});
-            return scanner.nextTypeImpl();
-        },
-        .@"dtd_int_subset,pi,?" => {
-            if (scanner.index == src.len) {
-                if (!eof_specified) return error.BufferUnderrun;
-                return .text_data;
-            }
-            if (src[scanner.index] != '>') {
-                return .text_data;
-            }
-            scanner.state = .dtd_int_subset;
-            scanner.index += 1;
-            return .pi_end;
-        },
+
         .@"dtd_int_subset,<!" => {
             if (scanner.index == src.len) {
                 if (eof_specified) return error.BufferUnderrun;
@@ -1418,7 +1401,7 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
 
         inline //
         .pi,
-        .@"dtd_int_subset,pi",
+        .dtd_int_subset_pi,
         => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
@@ -1433,7 +1416,7 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
             }
             scanner.state = comptime switch (tag) {
                 .pi => .@"pi,?",
-                .@"dtd_int_subset,pi" => .@"dtd_int_subset,pi,?",
+                .dtd_int_subset_pi => .@"dtd_int_subset_pi,?",
                 else => unreachable,
             };
             scanner.index += 1;
@@ -1442,11 +1425,11 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
         },
         inline //
         .@"pi,?",
-        .@"dtd_int_subset,pi,?",
+        .@"dtd_int_subset_pi,?",
         => |tag| {
             const state_on_unmatched: State = comptime switch (tag) {
                 .@"pi,?" => .pi,
-                .@"dtd_int_subset,pi,?" => .@"dtd_int_subset,pi",
+                .@"dtd_int_subset_pi,?" => .dtd_int_subset_pi,
                 else => unreachable,
             };
             if (scanner.index == src.len) {
@@ -2080,8 +2063,8 @@ const State = enum {
     @"dtd_int_subset_comment,---",
 
     @"dtd_int_subset,<",
-    @"dtd_int_subset,pi",
-    @"dtd_int_subset,pi,?",
+    dtd_int_subset_pi,
+    @"dtd_int_subset_pi,?",
     @"dtd_int_subset,<!",
 
     @"dtd_int_subset,<!-",
