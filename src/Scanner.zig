@@ -259,6 +259,10 @@ pub const TokenType = enum {
     /// * `.comment_end`.
     /// * `.eof`.
     comment_start,
+    /// The '<!-' token.
+    ///
+    /// The subsequent token sequence will be the same as for `.comment_start`.
+    invalid_comment_start_single_dash,
     /// The invalid token '--'.
     invalid_comment_dash_dash,
     /// The invalid token '--->'.
@@ -360,14 +364,19 @@ pub const TokenType = enum {
 
             .angle_bracket_left_slash,
             .slash_angle_bracket_right,
+
             .pi_start,
             .pi_end,
+
             .cdata_start,
             .cdata_end,
+
             .comment_start,
+            .invalid_comment_start_single_dash,
             .invalid_comment_dash_dash,
             .invalid_comment_end_triple_dash,
             .comment_end,
+
             .dtd_start,
             .element_decl,
             .entity_decl,
@@ -518,15 +527,23 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
                 else => return .invalid_token,
             }
         },
-        .@"text_data,<!-" => {
+        inline //
+        .@"text_data,<!-",
+        .@"dtd_int_subset,<!-",
+        => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                return .invalid_token;
+                scanner.state = .text_data;
+                return .invalid_comment_start_single_dash;
             }
+            scanner.state = comptime switch (tag) {
+                .@"text_data,<!-" => .comment,
+                .@"dtd_int_subset,<!-" => .dtd_int_subset_comment,
+                else => unreachable,
+            };
             if (src[scanner.index] != '-') {
-                return .invalid_token;
+                return .invalid_comment_start_single_dash;
             }
-            scanner.state = .comment;
             scanner.index += 1;
             return .comment_start;
         },
@@ -1089,18 +1106,6 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
                 },
                 else => return .invalid_token,
             }
-        },
-        .@"dtd_int_subset,<!-" => {
-            if (scanner.index == src.len) {
-                if (eof_specified) return error.BufferUnderrun;
-                return .invalid_token;
-            }
-            if (src[scanner.index] != '-') {
-                return .invalid_token;
-            }
-            scanner.state = .dtd_int_subset_comment;
-            scanner.index += 1;
-            return .comment_start;
         },
 
         .@"dtd_int_subset,<!E" => {
@@ -2266,9 +2271,17 @@ fn testingPrint(comptime fmt_str: []const u8, args: anytype) void {
 test "Scanner Incomplete Markup ('<!--'/'<![CDATA['/'<!DOCTYPE')" {
     var scanner: CheckedScanner = undefined;
 
+    scanner = CheckedScanner.initComplete("<!-");
+    try scanner.expectNextType(.invalid_comment_start_single_dash);
+    try scanner.expectNextType(.eof);
+
+    scanner = CheckedScanner.initComplete("<!-<");
+    try scanner.expectNextType(.invalid_comment_start_single_dash);
+    try scanner.expectNextTypeStringSeq(.text_data, &.{ "<", null });
+    try scanner.expectNextType(.eof);
+
     for ([_][]const u8{
         "<!",
-        "<!-",
         "<![",
         "<![C",
         "<![CD",

@@ -556,7 +556,9 @@ fn parseFromSource(
             },
             .cdata_end => unreachable,
 
-            .comment_start => @panic("TODO"),
+            .comment_start,
+            .invalid_comment_start_single_dash,
+            => @panic("TODO"),
             .invalid_comment_dash_dash => unreachable,
             .invalid_comment_end_triple_dash => unreachable,
             .comment_end => unreachable,
