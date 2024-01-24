@@ -11,6 +11,12 @@ index: usize,
 state: State,
 eof_specified: bool,
 
+/// Returns the remaining subslice of the source that is yet to be scanned.
+/// May be useful while using a non-streaming scanner to perform heuristics/predictions.
+pub inline fn remainingSrc(scanner: *const Scanner) []const u8 {
+    return scanner.src[scanner.index..];
+}
+
 /// Initializes the `Scanner` with the full input.
 /// Calling `feedInput` or `feedEof` is illegal.
 /// Treating `error.BufferUnderrun` as `unreachable` is safe.
@@ -115,9 +121,6 @@ pub const TokenType = enum {
     /// Some form of contextually invalid token, not featuring whitespace.
     invalid_token,
 
-    // all previous tokens expect to be followed up by a call to `nextSrc`.
-    // all subsequent tokens expect to be followed up by another call to `nextType`.
-
     /// The end of the XML source.
     /// This is the last token that will appear.
     /// Terminates the token sequence.
@@ -142,6 +145,13 @@ pub const TokenType = enum {
     asterisk,
     /// The '+' token.
     plus,
+
+    /// The '%' token.
+    ///
+    /// Often followed by `.tag_token` and then `.semicolon`, however it can equally be followed
+    /// by other DTD tokens. Whether or not it represents the start of a Parsed Entity Reference
+    /// depends on these contextual details, and is left to the programmer.
+    percent,
 
     /// The "'" token.
     quote_single,
@@ -187,16 +197,6 @@ pub const TokenType = enum {
     /// Ends DTD Internal Subset, or is an invalid token if not preceeded by a matching `.square_bracket_left` token.
     square_bracket_right,
 
-    /// The '%' token.
-    ///
-    /// Exists only in the DTD. Its meaning depends on the token immediately following it:
-    /// * `.semicolon`: a Parsed Entity Reference missing a name ('%;').
-    /// * `.tag_token`: a Parsed Entity Reference with a name ('%' <name token> ';'),
-    ///    which should be followed either by `.semicolon` or `.invalid_reference_end`.
-    /// * `.tag_whitespace`: a lone percent ('%') token followed by whitespace (ie in `<!ENTITY % foo 'bar'>`).
-    /// Any other subsequent token type is left to the programmer to interpret, either as being a lone percent token,
-    /// or an incomplete PE reference.
-    percent,
     /// The '&' token.
     ///
     /// Represents the start of a Character or Entity reference.
@@ -237,6 +237,16 @@ pub const TokenType = enum {
     /// Ends the token sequence.
     pi_end,
 
+    /// The '<!' token.
+    ///
+    /// This is returned when '<!' is followed by a sequence
+    /// which does not ultimately form a recognized markup tag.
+    ///
+    /// First the source for the '<!' token is returned, always in one value
+    /// and then the source for the unmatched sequence is returned, including
+    /// everything up until the first whitespace.
+    invalid_angle_bracket_left_bang,
+
     /// The '<![CDATA[' token.
     ///
     /// Starts a CDATA Section.
@@ -245,6 +255,11 @@ pub const TokenType = enum {
     /// * `.cdata_end` ending the token sequence.
     /// * `.eof`.
     cdata_start,
+    /// A token which partially matches the '<![CDATA[' token.
+    ///
+    /// The source for the partial match is returned, and then afterwards
+    /// the subsequent token sequence will be the same as for `.cdata_start`.
+    invalid_cdata_start,
     /// The ']]>' token.
     ///
     /// Ends the CDATA Section, or is an invalid if not preceeded by a matching `.data` token.
@@ -276,42 +291,28 @@ pub const TokenType = enum {
     ///
     /// Starts the DTD declaration.
     /// The subsequent token sequence will be one of:
-    /// * `.tag_token`.
-    /// * `.tag_whitespace`.
-    /// * `.quote_single`, where the subsequent token sequence will be one of the following:
-    ///    + `.text_data`.
-    ///    + `.quote_single` ending the token sequence.
-    ///    + `.eof`.
-    /// * `.quote_double` following sequence is equivalent as for `.quote_single`, replacing it with `.quote_double`.
-    /// * `.square_bracket_left` followed by a token sequence as described in its own documentation.
-    /// * `.angle_bracket_right`.
-    /// * `.eof`.
+    /// TODO: document this proper.
     dtd_start,
+    /// A token which partially matches the '<!DOCTYPE' token.
+    ///
+    /// The source for the partial match is returned, and then afterwards
+    /// the subsequent token sequence will be the same as for `.dtd_start`.
+    invalid_dtd_start,
 
     /// The '<!ELEMENT' token.
     ///
-    /// The subsequent token sequence will be one of:
-    /// * `.tag_token`
-    /// * `.tag_whitespace`
+    /// The subsequent token sequence will be equivalent as for `.dtd`, and terminated by any token other than:
     /// * `.lparen`
+    /// * `.rparen`
     /// * `.pipe`
     /// * `.comma`
-    /// * `.rparen`
     /// * `.qmark`
     /// * `.asterisk`
     /// * `.plus`
-    /// * `.percent`, where the subsequent token type will be one of:
-    ///    + `.tag_whitespace`, indicating that the percent is a standalone token (like in '<!ENTITY % foo ...').
-    ///    + `.tag_token`, indicating that the percent is the start of a Parsed Entity Reference.
-    ///    + `.semicolon`, indicating that the percent is the start of a Parsed Entity reference, ending the token sequence.
-    ///    + `.invalid_reference_end`, indicating that the percent is the start of a Parsed Entity Reference, ending the token sequence.
-    /// * `.quote_single`:
-    ///    + `.text_data`.
-    ///    + `.quote_single` ending the token sequence.
-    ///    + `.eof`.
-    /// * `.quote_double` following sequence is equivalent as for `.quote_single`, replacing it with `.quote_double`.
-    /// * `.angle_bracket_right`
-    /// * `.eof`
+    /// * `.percent`
+    /// * `.quote_single`
+    /// * `.quote_double`
+    /// In a valid DTD, the main terminating token would be '>'.
     element_decl,
     /// The '<!ENTITY' token.
     ///
@@ -325,6 +326,10 @@ pub const TokenType = enum {
     ///
     /// The subsequent token sequence will be equivalent as for `.element_decl`.
     notation_decl,
+    /// A token which partially matches the token '<!ELEMENT', '<!ENTITY', '<!ATTLIST', or '<!NOTATION'.
+    ///
+    /// First the token source is returned, and then the subsequent token sequence will be equivalent as for `.element_decl`.
+    invalid_decl,
 
     /// Whether or not the token represents any text to be returned by `nextSrc`/`nextString`.
     pub inline fn hasString(token_type: TokenType) bool {
@@ -333,6 +338,11 @@ pub const TokenType = enum {
             .tag_whitespace,
             .tag_token,
             .invalid_token,
+
+            .invalid_angle_bracket_left_bang,
+            .invalid_cdata_start,
+            .invalid_dtd_start,
+            .invalid_decl,
             => true,
 
             .eof,
@@ -402,6 +412,8 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
     const src = scanner.src;
     const eof_specified = scanner.eof_specified;
     switch (scanner.state) {
+        .eof => return .eof,
+
         .text_data => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
@@ -456,7 +468,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
         .@"text_data,&" => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                scanner.state = .eof;
                 return .invalid_reference_end;
             }
             if (src[scanner.index] == ';') {
@@ -473,13 +485,13 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
         .@"text_data,<" => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                scanner.state = .eof;
                 return .angle_bracket_left;
             }
             switch (src[scanner.index]) {
                 '?' => {
-                    scanner.index += 1;
                     scanner.state = .pi;
+                    scanner.index += 1;
                     return .pi_start;
                 },
                 '/' => {
@@ -503,7 +515,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
         .@"text_data,<!" => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                return .invalid_token;
+                return .invalid_angle_bracket_left_bang;
             }
             switch (src[scanner.index]) {
                 '-' => {
@@ -524,21 +536,18 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
                     // return @call(.always_tail, nextTypeImpl, .{scanner});
                     return scanner.nextTypeImpl();
                 },
-                else => return .invalid_token,
+                else => return .invalid_angle_bracket_left_bang,
             }
         },
-        inline //
-        .@"text_data,<!-",
-        .@"dtd_int_subset,<!-",
-        => |tag| {
+        inline .@"text_data,<!-", .@"dtd,<!-" => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                scanner.state = .eof;
                 return .invalid_comment_start_single_dash;
             }
             scanner.state = comptime switch (tag) {
                 .@"text_data,<!-" => .comment,
-                .@"dtd_int_subset,<!-" => .dtd_int_subset_comment,
+                .@"dtd,<!-" => .dtd_comment,
                 else => unreachable,
             };
             if (src[scanner.index] != '-') {
@@ -547,11 +556,12 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
             scanner.index += 1;
             return .comment_start;
         },
+        .@"text_data:<!,invalid" => unreachable,
 
-        inline .pi, .dtd_int_subset_pi => |tag| {
+        inline .pi, .dtd_pi => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                scanner.state = .eof;
                 return .eof;
             }
             if (src[scanner.index] != '?') {
@@ -559,14 +569,14 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
             }
             scanner.state = comptime switch (tag) {
                 .pi => .@"pi,?",
-                .dtd_int_subset_pi => .@"dtd_int_subset_pi,?",
+                .dtd_pi => .@"dtd_pi,?",
                 else => unreachable,
             };
             scanner.index += 1;
             // return @call(.always_tail, nextTypeImpl, .{scanner});
             return scanner.nextTypeImpl();
         },
-        inline .@"pi,?", .@"dtd_int_subset_pi,?" => |tag| {
+        inline .@"pi,?", .@"dtd_pi,?" => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
                 return .text_data;
@@ -576,7 +586,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
             }
             scanner.state = comptime switch (tag) {
                 .@"pi,?" => .text_data,
-                .@"dtd_int_subset_pi,?" => .dtd_int_subset,
+                .@"dtd_pi,?" => .dtd,
                 else => unreachable,
             };
             scanner.index += 1;
@@ -586,7 +596,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
         .element_tag => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                scanner.state = .eof;
                 return .eof;
             }
             switch (src[scanner.index]) {
@@ -618,12 +628,12 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
                 else => |char| {
                     const not_whitespace = std.mem.indexOfScalar(u8, whitespace_set, char) == null;
                     if (not_whitespace) return .tag_token;
-                    scanner.state = .@"element_tag,whitespace";
+                    scanner.state = .element_tag_whitespace;
                     return .tag_whitespace;
                 },
             }
         },
-        .@"element_tag,whitespace" => unreachable,
+        .element_tag_whitespace => unreachable,
         .@"element_tag,/" => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
@@ -699,19 +709,16 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
             }
         },
 
-        inline //
-        .comment,
-        .dtd_int_subset_comment,
-        => |tag| {
+        inline .comment, .dtd_comment => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                scanner.state = .eof;
                 return .eof;
             }
             if (src[scanner.index] == '-') {
                 scanner.state = comptime switch (tag) {
                     .comment => .@"comment,-",
-                    .dtd_int_subset_comment => .@"dtd_int_subset_comment,-",
+                    .dtd_comment => .@"dtd_comment,-",
                     else => unreachable,
                 };
                 scanner.index += 1;
@@ -720,10 +727,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
             }
             return .text_data;
         },
-        inline //
-        .@"comment,-",
-        .@"dtd_int_subset_comment,-",
-        => |tag| {
+        inline .@"comment,-", .@"dtd_comment,-" => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
                 return .text_data;
@@ -733,23 +737,20 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
             }
             scanner.state = comptime switch (tag) {
                 .@"comment,-" => .@"comment,--",
-                .@"dtd_int_subset_comment,-" => .@"dtd_int_subset_comment,--",
+                .@"dtd_comment,-" => .@"dtd_comment,--",
                 else => unreachable,
             };
             scanner.index += 1;
             // return @call(.always_tail, nextTypeImpl, .{scanner});
             return scanner.nextTypeImpl();
         },
-        inline //
-        .@"comment,--",
-        .@"dtd_int_subset_comment,--",
-        => |tag| {
+        inline .@"comment,--", .@"dtd_comment,--" => |tag| {
             const state_on_unmatched: State, //
             const state_on_dash: State, //
             const state_on_rab: State //
             = comptime switch (tag) {
                 .@"comment,--" => .{ .comment, .@"comment,---", .text_data },
-                .@"dtd_int_subset_comment,--" => .{ .dtd_int_subset_comment, .@"dtd_int_subset_comment,---", .dtd_int_subset },
+                .@"dtd_comment,--" => .{ .comment, .@"dtd_comment,---", .dtd },
                 else => unreachable,
             };
             if (scanner.index == src.len) {
@@ -775,16 +776,13 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
                 },
             }
         },
-        inline //
-        .@"comment,---",
-        .@"dtd_int_subset_comment,---",
-        => |tag| {
+        inline .@"comment,---", .@"dtd_comment,---" => |tag| {
             const state_on_unmatched: State, //
             const state_on_dash: State, //
             const state_on_rab: State //
             = comptime switch (tag) {
                 .@"comment,---" => .{ .@"comment,-", .@"comment,--", .text_data },
-                .@"dtd_int_subset_comment,---" => .{ .@"dtd_int_subset_comment,-", .@"dtd_int_subset_comment,--", .dtd_int_subset },
+                .@"dtd_comment,---" => .{ .@"dtd_comment,-", .@"dtd_comment,--", .dtd },
                 else => unreachable,
             };
             if (scanner.index == src.len) {
@@ -819,7 +817,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
         => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                return .invalid_token;
+                return .invalid_cdata_start;
             }
             const expected_char: u8, const state_on_match: State = comptime switch (tag) {
                 .@"<![" => .{ 'C', .@"<![C" },
@@ -830,7 +828,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
                 else => unreachable,
             };
             if (src[scanner.index] != expected_char) {
-                return .invalid_token;
+                return .invalid_cdata_start;
             }
             scanner.state = state_on_match;
             scanner.index += 1;
@@ -840,18 +838,20 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
         .@"<![CDATA" => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                return .invalid_token;
+                return .invalid_cdata_start;
             }
             if (src[scanner.index] != '[') {
-                return .invalid_token;
+                return .invalid_cdata_start;
             }
             scanner.state = .cdata;
             scanner.index += 1;
             return .cdata_start;
         },
+        .cdata_start_invalid => unreachable,
         .cdata => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .eof;
                 return .eof;
             }
             if (src[scanner.index] != ']') {
@@ -897,7 +897,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
         => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                return .invalid_token;
+                return .invalid_dtd_start;
             }
             const expected_char: u8, const state_on_match = comptime switch (tag) {
                 .@"<!D" => .{ 'O', .@"<!DO" },
@@ -908,7 +908,7 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
                 else => unreachable,
             };
             if (src[scanner.index] != expected_char) {
-                return .invalid_token;
+                return .invalid_dtd_start;
             }
             scanner.state = state_on_match;
             scanner.index += 1;
@@ -918,403 +918,322 @@ fn nextTypeImpl(scanner: *Scanner) NextTypeError!TokenType {
         .@"<!DOCTYP" => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                return .invalid_token;
+                return .invalid_dtd_start;
             }
             if (src[scanner.index] != 'E') {
-                return .invalid_token;
+                return .invalid_dtd_start;
             }
             scanner.state = .dtd;
             scanner.index += 1;
             return .dtd_start;
         },
-        .dtd => {
+        .dtd_invalid_start => unreachable,
+        inline .dtd, .dtd_subtag => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                scanner.state = .eof;
                 return .eof;
             }
             switch (src[scanner.index]) {
-                '>' => {
-                    scanner.state = .text_data;
+                inline '[', ']', '(', ')', '?', '*', '+', '|', ',', '%', ';' => |char| {
                     scanner.index += 1;
-                    return .angle_bracket_right;
+                    return comptime switch (char) {
+                        '[' => .square_bracket_left,
+                        ']' => .square_bracket_right,
+                        '(' => .lparen,
+                        ')' => .rparen,
+                        '?' => .qmark,
+                        '*' => .asterisk,
+                        '+' => .plus,
+                        '|' => .pipe,
+                        ',' => .comma,
+                        '%' => .percent,
+                        ';' => .semicolon,
+                        else => unreachable,
+                    };
                 },
                 '\'' => {
-                    scanner.state = .dtd_sq;
+                    scanner.state = comptime switch (tag) {
+                        .dtd => .dtd_sq,
+                        .dtd_subtag => .dtd_subtag_sq,
+                        else => unreachable,
+                    };
                     scanner.index += 1;
                     return .quote_single;
                 },
                 '\"' => {
-                    scanner.state = .dtd_dq;
+                    scanner.state = comptime switch (tag) {
+                        .dtd => .dtd_dq,
+                        .dtd_subtag => .dtd_subtag_dq,
+                        else => unreachable,
+                    };
                     scanner.index += 1;
                     return .quote_double;
                 },
-                '[' => {
-                    scanner.state = .dtd_int_subset;
+                '<' => {
+                    scanner.state = .@"dtd,<";
                     scanner.index += 1;
-                    return .square_bracket_left;
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
+                },
+                '>' => {
+                    scanner.state = comptime switch (tag) {
+                        .dtd => .text_data,
+                        .dtd_subtag => .dtd,
+                        else => unreachable,
+                    };
+                    scanner.index += 1;
+                    return .angle_bracket_right;
                 },
                 else => {
                     const non_whitespace = std.mem.indexOfScalar(u8, whitespace_set, src[scanner.index]) == null;
-                    scanner.state = if (non_whitespace) .dtd_token else .dtd_whitespace;
+                    const token_state: State, const whitespace_state: State = comptime switch (tag) {
+                        .dtd => .{ .dtd_token, .dtd_whitespace },
+                        .dtd_subtag => .{ .dtd_subtag_token, .dtd_subtag_whitespace },
+                        else => unreachable,
+                    };
+                    scanner.state = if (non_whitespace) token_state else whitespace_state;
                     return if (non_whitespace) .tag_token else .tag_whitespace;
                 },
             }
         },
-
+        inline //
         .dtd_sq,
         .dtd_dq,
+        .dtd_subtag_sq,
+        .dtd_subtag_dq,
         => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                scanner.state = .eof;
                 return .eof;
             }
             const matching_quote_char: u8, //
-            const matching_quote_type: TokenType //
-            = switch (tag) {
-                .dtd_sq => .{ '\'', .quote_single },
-                .dtd_dq => .{ '\"', .quote_double },
+            const matching_quote_type: TokenType, //
+            const on_match_state: State //
+            = comptime switch (tag) {
+                .dtd_sq => .{ '\'', .quote_single, .dtd },
+                .dtd_dq => .{ '\"', .quote_double, .dtd },
+                .dtd_subtag_sq => .{ '\'', .quote_single, .dtd_subtag },
+                .dtd_subtag_dq => .{ '\"', .quote_double, .dtd_subtag },
                 else => unreachable,
             };
             if (src[scanner.index] != matching_quote_char) {
                 return .text_data;
             }
-            scanner.state = .dtd;
+            scanner.state = on_match_state;
             scanner.index += 1;
             return matching_quote_type;
         },
         .dtd_token => unreachable,
         .dtd_whitespace => unreachable,
+        .dtd_subtag_token => unreachable,
+        .dtd_subtag_whitespace => unreachable,
 
-        .dtd_int_subset => {
+        .@"dtd,<" => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
-                return .eof;
-            }
-            switch (src[scanner.index]) {
-                ']' => {
-                    scanner.state = .dtd;
-                    scanner.index += 1;
-                    return .square_bracket_right;
-                },
-                '%' => {
-                    scanner.state = .dtd_int_subset_pe_reference;
-                    scanner.index += 1;
-                    return .percent;
-                },
-                '<' => {
-                    scanner.state = .@"dtd_int_subset,<";
-                    scanner.index += 1;
-                    // return @call(.always_tail, nextTypeImpl, .{scanner});
-                    return scanner.nextTypeImpl();
-                },
-                else => {
-                    const non_whitespace = std.mem.indexOfScalar(u8, whitespace_set, src[scanner.index]) == null;
-                    scanner.state = if (non_whitespace) .dtd_int_subset_token else .dtd_int_subset_whitespace;
-                    return if (non_whitespace) .invalid_token else .tag_whitespace;
-                },
-            }
-        },
-        .dtd_int_subset_token => unreachable,
-        .dtd_int_subset_whitespace => unreachable,
-
-        .dtd_int_subset_pe_reference => {
-            if (scanner.index == src.len) {
-                if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
-                return .invalid_reference_end;
-            }
-            if (src[scanner.index] == ';') {
-                scanner.state = .dtd_int_subset;
-                scanner.index += 1;
-                return .semicolon;
-            }
-            if (std.mem.indexOfScalar(u8, whitespace_set ++ &[_]u8{ ']', '&', '<' }, src[scanner.index]) != null) {
-                scanner.state = .dtd_int_subset;
-                return .invalid_reference_end;
-            }
-            return .tag_token;
-        },
-
-        .@"dtd_int_subset,<" => {
-            if (scanner.index == src.len) {
-                if (eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                scanner.state = .eof;
                 return .angle_bracket_left;
             }
             switch (src[scanner.index]) {
                 '?' => {
-                    scanner.state = .dtd_int_subset_pi;
+                    scanner.state = .dtd_pi;
                     scanner.index += 1;
                     return .pi_start;
                 },
                 '!' => {
-                    scanner.state = .@"dtd_int_subset,<!";
+                    scanner.state = .@"dtd,<!";
                     scanner.index += 1;
                     // return @call(.always_tail, nextTypeImpl, .{scanner});
                     return scanner.nextTypeImpl();
-                },
-                else => {
-                    scanner.state = .dtd_int_subset;
-                    return .angle_bracket_left;
-                },
-            }
-        },
-
-        .@"dtd_int_subset,<!" => {
-            if (scanner.index == src.len) {
-                if (eof_specified) return error.BufferUnderrun;
-                return .invalid_token;
-            }
-            switch (src[scanner.index]) {
-                'E' => {
-                    scanner.state = .@"dtd_int_subset,<!E";
-                    scanner.index += 1;
-                    // return @call(.always_tail, nextTypeImpl, .{scanner});
-                    return scanner.nextTypeImpl();
-                },
-                'A' => {
-                    scanner.state = .@"dtd_int_subset,<!A";
-                    scanner.index += 1;
-                    // return @call(.always_tail, nextTypeImpl, .{scanner});
-                    return scanner.nextTypeImpl();
-                },
-                '-' => {
-                    scanner.state = .@"dtd_int_subset,<!-";
-                    scanner.index += 1;
-                    // return @call(.always_tail, nextTypeImpl, .{scanner});
-                    return scanner.nextTypeImpl();
-                },
-                else => return .invalid_token,
-            }
-        },
-
-        .@"dtd_int_subset,<!E" => {
-            if (scanner.index == src.len) {
-                if (eof_specified) return error.BufferUnderrun;
-                return .invalid_token;
-            }
-            switch (src[scanner.index]) {
-                'N' => {
-                    scanner.state = .@"dtd_int_subset,<!EN";
-                    scanner.index += 1;
-                    // return @call(.always_tail, nextTypeImpl, .{scanner});
-                    return scanner.nextTypeImpl();
-                },
-                'L' => {
-                    scanner.state = .@"dtd_int_subset,<!EL";
-                    scanner.index += 1;
-                    // return @call(.always_tail, nextTypeImpl, .{scanner});
-                    return scanner.nextTypeImpl();
-                },
-                else => return .invalid_token,
-            }
-        },
-
-        inline //
-        .@"dtd_int_subset,<!EN",
-        .@"dtd_int_subset,<!ENT",
-        .@"dtd_int_subset,<!ENTI",
-
-        .@"dtd_int_subset,<!EL",
-        .@"dtd_int_subset,<!ELE",
-        .@"dtd_int_subset,<!ELEM",
-        .@"dtd_int_subset,<!ELEME",
-
-        .@"dtd_int_subset,<!A",
-        .@"dtd_int_subset,<!AT",
-        .@"dtd_int_subset,<!ATT",
-        .@"dtd_int_subset,<!ATTL",
-        .@"dtd_int_subset,<!ATTLI",
-
-        .@"dtd_int_subset,<!N",
-        .@"dtd_int_subset,<!NO",
-        .@"dtd_int_subset,<!NOT",
-        .@"dtd_int_subset,<!NOTA",
-        .@"dtd_int_subset,<!NOTAT",
-        .@"dtd_int_subset,<!NOTATI",
-        => |tag| {
-            if (scanner.index == src.len) {
-                if (eof_specified) return error.BufferUnderrun;
-                return .invalid_token;
-            }
-            const expected_char: u8, //
-            const state_on_match: State //
-            = comptime switch (tag) {
-                .@"dtd_int_subset,<!EN" => .{ 'T', .@"dtd_int_subset,<!ENT" },
-                .@"dtd_int_subset,<!ENT" => .{ 'I', .@"dtd_int_subset,<!ENTI" },
-                .@"dtd_int_subset,<!ENTI" => .{ 'T', .@"dtd_int_subset,<!ENTIT" },
-
-                .@"dtd_int_subset,<!EL" => .{ 'E', .@"dtd_int_subset,<!ELE" },
-                .@"dtd_int_subset,<!ELE" => .{ 'M', .@"dtd_int_subset,<!ELEM" },
-                .@"dtd_int_subset,<!ELEM" => .{ 'E', .@"dtd_int_subset,<!ELEME" },
-                .@"dtd_int_subset,<!ELEME" => .{ 'N', .@"dtd_int_subset,<!ELEMEN" },
-
-                .@"dtd_int_subset,<!A" => .{ 'T', .@"dtd_int_subset,<!AT" },
-                .@"dtd_int_subset,<!AT" => .{ 'T', .@"dtd_int_subset,<!ATT" },
-                .@"dtd_int_subset,<!ATT" => .{ 'L', .@"dtd_int_subset,<!ATTL" },
-                .@"dtd_int_subset,<!ATTL" => .{ 'I', .@"dtd_int_subset,<!ATTLI" },
-                .@"dtd_int_subset,<!ATTLI" => .{ 'S', .@"dtd_int_subset,<!ATTLIS" },
-
-                .@"dtd_int_subset,<!N" => .{ 'O', .@"dtd_int_subset,<!NO" },
-                .@"dtd_int_subset,<!NO" => .{ 'T', .@"dtd_int_subset,<!NOT" },
-                .@"dtd_int_subset,<!NOT" => .{ 'A', .@"dtd_int_subset,<!NOTA" },
-                .@"dtd_int_subset,<!NOTA" => .{ 'T', .@"dtd_int_subset,<!NOTAT" },
-                .@"dtd_int_subset,<!NOTAT" => .{ 'I', .@"dtd_int_subset,<!NOTATI" },
-                .@"dtd_int_subset,<!NOTATI" => .{ 'O', .@"dtd_int_subset,<!NOTATIO" },
-
-                else => unreachable,
-            };
-            if (src[scanner.index] != expected_char) {
-                return .invalid_token;
-            }
-            scanner.state = state_on_match;
-            scanner.index += 1;
-            // return @call(.always_tail, nextTypeImpl, .{scanner});
-            return scanner.nextTypeImpl();
-        },
-        inline //
-        .@"dtd_int_subset,<!ENTIT",
-        .@"dtd_int_subset,<!ELEMEN",
-        .@"dtd_int_subset,<!ATTLIS",
-        .@"dtd_int_subset,<!NOTATIO",
-        => |tag| {
-            if (scanner.index == src.len) {
-                if (eof_specified) return error.BufferUnderrun;
-                return .invalid_token;
-            }
-            const expected_char: u8, //
-            const type_on_match: TokenType //
-            = comptime switch (tag) {
-                .@"dtd_int_subset,<!ENTIT" => .{ 'Y', .entity_decl },
-                .@"dtd_int_subset,<!ELEMEN" => .{ 'T', .element_decl },
-                .@"dtd_int_subset,<!ATTLIS" => .{ 'T', .attlist_decl },
-                .@"dtd_int_subset,<!NOTATIO" => .{ 'N', .notation_decl },
-                else => unreachable,
-            };
-            if (src[scanner.index] != expected_char) {
-                return .invalid_token;
-            }
-            scanner.state = .dtd_int_subset_tag;
-            scanner.index += 1;
-            return type_on_match;
-        },
-
-        .dtd_int_subset_tag => {
-            if (scanner.index == src.len) {
-                if (eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
-                return .eof;
-            }
-            switch (src[scanner.index]) {
-                '(' => {
-                    scanner.index += 1;
-                    return .lparen;
-                },
-                '|' => {
-                    scanner.index += 1;
-                    return .pipe;
-                },
-                ',' => {
-                    scanner.index += 1;
-                    return .comma;
-                },
-                ')' => {
-                    scanner.index += 1;
-                    return .rparen;
-                },
-                '?' => {
-                    scanner.index += 1;
-                    return .qmark;
-                },
-                '*' => {
-                    scanner.index += 1;
-                    return .asterisk;
-                },
-                '+' => {
-                    scanner.index += 1;
-                    return .plus;
-                },
-                '%' => {
-                    scanner.state = .dtd_int_subset_tag_pe_reference;
-                    scanner.index += 1;
-                    return .percent;
-                },
-                '\'' => {
-                    scanner.state = .dtd_int_subset_tag_quote_single;
-                    scanner.index += 1;
-                    return .quote_single;
-                },
-                '\"' => {
-                    scanner.state = .dtd_int_subset_tag_quote_double;
-                    scanner.index += 1;
-                    return .quote_double;
                 },
                 '>' => {
-                    scanner.state = .dtd_int_subset;
+                    scanner.state = .@"dtd,<>";
                     scanner.index += 1;
-                    return .angle_bracket_right;
+                    return .invalid_token;
                 },
-                else => {
-                    const non_whitespace = std.mem.indexOfScalar(u8, whitespace_set, src[scanner.index]) == null;
-                    scanner.state = if (non_whitespace) .dtd_int_subset_tag_token else .dtd_int_subset_tag_whitespace;
-                    return if (non_whitespace) .tag_token else .tag_whitespace;
-                },
+                else => @panic("TODO"),
             }
         },
-        .dtd_int_subset_tag_token => unreachable,
-        .dtd_int_subset_tag_whitespace => unreachable,
-        inline //
-        .dtd_int_subset_tag_quote_single,
-        .dtd_int_subset_tag_quote_double,
-        => |tag| {
+        .@"dtd,<>" => unreachable,
+
+        .@"dtd,<!" => {
             if (scanner.index == src.len) {
-                if (eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
-                return .eof;
-            }
-            const matching_quote_char: u8, //
-            const matching_quote_type: TokenType //
-            = comptime switch (tag) {
-                .dtd_int_subset_tag_quote_single => .{ '\'', .quote_single },
-                .dtd_int_subset_tag_quote_double => .{ '\"', .quote_double },
-                else => unreachable,
-            };
-            if (src[scanner.index] != matching_quote_char) {
-                return .text_data;
-            }
-            scanner.state = .dtd_int_subset_tag;
-            scanner.index += 1;
-            return matching_quote_type;
-        },
-        .dtd_int_subset_tag_pe_reference => {
-            if (scanner.index == src.len) {
-                if (eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
-                return .eof;
+                if (!eof_specified) return error.BufferUnderrun;
+                return .invalid_angle_bracket_left_bang;
             }
             switch (src[scanner.index]) {
-                ';' => {
-                    scanner.state = .dtd_int_subset_tag;
+                inline '-', 'A', 'E', 'N' => |char| {
+                    scanner.state = comptime switch (char) {
+                        '-' => .@"dtd,<!-",
+                        'E' => .@"dtd,<!E",
+                        'A' => .@"dtd,<!A",
+                        'N' => .@"dtd,<!N",
+                        else => unreachable,
+                    };
                     scanner.index += 1;
-                    return .semicolon;
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
                 },
-                '(', '|', ',', ')', '?', '*', '+', '%', '\'', '\"', '>' => {
-                    scanner.state = .dtd_int_subset_tag;
-                    return .invalid_reference_end;
+                else => return .invalid_angle_bracket_left_bang,
+            }
+        },
+        .@"dtd:<!,invalid" => unreachable,
+
+        .dtd_subtag_invalid_start => unreachable,
+
+        .@"dtd,<!E" => {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                return .invalid_decl;
+            }
+            switch (src[scanner.index]) {
+                'L' => {
+                    scanner.state = .@"dtd,<!EL";
+                    scanner.index += 1;
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
                 },
-                else => {
-                    const non_whitespace = std.mem.indexOfScalar(u8, whitespace_set, src[scanner.index]) == null;
-                    if (non_whitespace) return .tag_token;
-                    scanner.state = .dtd_int_subset_tag_whitespace;
-                    return .tag_whitespace;
+                'N' => {
+                    scanner.state = .@"dtd,<!EN";
+                    scanner.index += 1;
+                    // return @call(.always_tail, nextTypeImpl, .{scanner});
+                    return scanner.nextTypeImpl();
                 },
+                else => return .invalid_decl,
             }
         },
 
-        .text_data_incomplete_tag => unreachable,
+        inline //
+        .@"dtd,<!EL",
+        .@"dtd,<!ELE",
+        .@"dtd,<!ELEM",
+        .@"dtd,<!ELEME",
+        .@"dtd,<!ELEMEN",
+        => |tag| {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                return .invalid_decl;
+            }
+            const penultimate: State = .@"dtd,<!ELEMEN";
+            @setEvalBranchQuota(@tagName(penultimate).len + 100);
+            if (comptime std.mem.indexOfDiff(u8, @tagName(tag), @tagName(penultimate))) |diff_idx| {
+                const expected_char = @tagName(penultimate)[diff_idx];
+                if (src[scanner.index] != expected_char) {
+                    return .invalid_decl;
+                }
+                scanner.state = @field(State, @tagName(tag) ++ &[_]u8{expected_char});
+                scanner.index += 1;
+                // return @call(.always_tail, nextTypeImpl, .{scanner});
+                return scanner.nextTypeImpl();
+            }
+            comptime assert(tag == penultimate);
+            if (src[scanner.index] != 'T') {
+                return .invalid_decl;
+            }
+            scanner.state = .dtd_subtag;
+            scanner.index += 1;
+            return .element_decl;
+        },
+
+        inline //
+        .@"dtd,<!EN",
+        .@"dtd,<!ENT",
+        .@"dtd,<!ENTI",
+        .@"dtd,<!ENTIT",
+        => |tag| {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                return .invalid_decl;
+            }
+            const penultimate: State = .@"dtd,<!ENTIT";
+            @setEvalBranchQuota(@tagName(penultimate).len + 100);
+            if (comptime std.mem.indexOfDiff(u8, @tagName(tag), @tagName(penultimate))) |diff_idx| {
+                const expected_char = @tagName(penultimate)[diff_idx];
+                if (src[scanner.index] != expected_char) {
+                    return .invalid_decl;
+                }
+                scanner.state = @field(State, @tagName(tag) ++ &[_]u8{expected_char});
+                scanner.index += 1;
+                // return @call(.always_tail, nextTypeImpl, .{scanner});
+                return scanner.nextTypeImpl();
+            }
+            comptime assert(tag == penultimate);
+            if (src[scanner.index] != 'Y') {
+                return .invalid_decl;
+            }
+            scanner.state = .dtd_subtag;
+            scanner.index += 1;
+            return .entity_decl;
+        },
+
+        inline //
+        .@"dtd,<!A",
+        .@"dtd,<!AT",
+        .@"dtd,<!ATT",
+        .@"dtd,<!ATTL",
+        .@"dtd,<!ATTLI",
+        .@"dtd,<!ATTLIS",
+        => |tag| {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                return .invalid_decl;
+            }
+            const penultimate: State = .@"dtd,<!ATTLIS";
+            @setEvalBranchQuota(@tagName(penultimate).len + 100);
+            if (comptime std.mem.indexOfDiff(u8, @tagName(tag), @tagName(penultimate))) |diff_idx| {
+                const expected_char = @tagName(penultimate)[diff_idx];
+                if (src[scanner.index] != expected_char) {
+                    return .invalid_decl;
+                }
+                scanner.state = @field(State, @tagName(tag) ++ &[_]u8{expected_char});
+                scanner.index += 1;
+                // return @call(.always_tail, nextTypeImpl, .{scanner});
+                return scanner.nextTypeImpl();
+            }
+            comptime assert(tag == penultimate);
+            if (src[scanner.index] != 'T') {
+                return .invalid_decl;
+            }
+            scanner.state = .dtd_subtag;
+            scanner.index += 1;
+            return .attlist_decl;
+        },
+
+        inline //
+        .@"dtd,<!N",
+        .@"dtd,<!NO",
+        .@"dtd,<!NOT",
+        .@"dtd,<!NOTA",
+        .@"dtd,<!NOTAT",
+        .@"dtd,<!NOTATI",
+        .@"dtd,<!NOTATIO",
+        => |tag| {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                return .invalid_decl;
+            }
+            const penultimate: State = .@"dtd,<!NOTATIO";
+            @setEvalBranchQuota(@tagName(penultimate).len + 100);
+            if (comptime std.mem.indexOfDiff(u8, @tagName(tag), @tagName(penultimate))) |diff_idx| {
+                const expected_char = @tagName(penultimate)[diff_idx];
+                if (src[scanner.index] != expected_char) {
+                    return .invalid_decl;
+                }
+                scanner.state = @field(State, @tagName(tag) ++ &[_]u8{expected_char});
+                scanner.index += 1;
+                // return @call(.always_tail, nextTypeImpl, .{scanner});
+                return scanner.nextTypeImpl();
+            }
+            comptime assert(tag == penultimate);
+            if (src[scanner.index] != 'N') {
+                return .invalid_decl;
+            }
+            scanner.state = .dtd_subtag;
+            scanner.index += 1;
+            return .notation_decl;
+        },
     }
 }
 
@@ -1330,10 +1249,18 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
             return .{ .literal = literal };
         }
     };
+    const dtd_terminal_characters = &[_]u8{
+        '[',  ']', '(', ')',
+        '?',  '*', '+', '|',
+        ',',  '%', ';', '\'',
+        '\"', '<', '>',
+    };
 
     const src = scanner.src;
     const eof_specified = scanner.eof_specified;
     switch (scanner.state) {
+        .eof => return null,
+
         .text_data => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
@@ -1350,7 +1277,7 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
                     scanner.state = .@"text_data,]";
                     scanner.index += 1;
                     // return @call(.always_tail, nextSrcImpl, .{scanner});
-                    return scanner.nextSrc();
+                    return scanner.nextSrcImpl();
                 },
                 '&', '<' => {},
                 else => unreachable,
@@ -1360,7 +1287,7 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
         .@"text_data,]" => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                scanner.state = .eof;
                 return helper.literalInit(.@"]");
             }
             if (src[scanner.index] != ']') {
@@ -1370,12 +1297,12 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
             scanner.state = .@"text_data,]]";
             scanner.index += 1;
             // return @call(.always_tail, nextSrcImpl, .{scanner});
-            return scanner.nextSrc();
+            return scanner.nextSrcImpl();
         },
         .@"text_data,]]" => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                scanner.state = .eof;
                 return helper.literalInit(.@"]]");
             }
             if (src[scanner.index] != '>') {
@@ -1399,12 +1326,10 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
         },
         .@"text_data,<" => unreachable,
 
-        inline //
-        .pi,
-        .dtd_int_subset_pi,
-        => |tag| {
+        inline .pi, .dtd_pi => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .eof;
                 return null;
             }
 
@@ -1416,20 +1341,17 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
             }
             scanner.state = comptime switch (tag) {
                 .pi => .@"pi,?",
-                .dtd_int_subset_pi => .@"dtd_int_subset_pi,?",
+                .dtd_pi => .@"dtd_pi,?",
                 else => unreachable,
             };
             scanner.index += 1;
             // return @call(.always_tail, nextSrcImpl, .{scanner});
-            return scanner.nextSrc();
+            return scanner.nextSrcImpl();
         },
-        inline //
-        .@"pi,?",
-        .@"dtd_int_subset_pi,?",
-        => |tag| {
+        inline .@"pi,?", .@"dtd_pi,?" => |tag| {
             const state_on_unmatched: State = comptime switch (tag) {
                 .@"pi,?" => .pi,
-                .@"dtd_int_subset_pi,?" => .dtd_int_subset_pi,
+                .@"dtd_pi,?" => .dtd_pi,
                 else => unreachable,
             };
             if (scanner.index == src.len) {
@@ -1457,7 +1379,7 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
             }
             return null;
         },
-        .@"element_tag,whitespace" => {
+        .element_tag_whitespace => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
                 return null;
@@ -1518,13 +1440,10 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
             return null;
         },
 
-        inline //
-        .comment,
-        .dtd_int_subset_comment,
-        => |tag| {
+        inline .comment, .dtd_comment => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                scanner.state = .eof;
                 return null;
             }
             const str_start = scanner.index;
@@ -1536,22 +1455,21 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
             if (src[scanner.index] == '-') {
                 scanner.state = comptime switch (tag) {
                     .comment => .@"comment,-",
-                    .dtd_int_subset_comment => .@"dtd_int_subset_comment,-",
+                    .dtd_comment => .@"dtd_comment,-",
                     else => unreachable,
                 };
                 scanner.index += 1;
                 // return @call(.always_tail, nextSrcImpl, .{scanner});
-                return scanner.nextSrc();
+                return scanner.nextSrcImpl();
             }
             return null;
         },
-        inline //
-        .@"comment,-",
-        .@"dtd_int_subset_comment,-",
-        => |tag| {
-            const state_on_unmatched: State = comptime switch (tag) {
-                .@"comment,-" => .comment,
-                .@"dtd_int_subset_comment,-" => .dtd_int_subset_comment,
+        inline .@"comment,-", .@"dtd_comment,-" => |tag| {
+            const state_on_unmatched: State, //
+            const state_on_match: State //
+            = comptime switch (tag) {
+                .@"comment,-" => .{ .comment, .@"comment,--" },
+                .@"dtd_comment,-" => .{ .dtd_comment, .@"dtd_comment,--" },
                 else => unreachable,
             };
             if (scanner.index == src.len) {
@@ -1563,19 +1481,12 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
                 scanner.state = state_on_unmatched;
                 return helper.literalInit(.@"-");
             }
-            scanner.state = comptime switch (tag) {
-                .@"comment,-" => .@"comment,--",
-                .@"dtd_int_subset_comment,-" => .@"dtd_int_subset_comment,--",
-                else => unreachable,
-            };
+            scanner.state = state_on_match;
             scanner.index += 1;
             // return @call(.always_tail, nextSrcImpl, .{scanner});
-            return scanner.nextSrc();
+            return scanner.nextSrcImpl();
         },
-        inline //
-        .@"comment,--",
-        .@"dtd_int_subset_comment,--",
-        => |tag| {
+        inline .@"comment,--", .@"dtd_comment,--" => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
                 return null;
@@ -1583,19 +1494,19 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
             if (src[scanner.index] == '-') {
                 scanner.state = comptime switch (tag) {
                     .@"comment,--" => .@"comment,---",
-                    .@"dtd_int_subset_comment,--" => .@"dtd_int_subset_comment,---",
+                    .@"dtd_comment,--" => .@"dtd_comment,---",
                     else => unreachable,
                 };
             }
             return null;
         },
         .@"comment,---" => unreachable,
-        .@"dtd_int_subset_comment,---" => unreachable,
+        .@"dtd_comment,---" => unreachable,
 
         .cdata => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                scanner.state = .eof;
                 return null;
             }
             const str_start = scanner.index;
@@ -1607,12 +1518,12 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
             scanner.state = .@"cdata,]";
             scanner.index += 1;
             // return @call(.always_tail, nextSrcImpl, .{scanner});
-            return scanner.nextSrc();
+            return scanner.nextSrcImpl();
         },
         .@"cdata,]" => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                scanner.state = .eof;
                 return helper.literalInit(.@"]");
             }
             if (src[scanner.index] != ']') {
@@ -1622,12 +1533,12 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
             scanner.state = .@"cdata,]]";
             scanner.index += 1;
             // return @call(.always_tail, nextSrcImpl, .{scanner});
-            return scanner.nextSrc();
+            return scanner.nextSrcImpl();
         },
         .@"cdata,]]" => {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                scanner.state = .eof;
                 return helper.literalInit(.@"]]");
             }
             switch (src[scanner.index]) {
@@ -1644,152 +1555,22 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
         },
 
         .dtd => unreachable,
+        .dtd_subtag => unreachable,
 
+        inline //
         .dtd_sq,
         .dtd_dq,
+        .dtd_subtag_sq,
+        .dtd_subtag_dq,
         => |tag| {
             if (scanner.index == src.len) {
                 if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
-                return null;
-            }
-            const matching_quote_char: u8 = switch (tag) {
-                .dtd_sq => '\'',
-                .dtd_dq => '\"',
-                else => unreachable,
-            };
-            const str_start = scanner.index;
-            const str_end = std.mem.indexOfScalarPos(u8, src, scanner.index, matching_quote_char) orelse src.len;
-            scanner.index = str_end;
-            if (str_start != str_end) {
-                return helper.rangeInit(str_start, str_end);
-            }
-            return null;
-        },
-        .dtd_token => {
-            if (scanner.index == src.len) {
-                if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
-                return null;
-            }
-            const str_start = scanner.index;
-            const str_end = std.mem.indexOfAnyPos(u8, src, scanner.index, whitespace_set ++ &[_]u8{ '>', '[', '\'', '\"' }) orelse src.len;
-            scanner.index = str_end;
-            if (str_start != str_end) {
-                return helper.rangeInit(str_start, str_end);
-            }
-            scanner.state = .dtd;
-            return null;
-        },
-        .dtd_whitespace => {
-            if (scanner.index == src.len) {
-                if (eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
-                return null;
-            }
-            const str_start = scanner.index;
-            const str_end = std.mem.indexOfNonePos(u8, src, scanner.index, whitespace_set) orelse src.len;
-            scanner.index = str_end;
-            if (str_start != str_end) {
-                return helper.rangeInit(str_start, str_end);
-            }
-            scanner.state = .dtd;
-            return null;
-        },
-
-        .dtd_int_subset => return null,
-        .dtd_int_subset_token => {
-            if (scanner.index == src.len) {
-                if (eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
-                return null;
-            }
-            const str_start = scanner.index;
-            const str_end = std.mem.indexOfAnyPos(u8, src, scanner.index, whitespace_set ++ &[_]u8{ '%', ']', '>' }) orelse src.len;
-            scanner.index = str_end;
-            if (str_start != str_end) {
-                return helper.rangeInit(str_start, str_end);
-            }
-            scanner.state = .dtd_int_subset;
-            return null;
-        },
-        .dtd_int_subset_whitespace => {
-            if (scanner.index == src.len) {
-                if (eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
-                return null;
-            }
-            const str_start = scanner.index;
-            const str_end = std.mem.indexOfNonePos(u8, src, scanner.index, whitespace_set) orelse src.len;
-            scanner.index = str_end;
-            if (str_start != str_end) {
-                return helper.rangeInit(str_start, str_end);
-            }
-            scanner.state = .dtd_int_subset;
-            return null;
-        },
-        .dtd_int_subset_pe_reference => {
-            if (scanner.index == src.len) {
-                if (eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
-                return null;
-            }
-            const str_start = scanner.index;
-            const str_end = std.mem.indexOfAnyPos(u8, src, scanner.index, whitespace_set ++ &[_]u8{ ';', '%', '<', ']', '>' }) orelse src.len;
-            scanner.index = str_end;
-            if (str_start != str_end) {
-                return helper.rangeInit(str_start, str_end);
-            }
-            return null;
-        },
-
-        .dtd_int_subset_tag => unreachable,
-        .dtd_int_subset_tag_token => {
-            if (scanner.index == src.len) {
-                if (!eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
-                return null;
-            }
-            const str_start = scanner.index;
-            const str_end = std.mem.indexOfAnyPos(u8, src, scanner.index, whitespace_set ++ &[_]u8{
-                '(',  '|',  ',', ')',
-                '?',  '*',  '+', '%',
-                '\'', '\"', '>',
-            }) orelse src.len;
-            scanner.index = str_end;
-            if (str_start != str_end) {
-                return helper.rangeInit(str_start, str_end);
-            }
-            scanner.state = .dtd_int_subset_tag;
-            return null;
-        },
-        .dtd_int_subset_tag_whitespace => {
-            if (scanner.index == src.len) {
-                if (eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
-                return null;
-            }
-            const str_start = scanner.index;
-            const str_end = std.mem.indexOfNonePos(u8, src, scanner.index, whitespace_set) orelse src.len;
-            scanner.index = str_end;
-            if (str_start != str_end) {
-                return helper.rangeInit(str_start, str_end);
-            }
-            scanner.state = .dtd_int_subset_tag;
-            return null;
-        },
-        inline //
-        .dtd_int_subset_tag_quote_single,
-        .dtd_int_subset_tag_quote_double,
-        => |tag| {
-            if (scanner.index == src.len) {
-                if (eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                scanner.state = .eof;
                 return null;
             }
             const matching_quote_char: u8 = comptime switch (tag) {
-                .dtd_int_subset_tag_quote_single => '\'',
-                .dtd_int_subset_tag_quote_double => '\"',
+                .dtd_sq, .dtd_subtag_sq => '\'',
+                .dtd_dq, .dtd_subtag_dq => '\"',
                 else => unreachable,
             };
             const str_start = scanner.index;
@@ -1800,37 +1581,93 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
             }
             return null;
         },
-        .dtd_int_subset_tag_pe_reference => {
+        inline .dtd_token, .dtd_subtag_token => |tag| {
             if (scanner.index == src.len) {
-                if (eof_specified) return error.BufferUnderrun;
-                scanner.state = .text_data;
+                if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .eof;
                 return null;
             }
             const str_start = scanner.index;
-            const str_end = std.mem.indexOfAnyPos(u8, src, scanner.index, whitespace_set ++ &[_]u8{
-                '(',  '|',  ',', ')',
-                '?',  '*',  '+', '%',
-                '\'', '\"', '>', ';',
-            }) orelse src.len;
+            const str_end = std.mem.indexOfAnyPos(u8, src, scanner.index, whitespace_set ++ dtd_terminal_characters) orelse src.len;
             scanner.index = str_end;
             if (str_start != str_end) {
                 return helper.rangeInit(str_start, str_end);
             }
-            scanner.state = .dtd_int_subset_tag_pe_reference;
+            scanner.state = comptime switch (tag) {
+                .dtd_token => .dtd,
+                .dtd_subtag_token => .dtd_subtag,
+                else => unreachable,
+            };
             return null;
         },
-
-        .@"dtd_int_subset,<" => unreachable,
+        inline .dtd_whitespace, .dtd_subtag_whitespace => |tag| {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .eof;
+                return null;
+            }
+            const str_start = scanner.index;
+            const str_end = std.mem.indexOfNonePos(u8, src, scanner.index, whitespace_set) orelse src.len;
+            scanner.index = str_end;
+            if (str_start != str_end) {
+                return helper.rangeInit(str_start, str_end);
+            }
+            scanner.state = comptime switch (tag) {
+                .dtd_whitespace => .dtd,
+                .dtd_subtag_whitespace => .dtd_subtag,
+                else => unreachable,
+            };
+            return null;
+        },
+        .@"dtd,<" => unreachable,
+        .@"dtd,<>" => {
+            scanner.state = .dtd;
+            return helper.literalInit(.@"<>");
+        },
 
         // invalid tokens
 
+        .@"text_data,<!-" => unreachable,
+        .@"dtd,<!-" => unreachable,
+
         .@"text_data,<!" => {
-            scanner.state = .text_data_incomplete_tag;
+            scanner.state = .@"text_data:<!,invalid";
             return helper.literalInit(.@"<!");
         },
-        .@"text_data,<!-" => {
-            scanner.state = .text_data_incomplete_tag;
-            return helper.literalInit(.@"<!-");
+        .@"dtd,<!" => {
+            scanner.state = .@"dtd:<!,invalid";
+            return helper.literalInit(.@"<!");
+        },
+
+        .@"text_data:<!,invalid" => {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .eof;
+                return null;
+            }
+            const str_start = scanner.index;
+            const str_end = std.mem.indexOfAnyPos(u8, src, scanner.index, whitespace_set) orelse src.len;
+            scanner.index = str_end;
+            if (str_start != str_end) {
+                return helper.rangeInit(str_start, str_end);
+            }
+            scanner.state = .text_data;
+            return null;
+        },
+        .@"dtd:<!,invalid" => {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .eof;
+                return null;
+            }
+            const str_start = scanner.index;
+            const str_end = std.mem.indexOfAnyPos(u8, src, scanner.index, whitespace_set) orelse src.len;
+            scanner.index = str_end;
+            if (str_start != str_end) {
+                return helper.rangeInit(str_start, str_end);
+            }
+            scanner.state = .dtd;
+            return null;
         },
 
         .@"<![",
@@ -1840,7 +1677,7 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
         .@"<![CDAT",
         .@"<![CDATA",
         => |tag| {
-            scanner.state = .text_data_incomplete_tag;
+            scanner.state = .cdata_start_invalid;
             return helper.literalInit(switch (tag) {
                 inline //
                 .@"<![",
@@ -1853,7 +1690,25 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
                 else => unreachable,
             });
         },
+        .cdata_start_invalid => {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .eof;
+                return null;
+            }
+            const str_start = scanner.index;
+            const maybe_str_end = std.mem.indexOfAnyPos(u8, src, scanner.index, whitespace_set ++ &[_]u8{ '[', ']' }) orelse src.len;
+            const ends_with_lbracket = maybe_str_end != src.len and src[maybe_str_end] == '[';
+            const str_end = maybe_str_end + @intFromBool(ends_with_lbracket);
+            scanner.index = str_end;
+            if (str_start != str_end) {
+                return helper.rangeInit(str_start, str_end);
+            }
+            scanner.state = .text_data;
+            return null;
+        },
 
+        inline //
         .@"<!D",
         .@"<!DO",
         .@"<!DOC",
@@ -1861,60 +1716,63 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
         .@"<!DOCTY",
         .@"<!DOCTYP",
         => |tag| {
-            scanner.state = .text_data_incomplete_tag;
-            return helper.literalInit(switch (tag) {
-                inline //
-                .@"<!D",
-                .@"<!DO",
-                .@"<!DOC",
-                .@"<!DOCT",
-                .@"<!DOCTY",
-                .@"<!DOCTYP",
-                => |itag| @field(TokenSrc.Literal, @tagName(itag)),
-                else => unreachable,
-            });
+            scanner.state = .dtd_invalid_start;
+            return helper.literalInit(@field(TokenSrc.Literal, @tagName(tag)));
         },
-
         inline //
-        .@"dtd_int_subset,<!",
-        .@"dtd_int_subset,<!-",
+        .@"dtd,<!E",
 
-        .@"dtd_int_subset,<!E",
+        .@"dtd,<!EL",
+        .@"dtd,<!ELE",
+        .@"dtd,<!ELEM",
+        .@"dtd,<!ELEME",
+        .@"dtd,<!ELEMEN",
 
-        .@"dtd_int_subset,<!EN",
-        .@"dtd_int_subset,<!ENT",
-        .@"dtd_int_subset,<!ENTI",
-        .@"dtd_int_subset,<!ENTIT",
+        .@"dtd,<!EN",
+        .@"dtd,<!ENT",
+        .@"dtd,<!ENTI",
+        .@"dtd,<!ENTIT",
 
-        .@"dtd_int_subset,<!EL",
-        .@"dtd_int_subset,<!ELE",
-        .@"dtd_int_subset,<!ELEM",
-        .@"dtd_int_subset,<!ELEME",
-        .@"dtd_int_subset,<!ELEMEN",
+        .@"dtd,<!A",
+        .@"dtd,<!AT",
+        .@"dtd,<!ATT",
+        .@"dtd,<!ATTL",
+        .@"dtd,<!ATTLI",
+        .@"dtd,<!ATTLIS",
 
-        .@"dtd_int_subset,<!A",
-        .@"dtd_int_subset,<!AT",
-        .@"dtd_int_subset,<!ATT",
-        .@"dtd_int_subset,<!ATTL",
-        .@"dtd_int_subset,<!ATTLI",
-        .@"dtd_int_subset,<!ATTLIS",
-
-        .@"dtd_int_subset,<!N",
-        .@"dtd_int_subset,<!NO",
-        .@"dtd_int_subset,<!NOT",
-        .@"dtd_int_subset,<!NOTA",
-        .@"dtd_int_subset,<!NOTAT",
-        .@"dtd_int_subset,<!NOTATI",
-        .@"dtd_int_subset,<!NOTATIO",
+        .@"dtd,<!N",
+        .@"dtd,<!NO",
+        .@"dtd,<!NOT",
+        .@"dtd,<!NOTA",
+        .@"dtd,<!NOTAT",
+        .@"dtd,<!NOTATI",
+        .@"dtd,<!NOTATIO",
         => |tag| {
-            const prefix = "dtd_int_subset,";
+            const prefix = "dtd,";
             comptime assert(std.mem.startsWith(u8, @tagName(tag), prefix));
-            scanner.state = .dtd_int_subset;
-            return comptime helper.literalInit(@field(TokenSrc.Literal, @tagName(tag)[prefix.len..]));
+            scanner.state = .dtd_subtag_invalid_start;
+            return helper.literalInit(@field(TokenSrc.Literal, @tagName(tag)[prefix.len..]));
         },
-
-        .text_data_incomplete_tag => {
-            scanner.state = .text_data;
+        inline //
+        .dtd_invalid_start,
+        .dtd_subtag_invalid_start,
+        => |tag| {
+            if (scanner.index == src.len) {
+                if (!eof_specified) return error.BufferUnderrun;
+                scanner.state = .eof;
+                return null;
+            }
+            const str_start = scanner.index;
+            const str_end = std.mem.indexOfAnyPos(u8, src, scanner.index, whitespace_set ++ dtd_terminal_characters) orelse src.len;
+            scanner.index = str_end;
+            if (str_start != str_end) {
+                return helper.rangeInit(str_start, str_end);
+            }
+            scanner.state = comptime switch (tag) {
+                .dtd_invalid_start => .dtd,
+                .dtd_subtag_invalid_start => .dtd_subtag,
+                else => unreachable,
+            };
             return null;
         },
     }
@@ -1988,6 +1846,7 @@ pub const TokenSrc = union(enum) {
         @"<!NOTATIO",
 
         @"-",
+        @"<>",
 
         pub inline fn toStr(literal_tok: Literal) []const u8 {
             return @tagName(literal_tok);
@@ -2007,6 +1866,7 @@ pub const TokenSrc = union(enum) {
 };
 
 const State = enum {
+    eof,
     text_data,
     @"text_data,]",
     @"text_data,]]",
@@ -2019,13 +1879,13 @@ const State = enum {
     @"pi,?",
 
     element_tag,
-    @"element_tag,whitespace",
+    element_tag_whitespace,
     @"element_tag,/",
     element_tag_sq,
     element_tag_dq,
     @"element_tag_sq,&",
     @"element_tag_dq,&",
-
+    @"text_data:<!,invalid",
     comment,
     @"comment,-",
     @"comment,--",
@@ -2037,6 +1897,7 @@ const State = enum {
     @"<![CDA",
     @"<![CDAT",
     @"<![CDATA",
+    cdata_start_invalid,
     cdata,
     @"cdata,]",
     @"cdata,]]",
@@ -2047,66 +1908,62 @@ const State = enum {
     @"<!DOCT",
     @"<!DOCTY",
     @"<!DOCTYP",
+
+    @"dtd,<",
+    @"dtd,<>",
+
+    dtd_invalid_start,
     dtd,
     dtd_sq,
     dtd_dq,
     dtd_token,
     dtd_whitespace,
 
-    dtd_int_subset,
-    dtd_int_subset_token,
-    dtd_int_subset_whitespace,
-    dtd_int_subset_pe_reference,
-    dtd_int_subset_comment,
-    @"dtd_int_subset_comment,-",
-    @"dtd_int_subset_comment,--",
-    @"dtd_int_subset_comment,---",
+    dtd_subtag_invalid_start,
+    dtd_subtag,
+    dtd_subtag_sq,
+    dtd_subtag_dq,
+    dtd_subtag_token,
+    dtd_subtag_whitespace,
 
-    @"dtd_int_subset,<",
-    dtd_int_subset_pi,
-    @"dtd_int_subset_pi,?",
-    @"dtd_int_subset,<!",
+    dtd_pi,
+    @"dtd_pi,?",
 
-    @"dtd_int_subset,<!-",
+    @"dtd,<!",
+    @"dtd:<!,invalid",
+    @"dtd,<!-",
+    dtd_comment,
+    @"dtd_comment,-",
+    @"dtd_comment,--",
+    @"dtd_comment,---",
 
-    @"dtd_int_subset,<!E",
+    @"dtd,<!E",
 
-    @"dtd_int_subset,<!EN",
-    @"dtd_int_subset,<!ENT",
-    @"dtd_int_subset,<!ENTI",
-    @"dtd_int_subset,<!ENTIT",
+    @"dtd,<!EL",
+    @"dtd,<!ELE",
+    @"dtd,<!ELEM",
+    @"dtd,<!ELEME",
+    @"dtd,<!ELEMEN",
 
-    @"dtd_int_subset,<!EL",
-    @"dtd_int_subset,<!ELE",
-    @"dtd_int_subset,<!ELEM",
-    @"dtd_int_subset,<!ELEME",
-    @"dtd_int_subset,<!ELEMEN",
+    @"dtd,<!EN",
+    @"dtd,<!ENT",
+    @"dtd,<!ENTI",
+    @"dtd,<!ENTIT",
 
-    @"dtd_int_subset,<!A",
-    @"dtd_int_subset,<!AT",
-    @"dtd_int_subset,<!ATT",
-    @"dtd_int_subset,<!ATTL",
-    @"dtd_int_subset,<!ATTLI",
-    @"dtd_int_subset,<!ATTLIS",
+    @"dtd,<!A",
+    @"dtd,<!AT",
+    @"dtd,<!ATT",
+    @"dtd,<!ATTL",
+    @"dtd,<!ATTLI",
+    @"dtd,<!ATTLIS",
 
-    @"dtd_int_subset,<!N",
-    @"dtd_int_subset,<!NO",
-    @"dtd_int_subset,<!NOT",
-    @"dtd_int_subset,<!NOTA",
-    @"dtd_int_subset,<!NOTAT",
-    @"dtd_int_subset,<!NOTATI",
-    @"dtd_int_subset,<!NOTATIO",
-
-    /// represents being inside an entity, element, attlist, or notation tag,
-    /// which can all be tokenized equivalently.
-    dtd_int_subset_tag,
-    dtd_int_subset_tag_token,
-    dtd_int_subset_tag_whitespace,
-    dtd_int_subset_tag_quote_single,
-    dtd_int_subset_tag_quote_double,
-    dtd_int_subset_tag_pe_reference,
-
-    text_data_incomplete_tag,
+    @"dtd,<!N",
+    @"dtd,<!NO",
+    @"dtd,<!NOT",
+    @"dtd,<!NOTA",
+    @"dtd,<!NOTAT",
+    @"dtd,<!NOTATI",
+    @"dtd,<!NOTATIO",
 };
 
 /// A checked version of the scanner, mainly used for testing and debugging.
@@ -2254,6 +2111,10 @@ fn testingPrint(comptime fmt_str: []const u8, args: anytype) void {
 test "Scanner Incomplete Markup ('<!--'/'<![CDATA['/'<!DOCTYPE')" {
     var scanner: CheckedScanner = undefined;
 
+    scanner = CheckedScanner.initComplete("<!");
+    try scanner.expectNextTypeStringSeq(.invalid_angle_bracket_left_bang, &.{ "<!", null });
+    try scanner.expectNextType(.eof);
+
     scanner = CheckedScanner.initComplete("<!-");
     try scanner.expectNextType(.invalid_comment_start_single_dash);
     try scanner.expectNextType(.eof);
@@ -2263,23 +2124,25 @@ test "Scanner Incomplete Markup ('<!--'/'<![CDATA['/'<!DOCTYPE')" {
     try scanner.expectNextTypeStringSeq(.text_data, &.{ "<", null });
     try scanner.expectNextType(.eof);
 
-    for ([_][]const u8{
-        "<!",
-        "<![",
-        "<![C",
-        "<![CD",
-        "<![CDA",
-        "<![CDAT",
-        "<![CDATA",
-        "<!D",
-        "<!DO",
-        "<!DOC",
-        "<!DOCT",
-        "<!DOCTY",
-        "<!DOCTYP",
-    }) |incomplete_mk_str| {
+    for ([_]struct { TokenType, []const u8 }{
+        .{ .invalid_cdata_start, "<![" },
+        .{ .invalid_cdata_start, "<![C" },
+        .{ .invalid_cdata_start, "<![CD" },
+        .{ .invalid_cdata_start, "<![CDA" },
+        .{ .invalid_cdata_start, "<![CDAT" },
+        .{ .invalid_cdata_start, "<![CDATA" },
+
+        .{ .invalid_dtd_start, "<!D" },
+        .{ .invalid_dtd_start, "<!DO" },
+        .{ .invalid_dtd_start, "<!DOC" },
+        .{ .invalid_dtd_start, "<!DOCT" },
+        .{ .invalid_dtd_start, "<!DOCTY" },
+        .{ .invalid_dtd_start, "<!DOCTYP" },
+    }) |values| {
+        const expected_tt, const incomplete_mk_str = values;
+
         scanner = CheckedScanner.initComplete(incomplete_mk_str);
-        try scanner.expectNextTypeStringSeq(.invalid_token, &.{ incomplete_mk_str, null });
+        try scanner.expectNextTypeStringSeq(expected_tt, &.{ incomplete_mk_str, null });
         try scanner.expectNextType(.eof);
 
         scanner = CheckedScanner.initStreaming();
@@ -2290,47 +2153,38 @@ test "Scanner Incomplete Markup ('<!--'/'<![CDATA['/'<!DOCTYPE')" {
 
         var eof_copy = scanner;
         eof_copy.feedEof();
-        try eof_copy.expectNextTypeStringSeq(.invalid_token, &.{ incomplete_mk_str, null });
+        try eof_copy.expectNextTypeStringSeq(expected_tt, &.{ incomplete_mk_str, null });
         try eof_copy.expectNextType(.eof);
 
         scanner.feedInput("a");
         scanner.feedEof();
-        try scanner.expectNextType(.invalid_token);
+        try scanner.expectNextType(expected_tt);
         try scanner.expectNextString(incomplete_mk_str);
-        try scanner.expectNextString(null);
-        try scanner.expectNextType(.text_data);
         try scanner.expectNextString("a");
         try scanner.expectNextString(null);
         try scanner.expectNextType(.eof);
     }
 
     scanner = CheckedScanner.initComplete("<! a <");
-    try scanner.expectNextTypeStringSeq(.invalid_token, &.{ "<!", null });
+    try scanner.expectNextTypeStringSeq(.invalid_angle_bracket_left_bang, &.{ "<!", null });
     try scanner.expectNextTypeStringSeq(.text_data, &.{ " a ", null });
     try scanner.expectNextType(.angle_bracket_left);
     try scanner.expectNextType(.eof);
 
     scanner = CheckedScanner.initComplete("<! a");
-    try scanner.expectNextTypeStringSeq(.invalid_token, &.{ "<!", null });
+    try scanner.expectNextTypeStringSeq(.invalid_angle_bracket_left_bang, &.{ "<!", null });
     try scanner.expectNextTypeStringSeq(.text_data, &.{ " a", null });
     try scanner.expectNextType(.eof);
 
     scanner = CheckedScanner.initComplete("<![CDATAR a");
-    try scanner.expectNextType(.invalid_token);
-    try scanner.expectNextString("<![CDATA");
-    try scanner.expectNextString(null);
-    try scanner.expectNextType(.text_data);
-    try scanner.expectNextString("R a");
-    try scanner.expectNextString(null);
+    try scanner.expectNextTypeStringSeq(.invalid_cdata_start, &.{ "<![CDATA", "R", null });
+    try scanner.expectNextTypeStringSeq(.text_data, &.{ " a", null });
     try scanner.expectNextType(.eof);
 
     scanner = CheckedScanner.initComplete("<!DOCTYPR a");
-    try scanner.expectNextType(.invalid_token);
-    try scanner.expectNextString("<!DOCTYP");
-    try scanner.expectNextString(null);
-    try scanner.expectNextType(.text_data);
-    try scanner.expectNextString("R a");
-    try scanner.expectNextString(null);
+    try scanner.expectNextTypeStringSeq(.invalid_dtd_start, &.{ "<!DOCTYP", "R", null });
+    try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "a", null });
     try scanner.expectNextType(.eof);
 }
 
@@ -2990,7 +2844,7 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
     try scanner.expectNextType(.square_bracket_left);
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try scanner.expectNextTypeStringSeq(.invalid_token, &.{ "asdf", null });
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "asdf", null });
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
     try scanner.expectNextType(.square_bracket_right);
     try scanner.expectNextType(.angle_bracket_right);
@@ -3001,7 +2855,7 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
     try scanner.expectNextType(.square_bracket_left);
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try scanner.expectNextTypeStringSeq(.invalid_token, &.{ "asdf", null });
+    try scanner.expectNextTypeStringSeq(.tag_token, &.{ "asdf", null });
     try scanner.expectNextType(.percent);
     try scanner.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
     try scanner.expectNextType(.semicolon);
@@ -3185,7 +3039,6 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextType(.square_bracket_left);
     try scanner.expectNextType(.entity_decl);
     try scanner.expectNextType(.percent);
-    try scanner.expectNextType(.invalid_reference_end);
     try scanner.expectNextType(.angle_bracket_right);
     try scanner.expectNextType(.square_bracket_right);
     try scanner.expectNextType(.angle_bracket_right);
@@ -3197,7 +3050,6 @@ test "Scanner Document Type Definition" {
     try scanner.expectNextType(.entity_decl);
     try scanner.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
     try scanner.expectNextType(.percent);
-    try scanner.expectNextType(.invalid_reference_end);
     try scanner.expectNextType(.angle_bracket_right);
     try scanner.expectNextType(.square_bracket_right);
     try scanner.expectNextType(.angle_bracket_right);

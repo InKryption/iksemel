@@ -212,13 +212,7 @@ fn parseFromSource(
                         if (name == null and !config.allow_element_open_name_leading_whitespace) {
                             name = .{ .lhs = 0, .rhs = 0 };
                         }
-                        while (true) {
-                            const seg = scanner.nextString() catch |err| {
-                                if (@TypeOf(scanner) != xml.Scanner) return err;
-                                unreachable;
-                            };
-                            if (seg == null) break;
-                        }
+                        try ignoreNextSrc(&scanner);
                     },
                     .tag_token => {
                         const str_range = try ast.nextStringRange(allocator, &scanner);
@@ -532,7 +526,12 @@ fn parseFromSource(
             },
             .pi_end => unreachable,
 
-            .cdata_start => {
+            .invalid_angle_bracket_left_bang => @panic("TODO"),
+
+            .cdata_start, .invalid_cdata_start => |tag| {
+                if (tag == .invalid_cdata_start) {
+                    try ignoreNextSrc(&scanner);
+                }
                 try ast.nodes.ensureUnusedCapacity(allocator, 1);
                 const range: IndexPair = switch (try getNextNextTokenType(&scanner)) {
                     .text_data => blk: {
@@ -563,11 +562,14 @@ fn parseFromSource(
             .invalid_comment_end_triple_dash => unreachable,
             .comment_end => unreachable,
 
-            .dtd_start => @panic("TODO"),
+            .dtd_start,
+            .invalid_dtd_start,
+            => @panic("TODO"),
             .element_decl => @panic("TODO"),
             .entity_decl => @panic("TODO"),
             .attlist_decl => @panic("TODO"),
             .notation_decl => @panic("TODO"),
+            .invalid_decl => @panic("TODO"),
         }
     }
 
@@ -649,6 +651,16 @@ inline fn getReferenceRangeAndKind(ast: *Ast, allocator: std.mem.Allocator, scan
             return .{ .{ .lhs = 0, .rhs = 0 }, ref_kind };
         },
         else => unreachable,
+    }
+}
+
+fn ignoreNextSrc(scanner: anytype) !void {
+    while (true) {
+        const seg = scanner.nextString() catch |err| {
+            if (@TypeOf(scanner.*) != xml.Scanner) return err;
+            unreachable;
+        };
+        if (seg == null) break;
     }
 }
 
