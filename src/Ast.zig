@@ -200,11 +200,111 @@ fn parseFromSource(
             .quote_double => unreachable,
 
             .angle_bracket_left => {
+                var queued_tok_type: ?xml.Scanner.TokenType = blk: {
+                    switch (try getNextNextTokenType(&scanner)) {
+                        else => |other| break :blk other,
+                        .slash => {}, // '</'
+                    }
+                    _ = element_stack.popOrNull();
+
+                    var name: ?IndexPair = null;
+                    var invalid_data: ?IndexPair = null;
+
+                    const terminating_tok_type: xml.Scanner.TokenType = while (true) switch (try getNextNextTokenType(&scanner)) {
+                        .tag_token => {
+                            try ast.invalid_data.ensureUnusedCapacity(allocator, 1);
+                            const str_range = try ast.nextStringRange(allocator, &scanner);
+                            if (name == null) {
+                                name = str_range;
+                                continue;
+                            }
+                            if (invalid_data == null) {
+                                invalid_data = .{ .lhs = ast.invalid_data.len, .rhs = ast.invalid_data.len };
+                            }
+                            const data_range = &invalid_data.?;
+                            ast.invalid_data.appendAssumeCapacity(.{
+                                .tag = .tag_token,
+                                .range = str_range,
+                            });
+                            data_range.rhs += 1;
+                        },
+                        .tag_whitespace => {
+                            if (name == null and !config.allow_element_close_name_leading_whitespace) {
+                                name = .{ .lhs = 0, .rhs = 0 };
+                            }
+                            while (true) {
+                                const seg = scanner.nextString() catch |err| {
+                                    if (@TypeOf(scanner) != xml.Scanner) return err;
+                                    unreachable;
+                                };
+                                if (seg == null) break;
+                            }
+                        },
+                        .equals,
+                        .quote_single,
+                        .quote_double,
+                        .ampersand,
+                        .angle_bracket_left,
+                        => |tag| {
+                            if (name == null and !config.allow_element_close_name_leading_whitespace) {
+                                name = .{ .lhs = 0, .rhs = 0 };
+                            }
+                            try ast.invalid_data.append(allocator, .{
+                                .tag = tag,
+                                .range = .{ .lhs = 0, .rhs = 0 },
+                            });
+                        },
+                        .text_data => |tag| {
+                            if (name == null and !config.allow_element_close_name_leading_whitespace) {
+                                name = .{ .lhs = 0, .rhs = 0 };
+                            }
+                            try ast.invalid_data.ensureUnusedCapacity(allocator, 1);
+                            ast.invalid_data.appendAssumeCapacity(.{
+                                .tag = tag,
+                                .range = try ast.nextStringRange(allocator, &scanner),
+                            });
+                        },
+
+                        .slash => @panic("TODO"),
+
+                        .angle_bracket_right,
+                        .eof,
+                        => |tag| break tag,
+                        else => unreachable,
+                    };
+
+                    try ast.nodes.ensureUnusedCapacity(allocator, 1);
+                    try ast.index_pairs.ensureUnusedCapacity(allocator, 2);
+
+                    const name_range = name orelse IndexPair{ .lhs = 0, .rhs = 0 };
+                    const name_range_idx = if (name_range.lhs != name_range.rhs) ast.index_pairs.items.len else std.math.maxInt(usize);
+                    if (name_range_idx != std.math.maxInt(usize)) ast.index_pairs.appendAssumeCapacity(name_range);
+
+                    const data_range = invalid_data orelse IndexPair{ .lhs = 0, .rhs = 0 };
+                    const data_range_idx = if (data_range.lhs != data_range.rhs) ast.index_pairs.items.len else std.math.maxInt(usize);
+                    if (data_range_idx != std.math.maxInt(usize)) ast.index_pairs.appendAssumeCapacity(data_range);
+
+                    const elem_close_node_idx = ast.nodes.addOneAssumeCapacity();
+                    ast.nodes.set(elem_close_node_idx, .{
+                        .kind = .element_close,
+                        .idx_a = name_range_idx,
+                        .idx_b = data_range_idx,
+                        .next = 0,
+                    });
+                    ast.appendChildNodeToElement(current_element, elem_close_node_idx);
+
+                    switch (terminating_tok_type) {
+                        .angle_bracket_right => {},
+                        .eof => break :mainloop,
+                        else => unreachable,
+                    }
+                    continue;
+                };
+
                 var name: ?IndexPair = null;
                 var attributes: ?IndexPair = null;
 
-                var queued_tok_type: ?xml.Scanner.TokenType = null;
-                const elem_terminating_tok_type: xml.Scanner.TokenType = while (true) switch (blk: {
+                const elem_terminating_tok_type: enum { normal, inline_close, eof } = while (true) switch (blk: {
                     defer queued_tok_type = null;
                     break :blk queued_tok_type orelse try getNextNextTokenType(&scanner);
                 }) {
@@ -333,13 +433,16 @@ fn parseFromSource(
                             else => unreachable,
                         };
                         assert(quote_or_eof_tag == .eof or quote_or_eof_tag == start_tag);
-                        if (quote_or_eof_tag == .eof) break quote_or_eof_tag;
+                        if (quote_or_eof_tag == .eof) break .eof;
                     },
 
-                    .angle_bracket_right,
-                    .slash_angle_bracket_right,
-                    .eof,
-                    => |tag| break tag,
+                    .slash => switch (try getNextNextTokenType(&scanner)) {
+                        .angle_bracket_right => break .inline_close,
+                        else => |other| queued_tok_type = other,
+                    },
+
+                    .angle_bracket_right => break .normal,
+                    .eof => break .eof,
 
                     else => unreachable,
                 };
@@ -363,8 +466,8 @@ fn parseFromSource(
                     .next = 0,
                 });
                 switch (elem_terminating_tok_type) {
-                    .slash_angle_bracket_right => ast.appendChildNodeToElement(current_element, empty_element_node_idx),
-                    .angle_bracket_right, .eof => {
+                    .inline_close => ast.appendChildNodeToElement(current_element, empty_element_node_idx),
+                    .normal, .eof => {
                         const element_node_idx = ast.nodes.addOneAssumeCapacity();
                         ast.nodes.set(element_node_idx, .{
                             .kind = .element,
@@ -375,13 +478,14 @@ fn parseFromSource(
                         ast.appendChildNodeToElement(current_element, element_node_idx);
                         element_stack.appendAssumeCapacity(element_node_idx);
                     },
-                    else => unreachable,
                 }
             },
             .angle_bracket_right => unreachable,
 
             .square_bracket_left => unreachable,
             .square_bracket_right => unreachable,
+
+            .slash => unreachable,
 
             .percent => unreachable,
             .ampersand => {
@@ -405,102 +509,6 @@ fn parseFromSource(
             },
             .semicolon => unreachable,
             .invalid_reference_end => unreachable,
-
-            .angle_bracket_left_slash => {
-                _ = element_stack.popOrNull();
-
-                var name: ?IndexPair = null;
-                var invalid_data: ?IndexPair = null;
-
-                const terminating_tok_type: xml.Scanner.TokenType = while (true) switch (try getNextNextTokenType(&scanner)) {
-                    .tag_token => {
-                        try ast.invalid_data.ensureUnusedCapacity(allocator, 1);
-                        const str_range = try ast.nextStringRange(allocator, &scanner);
-                        if (name == null) {
-                            name = str_range;
-                            continue;
-                        }
-                        if (invalid_data == null) {
-                            invalid_data = .{ .lhs = ast.invalid_data.len, .rhs = ast.invalid_data.len };
-                        }
-                        const data_range = &invalid_data.?;
-                        ast.invalid_data.appendAssumeCapacity(.{
-                            .tag = .tag_token,
-                            .range = str_range,
-                        });
-                        data_range.rhs += 1;
-                    },
-                    .tag_whitespace => {
-                        if (name == null and !config.allow_element_close_name_leading_whitespace) {
-                            name = .{ .lhs = 0, .rhs = 0 };
-                        }
-                        while (true) {
-                            const seg = scanner.nextString() catch |err| {
-                                if (@TypeOf(scanner) != xml.Scanner) return err;
-                                unreachable;
-                            };
-                            if (seg == null) break;
-                        }
-                    },
-                    .equals,
-                    .quote_single,
-                    .quote_double,
-                    .ampersand,
-                    .angle_bracket_left,
-                    => |tag| {
-                        if (name == null and !config.allow_element_close_name_leading_whitespace) {
-                            name = .{ .lhs = 0, .rhs = 0 };
-                        }
-                        try ast.invalid_data.append(allocator, .{
-                            .tag = tag,
-                            .range = .{ .lhs = 0, .rhs = 0 },
-                        });
-                    },
-                    .text_data => |tag| {
-                        if (name == null and !config.allow_element_close_name_leading_whitespace) {
-                            name = .{ .lhs = 0, .rhs = 0 };
-                        }
-                        try ast.invalid_data.ensureUnusedCapacity(allocator, 1);
-                        ast.invalid_data.appendAssumeCapacity(.{
-                            .tag = tag,
-                            .range = try ast.nextStringRange(allocator, &scanner),
-                        });
-                    },
-                    .angle_bracket_right,
-                    .slash_angle_bracket_right,
-                    .eof,
-                    => |tag| break tag,
-                    else => unreachable,
-                };
-
-                try ast.nodes.ensureUnusedCapacity(allocator, 1);
-                try ast.index_pairs.ensureUnusedCapacity(allocator, 2);
-
-                const name_range = name orelse IndexPair{ .lhs = 0, .rhs = 0 };
-                const name_range_idx = if (name_range.lhs != name_range.rhs) ast.index_pairs.items.len else std.math.maxInt(usize);
-                if (name_range_idx != std.math.maxInt(usize)) ast.index_pairs.appendAssumeCapacity(name_range);
-
-                const data_range = invalid_data orelse IndexPair{ .lhs = 0, .rhs = 0 };
-                const data_range_idx = if (data_range.lhs != data_range.rhs) ast.index_pairs.items.len else std.math.maxInt(usize);
-                if (data_range_idx != std.math.maxInt(usize)) ast.index_pairs.appendAssumeCapacity(data_range);
-
-                const elem_close_node_idx = ast.nodes.addOneAssumeCapacity();
-                ast.nodes.set(elem_close_node_idx, .{
-                    .kind = .element_close,
-                    .idx_a = name_range_idx,
-                    .idx_b = data_range_idx,
-                    .next = 0,
-                });
-                ast.appendChildNodeToElement(current_element, elem_close_node_idx);
-
-                switch (terminating_tok_type) {
-                    .angle_bracket_right => {},
-                    .slash_angle_bracket_right => @panic("TODO"),
-                    .eof => break :mainloop,
-                    else => unreachable,
-                }
-            },
-            .slash_angle_bracket_right => unreachable,
 
             .pi_start => {
                 try ast.nodes.ensureUnusedCapacity(allocator, 1);
