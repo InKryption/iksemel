@@ -60,7 +60,7 @@ pub fn ReadingScanner(comptime SrcReader: type) type {
             }
         }
 
-        inline fn feed(rs: *Self) SrcReader.Error!void {
+        inline fn feed(rs: *Self) Src.Error!void {
             const bytes_read = try rs.src.read(rs.buffer);
             if (bytes_read == 0) {
                 rs.scanner.feedEof();

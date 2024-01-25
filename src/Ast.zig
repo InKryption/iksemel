@@ -617,14 +617,21 @@ fn nextStringRange(
     scanner: anytype,
 ) !IndexPair {
     if (@TypeOf(scanner.*) == xml.Scanner) {
-        const range = switch ((scanner.nextSrc() catch unreachable).?) {
+        var full_range = switch ((scanner.nextSrc() catch unreachable).?) {
             .range => |range| range,
             .literal => |literal| literal.toRange(scanner),
         };
-        assert((scanner.nextSrc() catch unreachable) == null);
+        while (scanner.nextSrc() catch unreachable) |src| {
+            const range = switch (src) {
+                .range => |range| range,
+                .literal => |literal| literal.toRange(scanner),
+            };
+            assert(full_range.end == range.start);
+            full_range.end = range.end;
+        }
         return .{
-            .lhs = range.start,
-            .rhs = range.end,
+            .lhs = full_range.start,
+            .rhs = full_range.end,
         };
     }
     const start = ast.str_buf.items.len;
