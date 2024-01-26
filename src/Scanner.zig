@@ -1368,7 +1368,7 @@ fn nextSrcImpl(scanner: *Scanner) NextSrcError!?TokenSrc {
                 return null;
             }
             const str_start = scanner.index;
-            const str_end = std.mem.indexOfAnyPos(u8, src, scanner.index, whitespace_set ++ &[_]u8{ '>', '\'', '\"', '/', '=' }) orelse src.len;
+            const str_end = std.mem.indexOfAnyPos(u8, src, scanner.index, whitespace_set ++ &[_]u8{ '\'', '\"', '/', '=', '>' }) orelse src.len;
             scanner.index = str_end;
             if (str_start != str_end) {
                 return helper.rangeInit(str_start, str_end);
