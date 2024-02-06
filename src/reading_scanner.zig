@@ -11,8 +11,8 @@ pub inline fn readingScanner(src_reader: anytype, read_buffer: []u8) ReadingScan
 pub fn ReadingScanner(comptime SrcReader: type) type {
     return struct {
         scanner: xml.Scanner,
-        src: Src,
-        buffer: []u8,
+        src_reader: Src,
+        src: []u8,
         const Self = @This();
 
         pub const Src = SrcReader;
@@ -22,13 +22,14 @@ pub fn ReadingScanner(comptime SrcReader: type) type {
             assert(read_buffer.len != 0);
             return .{
                 .scanner = xml.Scanner.initStreaming(),
-                .src = src_reader,
-                .buffer = read_buffer,
+                .src_reader = src_reader,
+                .src = read_buffer,
             };
         }
 
-        pub fn nextType(rs: *Self) Error!xml.Scanner.TokenType {
-            assert(rs.buffer.len != 0);
+        pub const NextTypeError = Error;
+        pub fn nextType(rs: *Self) NextTypeError!xml.Scanner.TokenType {
+            assert(rs.src.len != 0);
             return rs.scanner.nextType() catch |err_1| return switch (err_1) {
                 error.BufferUnderrun => while (true) {
                     try rs.feed();
@@ -39,33 +40,47 @@ pub fn ReadingScanner(comptime SrcReader: type) type {
             };
         }
 
-        /// The returned string is valid until the next call to `nextString` or `nextTokenType`.
-        pub fn nextString(rs: *Self) Error!?[]const u8 {
-            assert(rs.buffer.len != 0);
-            return rs.scanner.nextString() catch |err_1| return switch (err_1) {
+        pub const NextSrcError = Error;
+        /// For a literal, the source is ephemeral (`.toRange` is illegal).
+        /// For a range, the source can be obtained with `.getStr(rs.src)`
+        /// until the next call to `nextType`, `nextSrc`, or `nextString`.
+        pub fn nextSrc(rs: *Self) NextSrcError!?xml.Scanner.TokenSrc {
+            assert(rs.src.len != 0);
+            return rs.scanner.nextSrc() catch |first_underrun_err| switch (first_underrun_err) {
                 error.BufferUnderrun => while (true) {
                     try rs.feed();
-                    break rs.scanner.nextString() catch |err_2| return switch (err_2) {
+                    break rs.scanner.nextSrc() catch |err| switch (err) {
                         error.BufferUnderrun => continue,
                     };
                 },
             };
         }
 
+        pub const NextStringError = Error;
+        /// The returned string is valid until the next call to `nextType`, `nextSrc`, or `nextString`.
+        pub fn nextString(rs: *Self) NextStringError!?[]const u8 {
+            const maybe_tok_src = try rs.nextSrc();
+            const tok_src = maybe_tok_src orelse return null;
+            return switch (tok_src) {
+                .range => |range| range.getStr(rs.src),
+                .literal => |literal| literal.toStr(),
+            };
+        }
+
         /// Writes the string to the stream.
         /// Returns true if there was any non-null component of the string, false otherwise.
-        pub fn nextStringStream(rs: *Self, out_writer: anytype) (Error || @TypeOf(out_writer).Error)!void {
+        pub fn nextStringStream(rs: *Self, out_writer: anytype) (NextStringError || @TypeOf(out_writer).Error)!void {
             while (try rs.nextString()) |str| {
                 try out_writer.writeAll(str);
             }
         }
 
         inline fn feed(rs: *Self) Src.Error!void {
-            const bytes_read = try rs.src.read(rs.buffer);
+            const bytes_read = try rs.src_reader.read(rs.src);
             if (bytes_read == 0) {
                 rs.scanner.feedEof();
             } else {
-                rs.scanner.feedInput(rs.buffer[0..bytes_read]);
+                rs.scanner.feedInput(rs.src[0..bytes_read]);
             }
         }
     };

@@ -11,12 +11,6 @@ index: usize,
 state: State,
 eof_specified: bool,
 
-/// Returns the remaining subslice of the source that is yet to be scanned.
-/// May be useful while using a non-streaming scanner to perform heuristics/predictions.
-pub inline fn remainingSrc(scanner: *const Scanner) []const u8 {
-    return scanner.src[scanner.index..];
-}
-
 /// Initializes the `Scanner` with the full input.
 /// Calling `feedInput` or `feedEof` is illegal.
 /// Treating `error.BufferUnderrun` as `unreachable` is safe.
@@ -101,7 +95,7 @@ pub inline fn nextString(scanner: *Scanner) NextStringError!?[]const u8 {
     };
 }
 
-pub const TokenType = enum {
+pub const TokenType = enum(u8) {
     /// A run of any non-markup characters. Its meaning is dependent on
     /// the context in which it's being scanned.
     ///
@@ -1742,8 +1736,12 @@ pub const TokenSrc = union(enum) {
         start: usize,
         end: usize,
 
-        pub inline fn getStr(tok_range: Range, scanner: *const Scanner) []const u8 {
-            return scanner.src[tok_range.start..tok_range.end];
+        pub inline fn getStr(
+            tok_range: Range,
+            /// Must be the current `src` field of the scanner, before any calls to `feedInput`.
+            src: []const u8,
+        ) []const u8 {
+            return src[tok_range.start..tok_range.end];
         }
     };
 
@@ -1994,7 +1992,7 @@ pub const CheckedScanner = struct {
     pub fn nextString(checked: *CheckedScanner) NextStringError!?[]const u8 {
         const tok_src = try checked.nextSrc();
         return switch (tok_src orelse return null) {
-            .range => |range| range.getStr(&checked.raw),
+            .range => |range| range.getStr(checked.raw.src),
             .literal => |literal| literal.toStr(),
         };
     }
