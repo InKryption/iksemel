@@ -1,55 +1,39 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-const xml = @import("xml.zig");
+const iksemel = @import("iksemel.zig");
 
-pub inline fn readingScanner(src_reader: anytype, read_buffer: []u8) ReadingScanner(@TypeOf(src_reader)) {
-    const Rs = ReadingScanner(@TypeOf(src_reader));
-    return Rs.init(src_reader, read_buffer);
+pub inline fn readingTokenizer(src_reader: anytype, read_buffer: []u8) ReadingTokenizer(@TypeOf(src_reader)) {
+    const Rt = ReadingTokenizer(@TypeOf(src_reader));
+    return Rt.init(src_reader, read_buffer);
 }
 
-pub fn ReadingScanner(comptime SrcReader: type) type {
+pub fn ReadingTokenizer(comptime SrcReader: type) type {
     return struct {
-        scanner: xml.Scanner,
-        src_reader: Src,
-        src: []u8,
+        tokenizer: iksemel.Tokenizer,
+        buffer: []u8,
+        src: Src,
         const Self = @This();
 
         pub const Src = SrcReader;
         pub const Error = Src.Error;
 
-        pub inline fn init(src_reader: SrcReader, read_buffer: []u8) Self {
+        pub inline fn init(src: SrcReader, read_buffer: []u8) Self {
             assert(read_buffer.len != 0);
             return .{
-                .scanner = xml.Scanner.initStreaming(),
-                .src_reader = src_reader,
-                .src = read_buffer,
+                .tokenizer = iksemel.Tokenizer.initStreaming(),
+                .src = src,
+                .buffer = read_buffer,
             };
         }
 
         pub const NextTypeError = Error;
-        pub fn nextType(rs: *Self) NextTypeError!xml.Scanner.TokenType {
-            assert(rs.src.len != 0);
-            return rs.scanner.nextType() catch |err_1| return switch (err_1) {
+        pub fn nextType(rs: *Self) NextTypeError!iksemel.Tokenizer.TokenType {
+            assert(rs.buffer.len != 0);
+            return rs.tokenizer.nextType() catch |err_1| return switch (err_1) {
                 error.BufferUnderrun => while (true) {
                     try rs.feed();
-                    break rs.scanner.nextType() catch |err_2| return switch (err_2) {
-                        error.BufferUnderrun => continue,
-                    };
-                },
-            };
-        }
-
-        pub const NextSrcError = Error;
-        /// For a literal, the source is ephemeral (`.toRange` is illegal).
-        /// For a range, the source can be obtained with `.getStr(rs.src)`
-        /// until the next call to `nextType`, `nextSrc`, or `nextString`.
-        pub fn nextSrc(rs: *Self) NextSrcError!?xml.Scanner.TokenSrc {
-            assert(rs.src.len != 0);
-            return rs.scanner.nextSrc() catch |first_underrun_err| switch (first_underrun_err) {
-                error.BufferUnderrun => while (true) {
-                    try rs.feed();
-                    break rs.scanner.nextSrc() catch |err| switch (err) {
+                    break rs.tokenizer.nextType() catch |err_2| return switch (err_2) {
                         error.BufferUnderrun => continue,
                     };
                 },
@@ -59,11 +43,14 @@ pub fn ReadingScanner(comptime SrcReader: type) type {
         pub const NextStringError = Error;
         /// The returned string is valid until the next call to `nextType`, `nextSrc`, or `nextString`.
         pub fn nextString(rs: *Self) NextStringError!?[]const u8 {
-            const maybe_tok_src = try rs.nextSrc();
-            const tok_src = maybe_tok_src orelse return null;
-            return switch (tok_src) {
-                .range => |range| range.getStr(rs.src),
-                .literal => |literal| literal.toStr(),
+            assert(rs.buffer.len != 0);
+            return rs.tokenizer.nextString() catch |first_underrun_err| switch (first_underrun_err) {
+                error.BufferUnderrun => while (true) {
+                    try rs.feed();
+                    break rs.tokenizer.nextString() catch |err| switch (err) {
+                        error.BufferUnderrun => continue,
+                    };
+                },
             };
         }
 
@@ -76,19 +63,19 @@ pub fn ReadingScanner(comptime SrcReader: type) type {
         }
 
         inline fn feed(rs: *Self) Src.Error!void {
-            const bytes_read = try rs.src_reader.read(rs.src);
+            const bytes_read = try rs.src.read(rs.buffer);
             if (bytes_read == 0) {
-                rs.scanner.feedEof();
+                rs.tokenizer.feedEof();
             } else {
-                rs.scanner.feedInput(rs.src[0..bytes_read]);
+                rs.tokenizer.feedInput(rs.buffer[0..bytes_read]);
             }
         }
     };
 }
 
-test ReadingScanner {
+test ReadingTokenizer {
     const TokTypeOrStr = union(enum) {
-        tt: xml.Scanner.TokenType,
+        tt: iksemel.Tokenizer.TokenType,
         str: ?[]const u8,
 
         pub fn format(
@@ -167,7 +154,7 @@ test ReadingScanner {
     );
 
     var rs_buffer: [2]u8 = undefined;
-    var rs = readingScanner(fbs.reader(), &rs_buffer);
+    var rs = readingTokenizer(fbs.reader(), &rs_buffer);
 
     var tt_or_str_list = std.ArrayList(TokTypeOrStr).init(std.testing.allocator);
     defer tt_or_str_list.deinit();
