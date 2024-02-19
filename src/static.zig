@@ -33,6 +33,11 @@ pub const InvalidToken = enum {
     }
 };
 
+pub const QuoteType = enum {
+    single,
+    double,
+};
+
 pub inline fn parseReadingTokenizer(
     /// Must conform to the interface defined by `ParseContext`.
     parse_ctx: anytype,
@@ -159,8 +164,8 @@ pub fn ParseContext(comptime InnerCtx: type) type {
             return @call(.always_inline, Ctx.feedAttributeEquals, .{ctx.inner});
         }
         /// Indicates the start of an attribute value.
-        pub fn feedAttributeValueStart(ctx: Self) !void {
-            return @call(.always_inline, Ctx.feedAttributeValueStart, .{ctx.inner});
+        pub fn feedAttributeValueStart(ctx: Self, quote_type: QuoteType) !void {
+            return @call(.always_inline, Ctx.feedAttributeValueStart, .{ ctx.inner, quote_type });
         }
         /// Provides a segment of an attribute value. Terminates when `value_segment == .end_quote`.
         pub fn feedAttributeValueSegment(ctx: Self, value_segment: AttributeSegment) !void {
@@ -229,11 +234,6 @@ fn parseReaderOrSlice(
             .dtd_start => @panic("TODO"),
             .invalid_dtd_start => @panic("TODO"),
 
-            .element_decl => unreachable,
-            .entity_decl => unreachable,
-            .attlist_decl => unreachable,
-            .notation_decl => unreachable,
-
             .text_data => {
                 try ctx.feedTextDataStart();
                 while (true) {
@@ -242,27 +242,7 @@ fn parseReaderOrSlice(
                     if (maybe_text_data == null) break;
                 }
             },
-            .tag_whitespace => unreachable,
-            .tag_token => unreachable,
-            .invalid_token => unreachable,
-
-            .equals => unreachable,
-
-            .lparen => unreachable,
-            .rparen => unreachable,
-
-            .pipe => unreachable,
-            .comma => unreachable,
-            .qmark => unreachable,
-            .asterisk => unreachable,
-            .plus => unreachable,
-
-            .slash => unreachable,
-
-            .percent => unreachable,
-
-            .quote_single => unreachable,
-            .quote_double => unreachable,
+            .cdata_end => try ctx.feedCdataEnd(),
 
             .angle_bracket_left => {
                 const is_close_tag: bool, //
@@ -330,7 +310,11 @@ fn parseReaderOrSlice(
                     .quote_single,
                     .quote_double,
                     => |open_quote_type| {
-                        try ctx.feedAttributeValueStart();
+                        try ctx.feedAttributeValueStart(switch (open_quote_type) {
+                            .quote_single => .single,
+                            .quote_double => .double,
+                            else => unreachable,
+                        });
                         while (true) switch (try getNextTokType(tokenizer)) {
                             .text_data => while (try getNextTokSrc(tokenizer)) |text_data| {
                                 try ctx.feedAttributeValueSegment(.{ .text = text_data });
@@ -367,14 +351,8 @@ fn parseReaderOrSlice(
                     else => unreachable,
                 };
             },
-            .angle_bracket_right => unreachable,
-
-            .square_bracket_left => unreachable,
-            .square_bracket_right => unreachable,
 
             .ampersand => try helpers.feedReferenceAfterHavingEncounteredAmpersand(ctx, tokenizer),
-            .semicolon => unreachable,
-            .invalid_reference_end => unreachable,
 
             .pi_start => {
                 try ctx.feedPiStart();
@@ -396,11 +374,7 @@ fn parseReaderOrSlice(
                     else => unreachable,
                 }
             },
-            .pi_end => unreachable,
-
-            .invalid_angle_bracket_left_bang => {
-                try ctx.feedInvalidToken(InvalidToken.angle_bracket_left_bang);
-            },
+            .invalid_angle_bracket_left_bang => try ctx.feedInvalidToken(.angle_bracket_left_bang),
 
             .cdata_start,
             .invalid_cdata_start,
@@ -416,7 +390,6 @@ fn parseReaderOrSlice(
                 });
                 switch (try getNextTokType(tokenizer)) {
                     .text_data => {
-                        try ctx.feedTextDataStart();
                         while (true) {
                             const maybe_text_data = try getNextTokSrc(tokenizer);
                             try ctx.feedTextDataSegment(maybe_text_data);
@@ -433,7 +406,6 @@ fn parseReaderOrSlice(
                     else => unreachable,
                 }
             },
-            .cdata_end => try ctx.feedCdataEnd(),
 
             .comment_start => {
                 try ctx.feedCommentStart();
@@ -448,6 +420,44 @@ fn parseReaderOrSlice(
                     else => unreachable,
                 };
             },
+
+            .element_decl => unreachable,
+            .entity_decl => unreachable,
+            .attlist_decl => unreachable,
+            .notation_decl => unreachable,
+
+            .tag_whitespace => unreachable,
+            .tag_token => unreachable,
+            .invalid_token => unreachable,
+
+            .equals => unreachable,
+
+            .lparen => unreachable,
+            .rparen => unreachable,
+
+            .pipe => unreachable,
+            .comma => unreachable,
+            .qmark => unreachable,
+            .asterisk => unreachable,
+            .plus => unreachable,
+
+            .slash => unreachable,
+
+            .percent => unreachable,
+
+            .quote_single => unreachable,
+            .quote_double => unreachable,
+
+            .angle_bracket_right => unreachable,
+
+            .square_bracket_left => unreachable,
+            .square_bracket_right => unreachable,
+
+            .semicolon => unreachable,
+            .invalid_reference_end => unreachable,
+
+            .pi_end => unreachable,
+
             .invalid_comment_start_single_dash => unreachable,
             .invalid_comment_dash_dash => unreachable,
             .invalid_comment_end_triple_dash => unreachable,
@@ -467,10 +477,6 @@ inline fn getNextTokSrc(tokenizer: anytype) !?iksemel.Tokenizer.TokenSrc {
         iksemel.Tokenizer => tokenizer.nextSrcAssumeNoUnderrun(),
         else => tokenizer.nextType(),
     };
-}
-inline fn getNextTokString(tokenizer: anytype) !?[]const u8 {
-    const tok_src = try getNextTokSrc(tokenizer);
-    return tokenizer.getSrcString(tok_src orelse return null);
 }
 
 test {
@@ -662,7 +668,8 @@ test {
             };
             elem.attributes = attrs_realloced;
         }
-        pub inline fn feedAttributeValueStart(ctx: *@This()) !void {
+        pub inline fn feedAttributeValueStart(ctx: *@This(), quote_type: QuoteType) !void {
+            _ = quote_type;
             const elem = ctx.current;
             {
                 const attr: *Node.Attribute = @constCast(&elem.attributes[elem.attributes.len - 1]);
