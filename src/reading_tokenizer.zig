@@ -55,13 +55,17 @@ pub fn ReadingTokenizer(comptime SrcReader: type) type {
             };
         }
 
-        pub const NextStringError = Error;
-        /// The returned string is valid until the next call to `nextType`, `nextSrc`, or `nextString`.
-        pub fn nextString(rs: *Self) NextStringError!?[]const u8 {
-            return switch ((try rs.nextSrc()) orelse return null) {
+        pub inline fn getSrcString(rs: *const Self, tok_src: iksemel.Tokenizer.TokenSrc) []const u8 {
+            return switch (tok_src) {
                 .range => |range| rs.buffer[range.start..range.end],
                 .literal => |literal| literal.toStr(),
             };
+        }
+
+        pub const NextStringError = Error;
+        /// The returned string is valid until the next call to `nextType`, `nextSrc`, or `nextString`.
+        pub inline fn nextString(rs: *Self) NextStringError!?[]const u8 {
+            return rs.getSrcString((try rs.nextSrc()) orelse return null);
         }
 
         /// Writes the string to the stream.

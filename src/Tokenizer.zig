@@ -107,6 +107,13 @@ pub inline fn nextSrcAssumeNoUnderrun(tokenizer: *Tokenizer) ?TokenSrc {
     return tokenizer.nextTypeOrSrcImpl(.src_no_underrun);
 }
 
+pub inline fn getSrcString(tokenizer: *const Tokenizer, tok_src: TokenSrc) []const u8 {
+    return switch (tok_src) {
+        .range => |range| tokenizer.src[range.start..range.end],
+        .literal => |literal| literal.toStr(),
+    };
+}
+
 pub const NextStringError = NextSrcError;
 /// Helper function for returning the result of `nextSrc` directly as a string.
 /// The returned string is either a string literal or a reference to `tokenizer.src`,
@@ -188,7 +195,6 @@ pub const TokenType = enum(u8) {
     /// * `.tag_token`.
     /// * `.tag_whitespace`.
     /// * `.equals`.
-    /// * `.slash`.
     /// * `.quote_single` where the subsequent token sequence will be one of the following:
     ///    + `.text_data`.
     ///    + `.ampersand` followed by a token sequence as described in its own documentation.
@@ -196,8 +202,8 @@ pub const TokenType = enum(u8) {
     ///    + `.quote_single` ending the token sequence.
     ///    + `.eof`.
     /// * `.quote_double` following sequence is equivalent as for `.quote_single`, replacing it with `.quote_double`.
+    /// * `.slash`.
     /// * `.angle_bracket_right`.
-    /// * `.slash_angle_bracket_right`.
     /// * `.eof`.
     angle_bracket_left,
     /// The '>' token.
