@@ -425,6 +425,7 @@ fn parseReaderOrSlice(
             .entity_decl => unreachable,
             .attlist_decl => unreachable,
             .notation_decl => unreachable,
+            .invalid_decl => unreachable,
 
             .tag_whitespace => unreachable,
             .tag_token => unreachable,

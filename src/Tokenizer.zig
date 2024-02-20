@@ -243,14 +243,6 @@ pub const TokenType = enum(u8) {
     /// Ends the token sequence.
     pi_end,
 
-    /// The '<!' token.
-    ///
-    /// This is returned when '<!' is followed by a sequence
-    /// which does not ultimately form a recognized markup tag.
-    /// The nesting/context is not affected, scanning continues
-    /// as before.
-    invalid_angle_bracket_left_bang,
-
     /// The '<![CDATA[' token.
     ///
     /// Starts a CDATA Section.
@@ -342,16 +334,33 @@ pub const TokenType = enum(u8) {
     element_decl,
     /// The '<!ENTITY' token.
     ///
-    /// The subsequent token sequence will be equivalent as for `.element_decl`.
+    /// The subsequent token sequence will be equivalent to the one for `.element_decl`.
     entity_decl,
     /// The '<!ATTLIST' token.
     ///
-    /// The subsequent token sequence will be equivalent as for `.element_decl`.
+    /// The subsequent token sequence will be equivalent to the one for `.element_decl`.
     attlist_decl,
     /// The '<!NOTATION' token.
     ///
-    /// The subsequent token sequence will be equivalent as for `.element_decl`.
+    /// The subsequent token sequence will be equivalent to the one for `.element_decl`.
     notation_decl,
+    /// A segment of one of '<!ELEMENT', '<!ENTITY', '<!ATTLIST', or '<!NOTATION'.
+    ///
+    /// First the source for the segment will be returned, and then
+    /// the subsequent token sequence will be equivalent to the one for `.element_decl`.
+    invalid_decl,
+
+    /// The '<!' token.
+    ///
+    /// This is returned when '<!' is followed by a sequence
+    /// which does not ultimately form a recognized markup tag.
+    ///
+    /// Inside standard element character data, this is returned
+    /// as a standalone token and doesn't affect the nesting/context.
+    ///
+    /// Inside a DTD, the subsequent token sequence will be equivalent
+    /// to the one for `.element_decl`.
+    invalid_angle_bracket_left_bang,
 
     /// Whether or not the token represents any text to be returned by `nextSrc`/`nextString`.
     pub inline fn hasString(token_type: TokenType) bool {
@@ -363,6 +372,7 @@ pub const TokenType = enum(u8) {
 
             .invalid_cdata_start,
             .invalid_dtd_start,
+            .invalid_decl,
             => true,
 
             else => false,
@@ -1452,6 +1462,7 @@ fn nextTypeOrSrcImpl(
         .@"dtd,<!" => switch (ret_kind) {
             .type => {
                 if (tokenizer.index == src.len) {
+                    tokenizer.state = .eof;
                     break .invalid_angle_bracket_left_bang;
                 }
                 switch (src[tokenizer.index]) {
@@ -1467,7 +1478,7 @@ fn nextTypeOrSrcImpl(
                         continue;
                     },
                     else => {
-                        tokenizer.state = .dtd;
+                        tokenizer.state = .dtd_subtag;
                         break .invalid_angle_bracket_left_bang;
                     },
                 }
@@ -1477,7 +1488,7 @@ fn nextTypeOrSrcImpl(
 
         .dtd_invalid_start,
         .dtd_subtag_invalid_start,
-        => switch (ret_kind) {
+        => |tag| switch (ret_kind) {
             .type => unreachable,
             .src => {
                 if (tokenizer.index == src.len) {
@@ -1490,7 +1501,11 @@ fn nextTypeOrSrcImpl(
                 if (str_start != str_end) {
                     return helper.rangeInit(str_start, str_end);
                 }
-                tokenizer.state = .dtd;
+                tokenizer.state = switch (tag) {
+                    .dtd_invalid_start => .dtd,
+                    .dtd_subtag_invalid_start => .dtd_subtag,
+                    else => unreachable,
+                };
                 return null;
             },
         },
@@ -1529,7 +1544,7 @@ fn nextTypeOrSrcImpl(
                 const on_match: union(enum) { state: State, type: TokenType } //
                 = switch (tag) {
                     .@"dtd,<!E" => {
-                        if (tokenizer.index == src.len) break .invalid_token;
+                        if (tokenizer.index == src.len) break .invalid_decl;
                         switch (src[tokenizer.index]) {
                             'L' => {
                                 tokenizer.state = .@"dtd,<!EL";
@@ -1541,7 +1556,7 @@ fn nextTypeOrSrcImpl(
                                 tokenizer.index += 1;
                                 continue;
                             },
-                            else => break .invalid_token,
+                            else => break .invalid_decl,
                         }
                     },
 
@@ -1573,15 +1588,18 @@ fn nextTypeOrSrcImpl(
 
                     else => unreachable,
                 };
-                if (src[tokenizer.index] != expected_char) break .invalid_token;
-                tokenizer.state = switch (on_match) {
-                    .state => |state_on_match| state_on_match,
-                    .type => .dtd_subtag,
-                };
-                tokenizer.index += 1;
+                if (src[tokenizer.index] != expected_char) break .invalid_decl;
                 switch (on_match) {
-                    .state => continue,
-                    .type => |type_on_match| break type_on_match,
+                    .state => |state_on_match| {
+                        tokenizer.state = state_on_match;
+                        tokenizer.index += 1;
+                        continue;
+                    },
+                    .type => |type_on_match| {
+                        tokenizer.state = .dtd_subtag;
+                        tokenizer.index += 1;
+                        break type_on_match;
+                    },
                 }
             },
 
@@ -2941,35 +2959,62 @@ test "Tokenizer Document Type Definition" {
     try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "a", null });
     try tokenizer.expectNextType(.eof);
 
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE <!> >");
+    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE <!> > ");
     try tokenizer.expectNextType(.dtd_start);
     try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
     try tokenizer.expectNextType(.invalid_angle_bracket_left_bang);
     try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ " >", null });
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE<!ELEMENT]>foo");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextType(.element_decl);
-    try tokenizer.expectNextType(.square_bracket_right);
+    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
     try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "foo", null });
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE<!ELEMENT>]foo");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextType(.element_decl);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.square_bracket_right);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
+    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ " ", null });
     try tokenizer.expectNextType(.eof);
 
     tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE<!EL>foo");
     try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextTypeStringSeq(.invalid_token, &.{ "<!EL", null });
+    try tokenizer.expectNextTypeStringSeq(.invalid_decl, &.{ "<!EL", null });
     try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "foo", null });
+    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
+    try tokenizer.expectNextType(.eof);
+
+    inline for (.{
+        .{ "<!", .invalid_angle_bracket_left_bang },
+        .{ "<!ELEMENT", .element_decl },
+        .{ "<!ENTITY", .entity_decl },
+        .{ "<!ATTLIST", .attlist_decl },
+        .{ "<!NOTATION", .notation_decl },
+    }) |values| {
+        const decl_src: []const u8, const expected_decl_tt: TokenType = values;
+
+        tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE" ++ decl_src ++ "]>foo");
+        try tokenizer.expectNextType(.dtd_start);
+        try tokenizer.expectNextType(expected_decl_tt);
+        try tokenizer.expectNextType(.square_bracket_right);
+        try tokenizer.expectNextType(.angle_bracket_right);
+        try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "foo", null });
+        try tokenizer.expectNextType(.eof);
+
+        tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE" ++ decl_src ++ ">]foo");
+        try tokenizer.expectNextType(.dtd_start);
+        try tokenizer.expectNextType(expected_decl_tt);
+        try tokenizer.expectNextType(.angle_bracket_right);
+        try tokenizer.expectNextType(.square_bracket_right);
+        try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
+        try tokenizer.expectNextType(.eof);
+
+        tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE" ++ decl_src ++ "<!>]foo");
+        try tokenizer.expectNextType(.dtd_start);
+        try tokenizer.expectNextType(expected_decl_tt);
+        try tokenizer.expectNextType(.invalid_angle_bracket_left_bang);
+        try tokenizer.expectNextType(.angle_bracket_right);
+        try tokenizer.expectNextType(.square_bracket_right);
+        try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
+        try tokenizer.expectNextType(.eof);
+
+        tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE" ++ decl_src);
+        try tokenizer.expectNextType(.dtd_start);
+        try tokenizer.expectNextType(expected_decl_tt);
+        try tokenizer.expectNextType(.eof);
+    }
 }
 
 test Tokenizer {
