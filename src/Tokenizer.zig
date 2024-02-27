@@ -4,15 +4,29 @@
 //!
 //! * Streaming: tokenizer is initialized with `initStreaming`, requires
 //! the programmer to make use of the `feedInput` method after encountering
-//! `error.BufferUnderrun` while using the `nextType` and `nextSrc`/`nextString`
+//! `error.BufferUnderrun` while using the `nextTypeStream` and `nextSrcStream`
 //! methods. `feedEof` must be used to signal the end of the XML source.
 //!
 //! * Non-streaming: tokenizer is initialized with `initComplete`, or with
 //! `initStreaming` before eventually calling `feedEof`. This mode allows
-//! use of the standard API (`nextType`, `nextSrc`/`nextString`), in addition
-//! to the mirror methods suffixed `*AssumeNoUnderrun`, which take advantage
-//! of the assumption that the entirety of the rest of the XML source has been
-//! given. The `feedInput` and `feedEof` methods are illegal in this mode.
+//! use of the standard API (`nextTypeStream`, `nextSrcStream`), in addition
+//! to the mirror methods `nextTypeNoUnderrun` & `nextSrcNoUnderrun`, which
+//! take advantage of the assumption that the entirety of the of the XML source
+//! has been given. The `feedInput` and `feedEof` methods are illegal in this mode.
+//!
+//! Important to note: if the tokenizer was first initialized with `initStreaming`,
+//! and then becomes non-streaming via a call to `feedEof`, immediately following
+//! a call to `feedInput` as a response to `error.BufferUnderrun`, the currently
+//! in-bound token may still be returned partially, as part of it may have existed
+//! in the previous buffer.
+//!
+//! Any references in documentation to `nextTypeStream` apply equally to `nextTypeNoUnderrun`.
+//! Any references in documentation to `nextSrcStream` apply equally to `nextSrcNoUnderrun`.
+//!
+//! The tokenization of a valid document requires no special considerations,
+//! however the tokenizer is error-tolerant, and defines specially recognized
+//! invalid cases which should be treated as failures at some point, if not
+//! at the point of tokenization.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -53,7 +67,7 @@ pub inline fn initStreaming() Tokenizer {
 ///
 /// The memory pointed to by `src` must remain valid until
 /// the next call to `feedInput`, or until the last call to
-/// `nextString` after a call to `feedEof`.
+/// `nextSrcStream` after a call to `feedEof`.
 pub inline fn feedInput(tokenizer: *Tokenizer, src: []const u8) void {
     assert(!tokenizer.eof_specified);
     assert(tokenizer.index == tokenizer.src.len);
@@ -77,55 +91,38 @@ pub const NextTypeError = BufferError;
 /// Returns type of the next token. There are two possibilities:
 /// * The token type represents a builtin syntactic construct for which
 ///   there is no further textual information to retrieve.
-///   In this case, the caller should simply call `nextType` again to
+///   In this case, the caller should simply call `nextTypeStream` again to
 ///   obtain the following token type.
 ///
 /// * The token indicates some textual information which isn't a builtin
 ///   syntactic construct, like identifiers in markup and textual data.
-///   In this case, the caller should call `nextSrc` until it returns null.
-///   The caller may interchangeably use `nextString` and `nextSrc`.
-pub inline fn nextType(tokenizer: *Tokenizer) NextTypeError!TokenType {
+///   In this case, the caller should call `nextSrcStream` until it returns null.
+pub inline fn nextTypeStream(tokenizer: *Tokenizer) NextTypeError!TokenType {
     return tokenizer.nextTypeOrSrcImpl(.type);
 }
 
-/// Same as `nextType`, assuming that `error.BufferUnderrun` is impossible (eof has already been fed).
-pub inline fn nextTypeAssumeNoUnderrun(tokenizer: *Tokenizer) TokenType {
+/// Same as `nextTypeStream`, assuming that `error.BufferUnderrun` is impossible (eof has already been fed).
+pub inline fn nextTypeNoUnderrun(tokenizer: *Tokenizer) TokenType {
     return tokenizer.nextTypeOrSrcImpl(.type_no_underrun);
 }
 
 pub const NextSrcError = BufferError;
-/// The returned token reference is either a range referencing the current `tokenizer.src` value,
-/// which will remain valid for as long as the referenced slice is valid and accessible.
-/// It should be called repeatedly until it returns `null`. If `error.BufferUnderrun` is returned,
-/// the caller should invoke `feedInput`, and then proceed.
-pub inline fn nextSrc(tokenizer: *Tokenizer) NextSrcError!?TokenSrc {
+/// It is guaranteed to return a non-null value once. After the initial non-null value is
+/// acquired, this must be called again until it returns null, concatenating the returned
+/// token sources in order. During this chain of calls it may return `error.BufferUnderrun`,
+/// in which case the caller should invoke `feedInput` or `feedEof`, and then try again.
+///
+/// For a non-streaming tokenizer, see `nextSrcAssumeUnderrun`.
+pub inline fn nextSrcStream(tokenizer: *Tokenizer) NextSrcError!?TokenSrc {
     return tokenizer.nextTypeOrSrcImpl(.src);
 }
 
-/// Same as `nextSrc`, assuming that `error.BufferUnderrun` is impossible (eof has already been fed).
-pub inline fn nextSrcAssumeNoUnderrun(tokenizer: *Tokenizer) ?TokenSrc {
-    return tokenizer.nextTypeOrSrcImpl(.src_no_underrun);
-}
-
-pub inline fn getSrcString(tokenizer: *const Tokenizer, tok_src: TokenSrc) []const u8 {
-    return switch (tok_src) {
-        .range => |range| tokenizer.src[range.start..range.end],
-        .literal => |literal| literal.toStr(),
-    };
-}
-
-pub const NextStringError = NextSrcError;
-/// Helper function for returning the result of `nextSrc` directly as a string.
-/// The returned string is either a string literal or a reference to `tokenizer.src`,
-/// meaning it is only guaranteed to remain valid for as long as `tokenizer.src` is.
-/// All other behaviour remains equivalent to `nextSrc`.
-pub inline fn nextString(tokenizer: *Tokenizer) NextStringError!?[]const u8 {
-    return tokenizer.nextStringImpl(false);
-}
-
-/// Same as `nextString`, assuming that `error.BufferUnderrun` is impossible (eof has already been fed).
-pub inline fn nextStringAssumeNoUnderrun(tokenizer: *Tokenizer) ?[]const u8 {
-    return tokenizer.nextStringImpl(true);
+/// Equivalent to `nextSrcStream`, but returns the full token source in one call.
+/// If the returned token is a literal, and this is following a call to `feedInput`,
+/// it may not be converted into a range.
+pub inline fn nextSrcNoUnderrun(tokenizer: *Tokenizer) TokenSrc {
+    defer assert(tokenizer.nextTypeOrSrcImpl(.src_no_underrun) == null);
+    return tokenizer.nextTypeOrSrcImpl(.src_no_underrun).?;
 }
 
 pub const TokenType = enum(u8) {
@@ -362,7 +359,7 @@ pub const TokenType = enum(u8) {
     /// to the one for `.element_decl`.
     invalid_angle_bracket_left_bang,
 
-    /// Whether or not the token represents any text to be returned by `nextSrc`/`nextString`.
+    /// Whether or not the token represents any text to be returned by `nextSrcStream`.
     pub inline fn hasString(token_type: TokenType) bool {
         return switch (token_type) {
             .text_data,
@@ -450,17 +447,6 @@ pub const whitespace_set: []const u8 = &[_]u8{
     '\u{0D}',
     '\u{0A}',
 };
-
-inline fn nextStringImpl(tokenizer: *Tokenizer, comptime assert_eof_specified: bool) (if (assert_eof_specified) ?[]const u8 else NextStringError!?[]const u8) {
-    const maybe_tok_src: ?TokenSrc = if (assert_eof_specified)
-        tokenizer.nextTypeOrSrcImpl(.src_no_underrun)
-    else
-        try tokenizer.nextTypeOrSrcImpl(.src);
-    return switch (maybe_tok_src orelse return null) {
-        .range => |range| tokenizer.src[range.start..range.end],
-        .literal => |literal| literal.toStr(),
-    };
-}
 
 fn nextTypeOrSrcImpl(
     tokenizer: *Tokenizer,
@@ -669,8 +655,8 @@ fn nextTypeOrSrcImpl(
                     break .invalid_comment_start_single_dash;
                 }
                 tokenizer.state = switch (tag) {
-                    .@"general,<!-" => .@"general,<!--,text_data",
-                    .@"dtd,<!-" => .dtd_comment,
+                    .@"general,<!-" => .@"general,<!--",
+                    .@"dtd,<!-" => .@"dtd,<!--",
                     else => unreachable,
                 };
                 if (src[tokenizer.index] != '-') {
@@ -896,8 +882,8 @@ fn nextTypeOrSrcImpl(
             },
         },
 
-        .@"general,<!--,text_data",
-        .dtd_comment,
+        .@"general,<!--",
+        .@"dtd,<!--",
         => |tag| switch (ret_kind) {
             .type => {
                 if (tokenizer.index == src.len) {
@@ -908,8 +894,8 @@ fn nextTypeOrSrcImpl(
                     break .text_data;
                 }
                 tokenizer.state = switch (tag) {
-                    .@"general,<!--,text_data" => .@"general,<!--,-",
-                    .dtd_comment => .@"dtd_comment,-",
+                    .@"general,<!--" => .@"general,<!--,-",
+                    .@"dtd,<!--" => .@"dtd_comment,-",
                     else => unreachable,
                 };
                 tokenizer.index += 1;
@@ -928,8 +914,8 @@ fn nextTypeOrSrcImpl(
                 }
                 if (src[tokenizer.index] == '-') {
                     tokenizer.state = switch (tag) {
-                        .@"general,<!--,text_data" => .@"general,<!--,-",
-                        .dtd_comment => .@"dtd_comment,-",
+                        .@"general,<!--" => .@"general,<!--,-",
+                        .@"dtd,<!--" => .@"dtd_comment,-",
                         else => unreachable,
                     };
                     tokenizer.index += 1;
@@ -956,8 +942,8 @@ fn nextTypeOrSrcImpl(
                 const state_on_unmatched: State, //
                 const state_on_match: State //
                 = switch (tag) {
-                    .@"general,<!--,-" => .{ .@"general,<!--,text_data", .@"general,<!--,--" },
-                    .@"dtd_comment,-" => .{ .dtd_comment, .@"dtd_comment,--" },
+                    .@"general,<!--,-" => .{ .@"general,<!--", .@"general,<!--,--" },
+                    .@"dtd_comment,-" => .{ .@"dtd,<!--", .@"dtd_comment,--" },
                     else => unreachable,
                 };
                 if (tokenizer.index == src.len) {
@@ -981,8 +967,8 @@ fn nextTypeOrSrcImpl(
                 const state_on_dash: State, //
                 const state_on_rab: State //
                 = switch (tag) {
-                    .@"general,<!--,--" => .{ .@"general,<!--,text_data", .@"general,<!--,---", .general },
-                    .@"dtd_comment,--" => .{ .dtd_comment, .@"dtd_comment,---", .dtd },
+                    .@"general,<!--,--" => .{ .@"general,<!--", .@"general,<!--,---", .general },
+                    .@"dtd_comment,--" => .{ .@"dtd,<!--", .@"dtd_comment,---", .dtd },
                     else => unreachable,
                 };
                 if (tokenizer.index == src.len) {
@@ -1438,11 +1424,6 @@ fn nextTypeOrSrcImpl(
                         tokenizer.index += 1;
                         continue;
                     },
-                    '>' => {
-                        tokenizer.state = .@"dtd,<>";
-                        tokenizer.index += 1;
-                        break .invalid_token;
-                    },
                     else => {
                         tokenizer.state = .dtd;
                         break .angle_bracket_left;
@@ -1450,13 +1431,6 @@ fn nextTypeOrSrcImpl(
                 }
             },
             .src => unreachable,
-        },
-        .@"dtd,<>" => switch (ret_kind) {
-            .type => unreachable,
-            .src => {
-                tokenizer.state = .dtd;
-                return helper.literalInit(.@"<>");
-            },
         },
 
         .@"dtd,<!" => switch (ret_kind) {
@@ -1649,10 +1623,17 @@ pub const TokenSrc = union(enum) {
     pub const Range = struct {
         start: usize,
         end: usize,
+
+        /// For a streaming `Tokenizer`, this must be called with the `src` field
+        /// immediately after it is returned from `nextSrcStream` to get the source string.
+        /// For a non-streaming `Tokenizer`, this can be called at any time with
+        /// the `src` field.
+        /// The returned string aliases the `src` parameter.
+        pub inline fn toStr(range: Range, src: []const u8) []const u8 {
+            return src[range.start..range.end];
+        }
     };
 
-    /// Refers to a string literal which was possibly recognized only after a call to `feedInput`,
-    /// making it impossible to return a range referring to it in the Tokenizer's current `src` field.
     pub const Literal = enum {
         @"]",
         @"]]",
@@ -1705,20 +1686,22 @@ pub const TokenSrc = union(enum) {
         @"<!NOTATIO",
 
         @"-",
-        @"<>",
 
-        pub inline fn toStr(literal_tok: Literal) []const u8 {
-            return @tagName(literal_tok);
-        }
-
-        /// If the call to `nextType` just prior, and the calls to `nextSrc`/`nextString` never
-        /// returned `error.BufferUnderrun`, the caller may use this function to turn the
-        /// literal into a range immediately after receiving it.
+        /// For a streaming `Tokenizer`, this is illegal.
+        /// For a non-streaming `Tokenizer`, this must be called immediately after it is returned
+        /// from `nextSrcStream` to get the source range, which may then be turned into a string which
+        /// aliases the `src` field.
         pub inline fn toRange(literal_tok: Literal, tokenizer: *const Tokenizer) Range {
             const len = literal_tok.toStr().len;
             const result: Range = .{ .start = tokenizer.index - len, .end = tokenizer.index };
             assert(result.end - result.start == len);
             return result;
+        }
+
+        /// This is valid to call at any time, regardless of whether the source `Tokenizer` is
+        /// streaming, as it will simply return the represented string literal.
+        pub inline fn toStr(literal_tok: Literal) []const u8 {
+            return @tagName(literal_tok);
         }
     };
 };
@@ -1730,7 +1713,9 @@ const State = enum {
     @"general,]",
     @"general,]]",
     @"general,&",
+
     @"general,<",
+
     @"general,<!",
     @"general,<!-",
 
@@ -1744,7 +1729,7 @@ const State = enum {
     @"element_tag_sq,&",
     @"element_tag_dq,&",
 
-    @"general,<!--,text_data",
+    @"general,<!--",
     @"general,<!--,-",
     @"general,<!--,--",
     @"general,<!--,---",
@@ -1767,9 +1752,6 @@ const State = enum {
     @"<!DOCTY",
     @"<!DOCTYP",
 
-    @"dtd,<",
-    @"dtd,<>",
-
     dtd_invalid_start,
     dtd,
     dtd_sq,
@@ -1784,12 +1766,14 @@ const State = enum {
     dtd_subtag_token,
     dtd_subtag_whitespace,
 
+    @"dtd,<",
+
     dtd_pi,
     @"dtd_pi,?",
 
     @"dtd,<!",
     @"dtd,<!-",
-    dtd_comment,
+    @"dtd,<!--",
     @"dtd_comment,-",
     @"dtd_comment,--",
     @"dtd_comment,---",
@@ -1868,14 +1852,14 @@ pub const CheckedTokenizer = struct {
             .init => {},
             .tok => |prev| if (prev.hasString()) @panic(switch (prev) {
                 inline else => |tag| "Can't call `nextType` when the previous token '." ++ @tagName(tag) ++
-                    "' has a string pending - call `nextSrc` or `nextString` first.",
+                    "' has a string pending - call `nextSrc` first.",
             }),
             .str => |str| switch (str) {
-                .non_null => @panic("Can't call `nextType` when there is still a string pending - call `nextSrc` or `nextString` until they return null."),
+                .non_null => @panic("Can't call `nextType` when there is still a string pending - call `nextSrc` until it returns null."),
                 .null => {},
             },
         }
-        const tok_type = try checked.raw.nextType();
+        const tok_type = try checked.raw.nextTypeStream();
         checked.prev_output = .{ .tok = tok_type };
         return tok_type;
     }
@@ -1884,24 +1868,16 @@ pub const CheckedTokenizer = struct {
         switch (checked.prev_output) {
             .init => {},
             .tok => |prev| if (!prev.hasString()) @panic(switch (prev) {
-                inline else => |tag| "Can't call `nextSrc`/`nextString` for token type '." ++ @tagName(tag) ++ "'. Call `nextType` instead.",
+                inline else => |tag| "Can't call `nextSrc` for token type '." ++ @tagName(tag) ++ "'. Call `nextType` instead.",
             }),
             .str => |str| switch (str) {
                 .non_null => {},
-                .null => @panic("Can't call `nextSrc` or `nextString` after one of them have already returned null. Call `nextType` instead."),
+                .null => @panic("Can't call `nextSrc` after one of them have already returned null. Call `nextType` instead."),
             },
         }
-        const tok_src = try checked.raw.nextSrc();
+        const tok_src = try checked.raw.nextSrcStream();
         checked.prev_output = .{ .str = if (tok_src != null) .non_null else .null };
         return tok_src;
-    }
-
-    pub fn nextString(checked: *CheckedTokenizer) NextStringError!?[]const u8 {
-        const tok_src = try checked.nextSrc();
-        return switch (tok_src orelse return null) {
-            .range => |range| checked.raw.src[range.start..range.end],
-            .literal => |literal| literal.toStr(),
-        };
     }
 
     pub fn expectNextType(tokenizer: *CheckedTokenizer, expected: NextTypeError!TokenType) !void {
@@ -1911,7 +1887,17 @@ pub const CheckedTokenizer = struct {
     }
     pub fn expectNextString(tokenizer: *CheckedTokenizer, expected: NextSrcError!?[]const u8) !void {
         comptime assert(builtin.is_test);
-        const actual = tokenizer.nextString();
+        const actual: NextSrcError!?[]const u8 = blk: {
+            const maybe_tok_src = tokenizer.nextSrc() catch |err| break :blk err;
+            const tok_src = maybe_tok_src orelse break :blk null;
+            break :blk switch (tok_src) {
+                .range => |range| range.toStr(tokenizer.raw.src),
+                .literal => |literal| if (tokenizer.is_streaming)
+                    literal.toStr()
+                else
+                    literal.toRange(&tokenizer.raw).toStr(tokenizer.raw.src),
+            };
+        };
 
         const maybe_expected = expected catch |expected_err| {
             const maybe_actual = actual catch |actual_err| {
