@@ -54,31 +54,18 @@ pub inline fn initStreaming() Tokenizer {
     return .{
         .src = "",
         .index = 0,
-        .state = .general,
+        .state = .blank,
         .eof_specified = false,
     };
 }
 
-/// Should only be called to feed more input after
-/// encountering `error.BufferUnderrun`, or directly after initialization.
-///
-/// If there is no more input to feed, call `feedEof`.
-/// Calls to this are illegal after `feedEof` has been called.
-///
-/// The memory pointed to by `src` must remain valid until
-/// the next call to `feedInput`, or until the last call to
-/// `nextSrcStream` after a call to `feedEof`.
-pub inline fn feedInput(tokenizer: *Tokenizer, src: []const u8) void {
+pub fn feedInput(tokenizer: *Tokenizer, src: []const u8) void {
     assert(!tokenizer.eof_specified);
     assert(tokenizer.index == tokenizer.src.len);
     tokenizer.src = src;
     tokenizer.index = 0;
 }
 
-/// Inform the tokenizer that the entirety of the XML source has been
-/// supplied directly after a call to `feedInput`, or directly after
-/// encountering `error.BufferUnderrun`.
-/// Subsequent calls to this are illegal after the first call.
 pub fn feedEof(tokenizer: *Tokenizer) void {
     assert(!tokenizer.eof_specified);
     assert(tokenizer.index == 0 or tokenizer.index == tokenizer.src.len);
@@ -87,42 +74,68 @@ pub fn feedEof(tokenizer: *Tokenizer) void {
 
 pub const BufferError = error{BufferUnderrun};
 
-pub const NextTypeError = BufferError;
-/// Returns type of the next token. There are two possibilities:
-/// * The token type represents a builtin syntactic construct for which
-///   there is no further textual information to retrieve.
-///   In this case, the caller should simply call `nextTypeStream` again to
-///   obtain the following token type.
-///
-/// * The token indicates some textual information which isn't a builtin
-///   syntactic construct, like identifiers in markup and textual data.
-///   In this case, the caller should call `nextSrcStream` until it returns null.
-pub inline fn nextTypeStream(tokenizer: *Tokenizer) NextTypeError!TokenType {
-    return tokenizer.nextTypeOrSrcImpl(.type);
+pub const Context = enum {
+    non_markup,
+
+    dtd,
+    element_tag,
+
+    comment,
+    pi,
+    cdata,
+
+    system_literal_quote_single,
+    system_literal_quote_double,
+
+    attribute_value_single_quote,
+    attribute_value_double_quote,
+
+    ref_text,
+    ref_attr,
+    ref_dtd,
+};
+
+pub fn nextTypeStream(tokenizer: *Tokenizer, context: Context) BufferError!TokenType {
+    return switch (context) {
+        inline else => |ictx| tokenizer.nextTypeOrSrcImpl(ictx, .type),
+    };
 }
 
-/// Same as `nextTypeStream`, assuming that `error.BufferUnderrun` is impossible (eof has already been fed).
-pub inline fn nextTypeNoUnderrun(tokenizer: *Tokenizer) TokenType {
-    return tokenizer.nextTypeOrSrcImpl(.type_no_underrun);
+pub fn nextTypeNoUnderrun(tokenizer: *Tokenizer, context: Context) TokenType {
+    return switch (context) {
+        inline else => |ictx| tokenizer.nextTypeOrSrcImpl(ictx, .type_no_underrun),
+    };
 }
 
-pub const NextSrcError = BufferError;
-/// It is guaranteed to return a non-null value once. After the initial non-null value is
-/// acquired, this must be called again until it returns null, concatenating the returned
-/// token sources in order. During this chain of calls it may return `error.BufferUnderrun`,
-/// in which case the caller should invoke `feedInput` or `feedEof`, and then try again.
-///
-/// For a non-streaming tokenizer, see `nextSrcAssumeUnderrun`.
-pub inline fn nextSrcStream(tokenizer: *Tokenizer) NextSrcError!?TokenSrc {
-    return tokenizer.nextTypeOrSrcImpl(.src);
+pub fn nextSrcStream(tokenizer: *Tokenizer, context: Context) BufferError!?[]const u8 {
+    const maybe_tok_src: ?TokenSrc = switch (context) {
+        inline else => |ictx| try tokenizer.nextTypeOrSrcImpl(ictx, .src),
+    };
+    const tok_src = maybe_tok_src orelse return null;
+    return switch (tok_src) {
+        .range => |range| range.toStr(tokenizer.src),
+        .literal => |literal| literal.toStr(),
+    };
 }
 
-/// Equivalent to `nextSrcStream`, but returns the full token source in one call.
-/// If the returned token is a literal, and this is following a call to `feedInput`,
-/// it may not be converted into a range.
-pub inline fn nextSrcNoUnderrun(tokenizer: *Tokenizer) TokenSrc {
-    defer assert(tokenizer.nextTypeOrSrcImpl(.src_no_underrun) == null);
-    return tokenizer.nextTypeOrSrcImpl(.src_no_underrun).?;
+pub fn nextSrcNoUnderrun(tokenizer: *Tokenizer, context: Context) Range {
+    switch (context) {
+        inline else => |ictx| {
+            var full_range: Range = switch (tokenizer.nextTypeOrSrcImpl(ictx, .src_no_underrun).?) {
+                .range => |range| range,
+                .literal => |literal| literal.toRange(tokenizer),
+            };
+            while (tokenizer.nextTypeOrSrcImpl(ictx, .src_no_underrun)) |tok_src| {
+                const range: Range = switch (tok_src) {
+                    .range => |range| range,
+                    .literal => |literal| literal.toRange(tokenizer),
+                };
+                assert(full_range.end == range.start);
+                full_range.end = range.end;
+            }
+            return full_range;
+        },
+    }
 }
 
 pub const TokenType = enum(u8) {
@@ -174,10 +187,6 @@ pub const TokenType = enum(u8) {
     slash,
 
     /// The '%' token.
-    ///
-    /// Often followed by `.tag_token` and then `.semicolon`, however it can equally be followed
-    /// by other DTD tokens. Whether or not it represents the start of a Parsed Entity Reference
-    /// depends on these contextual details, and is left to the programmer.
     percent,
 
     /// The "'" token.
@@ -186,22 +195,6 @@ pub const TokenType = enum(u8) {
     quote_double,
 
     /// The '<' token.
-    ///
-    /// If outside of any other markup, it starts an element open tag, and
-    /// the subsequent token sequence will be one of:
-    /// * `.tag_token`.
-    /// * `.tag_whitespace`.
-    /// * `.equals`.
-    /// * `.quote_single` where the subsequent token sequence will be one of the following:
-    ///    + `.text_data`.
-    ///    + `.ampersand` followed by a token sequence as described in its own documentation.
-    ///    + `.angle_bracket_left` as an invalid token ('<' in the attribute value).
-    ///    + `.quote_single` ending the token sequence.
-    ///    + `.eof`.
-    /// * `.quote_double` following sequence is equivalent as for `.quote_single`, replacing it with `.quote_double`.
-    /// * `.slash`.
-    /// * `.angle_bracket_right`.
-    /// * `.eof`.
     angle_bracket_left,
     /// The '>' token.
     angle_bracket_right,
@@ -220,8 +213,6 @@ pub const TokenType = enum(u8) {
     /// * `.invalid_reference_end`.
     ampersand,
     /// The ';' token.
-    ///
-    /// Ends the token sequence.
     semicolon,
     /// Encountered a terminating character (or EOF) other than the ';' token after the ampersand.
     /// This token simply represents the absence of the ';' token.
@@ -229,15 +220,8 @@ pub const TokenType = enum(u8) {
     invalid_reference_end,
 
     /// The '<?' token.
-    ////
-    /// The subsequent token sequence will be:
-    /// * `.text_data`.
-    /// * `.pi_end` ending the token sequence.
-    /// * `.eof`.
     pi_start,
     /// The '?>' token, terminating the PI tag.
-    ///
-    /// Ends the token sequence.
     pi_end,
 
     /// The '<![CDATA[' token.
@@ -259,108 +243,36 @@ pub const TokenType = enum(u8) {
     cdata_end,
 
     /// The '<!--' token.
-    ///
-    /// The subsequent token sequence will be one of:
-    /// * `.text_data`.
-    /// * `.invalid_comment_dash_dash`.
-    /// * `.invalid_comment_end_triple_dash`.
-    /// * `.comment_end`.
-    /// * `.eof`.
     comment_start,
     /// The '<!-' token.
-    ///
-    /// The subsequent token sequence will be the same as for `.comment_start`.
     invalid_comment_start_single_dash,
     /// The invalid token '--'.
     invalid_comment_dash_dash,
     /// The invalid token '--->'.
     invalid_comment_end_triple_dash,
     /// Indicates '-->' after a comment.
-    ///
-    /// Ends the token sequence.
     comment_end,
 
     /// The '<!DOCTYPE' token.
-    ///
-    /// Starts the DTD declaration.
-    /// The subsequent token sequence will be one of:
-    /// * `.tag_token`.
-    /// * `.tag_whitespace`.
-    /// * `.invalid_token`.
-    /// * `.lparen`.
-    /// * `.rparen`.
-    /// * `.qmark`.
-    /// * `.asterisk`.
-    /// * `.pipe`.
-    /// * `.comma`.
-    /// * `.percent`.
-    /// * `.semicolon`.
-    /// * `.quote_single`, followed optionally by `.text_data`, and then always by either `.quote_single` or `.eof`.
-    /// * `.quote_double`, where the subsequent token sequence will be the same as for `.quote_single`.
-    /// * `.square_bracket_left`.
-    /// * `.square_bracket_right`.
-    /// * `.element_decl`.
-    /// * `.entity_decl`.
-    /// * `.attlist_decl`.
-    /// * `.notation_decl`.
-    /// * `.pi_start`.
-    /// * `.comment_start`.
-    /// * `.angle_bracket_right`, terminating the token sequence.
     dtd_start,
     /// A token which partially matches the '<!DOCTYPE' token.
     ///
-    /// The source for the partial match is returned, and then afterwards
-    /// the subsequent token sequence will be the same as for `.dtd_start`.
+    /// The source for the matched token is returned.
     invalid_dtd_start,
-
-    /// The '<!ELEMENT' token.
+    /// The '<!' token followed by some tag token, such as 'ENTITY',
+    /// 'ATTLIST', 'ELEMENT', 'NOTATION', or an invalid variant.
     ///
-    /// The subsequent token sequence will be equivalent as for `.dtd`, and terminated by any token other than:
-    /// * `.lparen`
-    /// * `.rparen`
-    /// * `.pipe`
-    /// * `.comma`
-    /// * `.qmark`
-    /// * `.asterisk`
-    /// * `.plus`
-    /// * `.percent`
-    /// * `.semicolon`
-    /// * `.quote_single`
-    /// * `.quote_double`
-    /// In a valid DTD, the terminating token would be `.angle_bracket_right` ('>').
-    element_decl,
-    /// The '<!ENTITY' token.
-    ///
-    /// The subsequent token sequence will be equivalent to the one for `.element_decl`.
-    entity_decl,
-    /// The '<!ATTLIST' token.
-    ///
-    /// The subsequent token sequence will be equivalent to the one for `.element_decl`.
-    attlist_decl,
-    /// The '<!NOTATION' token.
-    ///
-    /// The subsequent token sequence will be equivalent to the one for `.element_decl`.
-    notation_decl,
-    /// A segment of one of '<!ELEMENT', '<!ENTITY', '<!ATTLIST', or '<!NOTATION'.
-    ///
-    /// First the source for the segment will be returned, and then
-    /// the subsequent token sequence will be equivalent to the one for `.element_decl`.
-    invalid_decl,
+    /// The source for the matched token is returned.
+    dtd_decl,
 
     /// The '<!' token.
     ///
     /// This is returned when '<!' is followed by a sequence
     /// which does not ultimately form a recognized markup tag.
-    ///
-    /// Inside standard element character data, this is returned
-    /// as a standalone token and doesn't affect the nesting/context.
-    ///
-    /// Inside a DTD, the subsequent token sequence will be equivalent
-    /// to the one for `.element_decl`.
     invalid_angle_bracket_left_bang,
 
     /// Whether or not the token represents any text to be returned by `nextSrcStream`.
-    pub inline fn hasString(token_type: TokenType) bool {
+    pub inline fn hasSrc(token_type: TokenType) bool {
         return switch (token_type) {
             .text_data,
             .tag_whitespace,
@@ -369,7 +281,7 @@ pub const TokenType = enum(u8) {
 
             .invalid_cdata_start,
             .invalid_dtd_start,
-            .invalid_decl,
+            .dtd_decl,
             => true,
 
             else => false,
@@ -431,12 +343,72 @@ pub const TokenType = enum(u8) {
             .dtd_start => "<!DOCTYPE",
             .invalid_dtd_start => null,
 
-            .element_decl => "<!ELEMENT",
-            .entity_decl => "<!ENTITY",
-            .attlist_decl => "<!ATTLIST",
-            .notation_decl => "<!NOTATION",
+            .dtd_decl => null,
         };
     }
+};
+
+pub const Range = struct {
+    start: usize,
+    end: usize,
+
+    /// For a streaming `Tokenizer`, this must be called with the `src` field
+    /// immediately after it is returned from `nextSrcStream` to get the source string.
+    /// For a non-streaming `Tokenizer`, this can be called at any time with
+    /// the `src` field.
+    /// The returned string aliases the `src` parameter.
+    pub inline fn toStr(range: Range, src: []const u8) []const u8 {
+        return src[range.start..range.end];
+    }
+};
+
+pub const Literal = enum {
+    @"]",
+    @"]]",
+    @"/",
+    @"?",
+
+    @"<!",
+    @"<!-",
+
+    @"<![",
+    @"<![C",
+    @"<![CD",
+    @"<![CDA",
+    @"<![CDAT",
+    @"<![CDATA",
+
+    @"<!D",
+    @"<!DO",
+    @"<!DOC",
+    @"<!DOCT",
+    @"<!DOCTY",
+    @"<!DOCTYP",
+    @"<!DOCTYPE",
+
+    @"-",
+
+    /// For a streaming `Tokenizer`, this is illegal.
+    /// For a non-streaming `Tokenizer`, this must be called immediately after it is returned
+    /// from `nextSrcStream` to get the source range, which may then be turned into a string which
+    /// aliases the `src` field.
+    inline fn toRange(literal_tok: Literal, tokenizer: *const Tokenizer) Range {
+        const len = literal_tok.toStr().len;
+        const result: Range = .{ .start = tokenizer.index - len, .end = tokenizer.index };
+        assert(result.end - result.start == len);
+        return result;
+    }
+
+    /// This is valid to call at any time, regardless of whether the source `Tokenizer` is
+    /// streaming, as it will simply return the represented string literal.
+    inline fn toStr(literal_tok: Literal) []const u8 {
+        return @tagName(literal_tok);
+    }
+};
+
+const TokenSrc = union(enum) {
+    range: Range,
+    literal: Literal,
 };
 
 /// The set of codepoints defined as whitespace. They are all
@@ -448,21 +420,39 @@ pub const whitespace_set: []const u8 = &[_]u8{
     '\u{0A}',
 };
 
+const ReturnType = enum {
+    type,
+    type_no_underrun,
+    src,
+    src_no_underrun,
+
+    fn Type(ret_type: ReturnType) type {
+        return switch (ret_type) {
+            .type => BufferError!TokenType,
+            .type_no_underrun => TokenType,
+            .src => BufferError!?TokenSrc,
+            .src_no_underrun => ?TokenSrc,
+        };
+    }
+};
+
 fn nextTypeOrSrcImpl(
     tokenizer: *Tokenizer,
-    comptime ret_type: enum {
-        type,
-        type_no_underrun,
-        src,
-        src_no_underrun,
-    },
-) switch (ret_type) {
-    .type => NextTypeError!TokenType,
-    .type_no_underrun => TokenType,
-    .src => NextSrcError!?TokenSrc,
-    .src_no_underrun => ?TokenSrc,
-} {
+    comptime context: Context,
+    comptime ret_type: ReturnType,
+) ret_type.Type() {
+    const ret_kind: enum { type, src }, //
+    const assert_eof_specified: bool //
+    = comptime switch (ret_type) {
+        .type => .{ .type, false },
+        .src => .{ .src, false },
+        .type_no_underrun => .{ .type, true },
+        .src_no_underrun => .{ .src, true },
+    };
+
     const helper = struct {
+        const helper = @This();
+
         const dtd_terminal_characters = &[_]u8{
             '[',  ']', '(', ')',
             '?',  '*', '+', '|',
@@ -473,849 +463,769 @@ fn nextTypeOrSrcImpl(
         inline fn rangeInit(range_start: usize, range_end: usize) TokenSrc {
             return .{ .range = .{ .start = range_start, .end = range_end } };
         }
-        inline fn literalInit(literal: TokenSrc.Literal) TokenSrc {
+        inline fn literalInit(literal: Literal) TokenSrc {
             return .{ .literal = literal };
         }
-    };
 
-    const ret_kind: enum { type, src }, //
-    const assert_eof_specified: bool //
-    = comptime switch (ret_type) {
-        .type => .{ .type, false },
-        .src => .{ .src, false },
-        .type_no_underrun => .{ .type, true },
-        .src_no_underrun => .{ .src, true },
+        inline fn handlePossibleCdataEnd(
+            _tokenizer: *Tokenizer,
+            comptime state: State,
+        ) union(enum) { @"continue", @"return": ret_type.Type() } {
+            const src = _tokenizer.src;
+            return switch (state) {
+                .@"]" => switch (ret_kind) {
+                    .type => {
+                        if (_tokenizer.index == src.len) return .{ .@"return" = .text_data };
+                        if (src[_tokenizer.index] != ']') return .{ .@"return" = .text_data };
+                        _tokenizer.state = .@"]]";
+                        _tokenizer.index += 1;
+                        return .@"continue";
+                    },
+                    .src => {
+                        if (_tokenizer.index == src.len) {
+                            _tokenizer.state = .eof;
+                            return .{ .@"return" = helper.literalInit(.@"]") };
+                        }
+                        if (src[_tokenizer.index] != ']') {
+                            _tokenizer.state = .blank;
+                            return .{ .@"return" = helper.literalInit(.@"]") };
+                        }
+                        _tokenizer.state = .@"]]";
+                        _tokenizer.index += 1;
+                        return .@"continue";
+                    },
+                },
+                .@"]]" => switch (ret_kind) {
+                    .type => {
+                        if (_tokenizer.index == src.len) return .{ .@"return" = .text_data };
+                        switch (src[_tokenizer.index]) {
+                            '>' => {
+                                _tokenizer.state = .blank;
+                                _tokenizer.index += 1;
+                                return .{ .@"return" = .cdata_end };
+                            },
+                            ']' => return .{ .@"return" = .text_data },
+                            else => return .{ .@"return" = .text_data },
+                        }
+                    },
+                    .src => {
+                        if (_tokenizer.index == src.len) {
+                            _tokenizer.state = .eof;
+                            return .{ .@"return" = helper.literalInit(.@"]]") };
+                        }
+                        switch (src[_tokenizer.index]) {
+                            '>' => return .{ .@"return" = null },
+                            ']' => {
+                                const prev_str = "]]";
+                                if (_tokenizer.index >= prev_str.len) {
+                                    if (std.debug.runtime_safety) {
+                                        const prev_str_start = _tokenizer.index - prev_str.len;
+                                        assert(std.mem.eql(u8, prev_str, src[prev_str_start..][0..prev_str.len]));
+                                    }
+                                    // If the index is greater than the length of ']]', that means we have not been fed
+                                    // any input since encountering the first ']', meaning that `src[index - 2][0..3]` is
+                                    // equal to "]]]". If we're in streaming mode, this doesn't matter, as it is not legal
+                                    // to convert the `Literal` into a range; however, if we're in non-streaming mode, we
+                                    // must leave the tokenizer in a state which allows the caller to convert the returned
+                                    // `Literal` value into a range which accurately points at the first ']' character, and
+                                    // then return back to this state to continue checking if the ']]' sequence is followed
+                                    // by a '>' to form ']]>'.
+                                    // NOTE: we cannot limit this to `assert_eof_specified`, as the `*Stream` API could be
+                                    // used either equivalently to the `*NoUnderrun` API or during transition to the latter
+                                    // after `feedEof`.
+                                    // TODO: measure if limiting this to when `eof_specified` is true is worth the branch
+                                    // to avoid the future branch switch from `.@"]]]"` to `.@"]]"`.
+                                    _tokenizer.state = .@"]]]";
+                                    _tokenizer.index -= 1; // we move backwards one, so that the previous character is the first ']'.
+                                } else {
+                                    _tokenizer.index += 1;
+                                }
+                                return .{ .@"return" = helper.literalInit(.@"]") };
+                            },
+                            else => {
+                                _tokenizer.state = .blank;
+                                return .{ .@"return" = helper.literalInit(.@"]]") };
+                            },
+                        }
+                    },
+                },
+                .@"]]]" => switch (ret_kind) {
+                    .type => unreachable,
+                    .src => {
+                        // currently the index is just in front of the first ']', indexing the second ']',
+                        // so we move forwards two characters, to be just in front of the third ']'.
+                        assert(std.mem.eql(u8, src[_tokenizer.index - 1 ..][0.."]]]".len], "]]]"));
+                        _tokenizer.state = .@"]]";
+                        _tokenizer.index += 2;
+                        return .@"continue";
+                    },
+                },
+                else => comptime unreachable,
+            };
+        }
     };
 
     const src = tokenizer.src;
     assert(!assert_eof_specified or tokenizer.eof_specified);
     const eof_specified = assert_eof_specified or tokenizer.eof_specified;
 
-    return while (tokenizer.index != src.len or eof_specified) switch (tokenizer.state) {
-        .eof => switch (ret_kind) {
-            .type => break .eof,
-            .src => break null,
-        },
+    const eof_result = switch (ret_kind) {
+        .type => .eof,
+        .src => null,
+    };
 
-        .general => switch (ret_kind) {
-            .type => if (tokenizer.index == src.len)
-                break .eof
-            else switch (src[tokenizer.index]) {
-                ']' => {
-                    tokenizer.state = .@"general,]";
-                    tokenizer.index += 1;
-                    continue;
-                },
-                '<' => {
-                    tokenizer.state = .@"general,<";
-                    tokenizer.index += 1;
-                    continue;
-                },
-                '&' => {
-                    tokenizer.state = .@"general,&";
-                    tokenizer.index += 1;
-                    break .ampersand;
-                },
-                else => break .text_data,
-            },
-            .src => {
-                if (tokenizer.index == src.len) break null;
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, &[_]u8{ ']', '&', '<' }) orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start != str_end) break helper.rangeInit(str_start, str_end);
-                if (src[tokenizer.index] != ']') break null;
-                tokenizer.state = .@"general,]";
-                tokenizer.index += 1;
-                continue;
-            },
-        },
-        .@"general,]" => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) break .text_data;
-                if (src[tokenizer.index] != ']') break .text_data;
-                tokenizer.state = .@"general,]]";
-                tokenizer.index += 1;
-                continue;
-            },
-            .src => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break helper.literalInit(.@"]");
-                }
-                if (src[tokenizer.index] != ']') {
-                    tokenizer.state = .general;
-                    break helper.literalInit(.@"]");
-                }
-                tokenizer.state = .@"general,]]";
-                tokenizer.index += 1;
-                continue;
-            },
-        },
-        .@"general,]]" => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) break .text_data;
-                if (src[tokenizer.index] != '>') break .text_data;
-                tokenizer.state = .general;
-                tokenizer.index += 1;
-                break .cdata_end;
-            },
-            .src => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break helper.literalInit(.@"]]");
-                }
-                if (src[tokenizer.index] != '>') {
-                    tokenizer.state = .general;
-                    break helper.literalInit(.@"]]");
-                }
-                break null;
-            },
-        },
-        .@"general,&" => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .invalid_reference_end;
-                }
-                if (src[tokenizer.index] == ';') {
-                    tokenizer.state = .general;
-                    tokenizer.index += 1;
-                    break .semicolon;
-                }
-                if (std.mem.indexOfScalar(u8, whitespace_set ++ &[_]u8{ ']', '&', '<' }, src[tokenizer.index]) != null) {
-                    tokenizer.state = .general;
-                    break .invalid_reference_end;
-                }
-                break .tag_token;
-            },
-            .src => {
-                if (tokenizer.index == src.len) break null;
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ &[_]u8{ ';', ']', '&', '<' }) orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start != tokenizer.index) {
-                    break helper.rangeInit(str_start, tokenizer.index);
-                }
-                break null;
-            },
-        },
-        .@"general,<" => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .angle_bracket_left;
-                }
-                switch (src[tokenizer.index]) {
-                    '?' => {
-                        tokenizer.state = .pi;
-                        tokenizer.index += 1;
-                        break .pi_start;
-                    },
-                    '!' => {
-                        tokenizer.state = .@"general,<!";
+    return while (tokenizer.index != src.len or eof_specified) break switch (context) {
+        .non_markup => switch (tokenizer.state) {
+            .eof => break eof_result,
+
+            .blank => switch (ret_kind) {
+                .type => if (tokenizer.index == src.len)
+                    break .eof
+                else switch (src[tokenizer.index]) {
+                    ']' => {
+                        tokenizer.state = .@"]";
                         tokenizer.index += 1;
                         continue;
                     },
-                    else => {
-                        tokenizer.state = .element_tag;
-                        break .angle_bracket_left;
-                    },
-                }
-            },
-            .src => unreachable,
-        },
-
-        .@"general,<!" => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .invalid_angle_bracket_left_bang;
-                }
-                tokenizer.state = switch (src[tokenizer.index]) {
-                    '-' => .@"general,<!-",
-                    'D' => .@"<!D",
-                    '[' => .@"<![",
-                    else => {
-                        tokenizer.state = .general;
-                        break .invalid_angle_bracket_left_bang;
-                    },
-                };
-                tokenizer.index += 1;
-                continue;
-            },
-            .src => unreachable,
-        },
-        .@"general,<!-",
-        .@"dtd,<!-",
-        => |tag| switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .invalid_comment_start_single_dash;
-                }
-                tokenizer.state = switch (tag) {
-                    .@"general,<!-" => .@"general,<!--",
-                    .@"dtd,<!-" => .@"dtd,<!--",
-                    else => unreachable,
-                };
-                if (src[tokenizer.index] != '-') {
-                    break .invalid_comment_start_single_dash;
-                }
-                tokenizer.index += 1;
-                break .comment_start;
-            },
-            .src => unreachable,
-        },
-
-        .pi, .dtd_pi => |tag| switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .eof;
-                }
-                if (src[tokenizer.index] != '?') {
-                    break .text_data;
-                }
-                tokenizer.state = switch (tag) {
-                    .pi => .@"pi,?",
-                    .dtd_pi => .@"dtd_pi,?",
-                    else => unreachable,
-                };
-                tokenizer.index += 1;
-                continue;
-            },
-            .src => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break null;
-                }
-
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfScalarPos(u8, src, tokenizer.index, '?') orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start != str_end) {
-                    break helper.rangeInit(str_start, str_end);
-                }
-                tokenizer.state = switch (tag) {
-                    .pi => .@"pi,?",
-                    .dtd_pi => .@"dtd_pi,?",
-                    else => unreachable,
-                };
-                tokenizer.index += 1;
-                continue;
-            },
-        },
-        .@"pi,?",
-        .@"dtd_pi,?",
-        => |tag| switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) break .text_data;
-                if (src[tokenizer.index] != '>') break .text_data;
-                tokenizer.state = switch (tag) {
-                    .@"pi,?" => .general,
-                    .@"dtd_pi,?" => .dtd,
-                    else => unreachable,
-                };
-                tokenizer.index += 1;
-                break .pi_end;
-            },
-            .src => {
-                const state_on_unmatched: State = switch (tag) {
-                    .@"pi,?" => .pi,
-                    .@"dtd_pi,?" => .dtd_pi,
-                    else => unreachable,
-                };
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = state_on_unmatched;
-                    break helper.literalInit(.@"?");
-                }
-                if (src[tokenizer.index] != '>') {
-                    tokenizer.state = state_on_unmatched;
-                    break helper.literalInit(.@"?");
-                }
-                break null;
-            },
-        },
-
-        .element_tag => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .eof;
-                }
-                switch (src[tokenizer.index]) {
-                    inline '\'', '\"', '/', '=', '>' => |char| {
-                        const result: TokenType, //
-                        const maybe_state: ?State //
-                        = comptime switch (char) {
-                            '\'' => .{ .quote_single, .element_tag_sq },
-                            '\"' => .{ .quote_double, .element_tag_dq },
-                            '/' => .{ .slash, null },
-                            '=' => .{ .equals, null },
-                            '>' => .{ .angle_bracket_right, .general },
-                            else => unreachable,
-                        };
-                        if (maybe_state) |new_state| tokenizer.state = new_state;
-                        tokenizer.index += 1;
-                        break result;
-                    },
-                    else => |char| {
-                        const not_whitespace = std.mem.indexOfScalar(u8, whitespace_set, char) == null;
-                        if (not_whitespace) break .tag_token;
-                        tokenizer.state = .element_tag_whitespace;
-                        break .tag_whitespace;
-                    },
-                }
-            },
-            .src => {
-                if (tokenizer.index == src.len) break null;
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ &[_]u8{ '\'', '\"', '/', '=', '>' }) orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start != str_end) {
-                    break helper.rangeInit(str_start, str_end);
-                }
-                break null;
-            },
-        },
-
-        .element_tag_whitespace => switch (ret_kind) {
-            .type => unreachable,
-            .src => {
-                if (tokenizer.index == src.len) break null;
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfNonePos(u8, src, tokenizer.index, whitespace_set) orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start != str_end) {
-                    break helper.rangeInit(str_start, str_end);
-                }
-                tokenizer.state = .element_tag;
-                break null;
-            },
-        },
-
-        .element_tag_sq,
-        .element_tag_dq,
-        => |tag| switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) break .eof;
-                const matching_quote_char: u8, //
-                const matching_quote_type: TokenType, //
-                const on_ref_state: State //
-                = switch (tag) {
-                    .element_tag_sq => .{ '\'', .quote_single, .@"element_tag_sq,&" },
-                    .element_tag_dq => .{ '\"', .quote_double, .@"element_tag_dq,&" },
-                    else => unreachable,
-                };
-                if (src[tokenizer.index] == matching_quote_char) {
-                    tokenizer.state = .element_tag;
-                    tokenizer.index += 1;
-                    break matching_quote_type;
-                }
-                switch (src[tokenizer.index]) {
                     '&' => {
-                        tokenizer.state = on_ref_state;
                         tokenizer.index += 1;
                         break .ampersand;
                     },
                     '<' => {
+                        tokenizer.state = .@"<";
                         tokenizer.index += 1;
-                        break .angle_bracket_left;
+                        continue;
                     },
                     else => break .text_data,
-                }
-            },
-            .src => {
-                if (tokenizer.index == src.len) break null;
-                const matching_quote_char: u8 = switch (tag) {
-                    .element_tag_sq => '\'',
-                    .element_tag_dq => '\"',
-                    else => unreachable,
-                };
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, &[_]u8{ matching_quote_char, '&', '<' }) orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start != str_end) {
-                    break helper.rangeInit(str_start, str_end);
-                }
-                break null;
-            },
-        },
-        .@"element_tag_sq,&",
-        .@"element_tag_dq,&",
-        => |tag| switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) break .eof;
-                const matching_quote_char: u8, //
-                const matching_state: State //
-                = switch (tag) {
-                    .@"element_tag_sq,&" => .{ '\'', .element_tag_sq },
-                    .@"element_tag_dq,&" => .{ '\"', .element_tag_dq },
-                    else => unreachable,
-                };
-                if (src[tokenizer.index] == matching_quote_char) {
-                    tokenizer.state = matching_state;
-                    break .invalid_reference_end;
-                }
-                if (src[tokenizer.index] == ';') {
-                    tokenizer.state = matching_state;
+                },
+                .src => {
+                    if (tokenizer.index == src.len) break null;
+                    const str_start = tokenizer.index;
+                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, &[_]u8{ ']', '&', '<' }) orelse src.len;
+                    tokenizer.index = str_end;
+                    if (str_start != str_end) break helper.rangeInit(str_start, str_end);
+                    if (src[tokenizer.index] != ']') break null;
+                    tokenizer.state = .@"]";
                     tokenizer.index += 1;
-                    break .semicolon;
-                }
-                break .tag_token;
+                    continue;
+                },
             },
-            .src => {
-                if (tokenizer.index == src.len) break null;
-                const matching_quote_char: u8 = switch (tag) {
-                    .@"element_tag_sq,&" => '\'',
-                    .@"element_tag_dq,&" => '\"',
-                    else => unreachable,
-                };
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ &[_]u8{ ';', matching_quote_char, '&', '<' }) orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start != str_end) {
-                    break helper.rangeInit(str_start, str_end);
-                }
-                break null;
-            },
-        },
 
-        .@"general,<!--",
-        .@"dtd,<!--",
-        => |tag| switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .eof;
-                }
-                if (src[tokenizer.index] != '-') {
-                    break .text_data;
-                }
-                tokenizer.state = switch (tag) {
-                    .@"general,<!--" => .@"general,<!--,-",
-                    .@"dtd,<!--" => .@"dtd_comment,-",
-                    else => unreachable,
-                };
-                tokenizer.index += 1;
-                continue;
+            inline .@"]", .@"]]", .@"]]]" => |state| switch (helper.handlePossibleCdataEnd(tokenizer, state)) {
+                .@"continue" => continue,
+                .@"return" => |result| break result,
             },
-            .src => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break null;
-                }
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfScalarPos(u8, src, tokenizer.index, '-') orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start != str_end) {
-                    break helper.rangeInit(str_start, str_end);
-                }
-                if (src[tokenizer.index] == '-') {
-                    tokenizer.state = switch (tag) {
-                        .@"general,<!--" => .@"general,<!--,-",
-                        .@"dtd,<!--" => .@"dtd_comment,-",
-                        else => unreachable,
+
+            .@"<" => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .angle_bracket_left;
+                    }
+                    switch (src[tokenizer.index]) {
+                        '!' => {
+                            tokenizer.state = .@"<!";
+                            tokenizer.index += 1;
+                            continue;
+                        },
+                        '?' => {
+                            tokenizer.state = .blank;
+                            tokenizer.index += 1;
+                            break .pi_start;
+                        },
+                        else => {
+                            tokenizer.state = .blank;
+                            break .angle_bracket_left;
+                        },
+                    }
+                },
+                .src => unreachable,
+            },
+
+            .@"<!" => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .invalid_angle_bracket_left_bang;
+                    }
+                    tokenizer.state = switch (src[tokenizer.index]) {
+                        '-' => .@"<!-",
+                        '[' => .@"<![",
+                        'D' => .@"<!D",
+                        else => {
+                            tokenizer.state = .blank;
+                            break .invalid_angle_bracket_left_bang;
+                        },
                     };
                     tokenizer.index += 1;
                     continue;
-                }
-                break null;
+                },
+                .src => unreachable,
             },
-        },
-        .@"general,<!--,-",
-        .@"dtd_comment,-",
-        => |tag| switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) break .text_data;
-                if (src[tokenizer.index] != '-') break .text_data;
-                tokenizer.state = switch (tag) {
-                    .@"general,<!--,-" => .@"general,<!--,--",
-                    .@"dtd_comment,-" => .@"dtd_comment,--",
-                    else => unreachable,
-                };
-                tokenizer.index += 1;
-                continue;
-            },
-            .src => {
-                const state_on_unmatched: State, //
-                const state_on_match: State //
-                = switch (tag) {
-                    .@"general,<!--,-" => .{ .@"general,<!--", .@"general,<!--,--" },
-                    .@"dtd_comment,-" => .{ .@"dtd,<!--", .@"dtd_comment,--" },
-                    else => unreachable,
-                };
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = state_on_unmatched;
-                    break helper.literalInit(.@"-");
-                }
-                if (src[tokenizer.index] != '-') {
-                    tokenizer.state = state_on_unmatched;
-                    break helper.literalInit(.@"-");
-                }
-                tokenizer.state = state_on_match;
-                tokenizer.index += 1;
-                continue;
-            },
-        },
-        .@"general,<!--,--",
-        .@"dtd_comment,--",
-        => |tag| switch (ret_kind) {
-            .type => {
-                const state_on_unmatched: State, //
-                const state_on_dash: State, //
-                const state_on_rab: State //
-                = switch (tag) {
-                    .@"general,<!--,--" => .{ .@"general,<!--", .@"general,<!--,---", .general },
-                    .@"dtd_comment,--" => .{ .@"dtd,<!--", .@"dtd_comment,---", .dtd },
-                    else => unreachable,
-                };
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = state_on_unmatched;
-                    break .invalid_comment_dash_dash;
-                }
-                switch (src[tokenizer.index]) {
-                    '-' => {
-                        tokenizer.state = state_on_dash;
-                        tokenizer.index += 1;
-                        continue;
-                    },
-                    '>' => {
-                        tokenizer.state = state_on_rab;
-                        tokenizer.index += 1;
-                        break .comment_end;
-                    },
-                    else => {
-                        tokenizer.state = state_on_unmatched;
-                        break .invalid_comment_dash_dash;
-                    },
-                }
-            },
-            .src => {
-                if (tokenizer.index == src.len) break null;
-                if (src[tokenizer.index] == '-') tokenizer.state = switch (tag) {
-                    .@"general,<!--,--" => .@"general,<!--,---",
-                    .@"dtd_comment,--" => .@"dtd_comment,---",
-                    else => unreachable,
-                };
-                break null;
-            },
-        },
-        .@"general,<!--,---",
-        .@"dtd_comment,---",
-        => |tag| switch (ret_kind) {
-            .type => {
-                const state_on_unmatched: State, //
-                const state_on_dash: State, //
-                const state_on_rab: State //
-                = switch (tag) {
-                    .@"general,<!--,---" => .{ .@"general,<!--,-", .@"general,<!--,--", .general },
-                    .@"dtd_comment,---" => .{ .@"dtd_comment,-", .@"dtd_comment,--", .dtd },
-                    else => unreachable,
-                };
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = state_on_unmatched;
-                    break .invalid_comment_dash_dash;
-                }
-                switch (src[tokenizer.index]) {
-                    '-' => {
-                        tokenizer.state = state_on_dash;
-                        tokenizer.index += 1;
-                        break .invalid_comment_dash_dash;
-                    },
-                    '>' => {
-                        tokenizer.state = state_on_rab;
-                        tokenizer.index += 1;
-                        break .invalid_comment_end_triple_dash;
-                    },
-                    else => {
-                        tokenizer.state = state_on_unmatched;
-                        break .invalid_comment_dash_dash;
-                    },
-                }
-            },
-            .src => unreachable,
-        },
 
-        .@"<![",
-        .@"<![C",
-        .@"<![CD",
-        .@"<![CDA",
-        .@"<![CDAT",
-        .@"<![CDATA",
-        => |tag| switch (ret_kind) {
-            .type => {
-                const expected_char: u8, //
-                const state_on_match: State //
-                = switch (tag) {
-                    .@"<![" => .{ 'C', .@"<![C" },
-                    .@"<![C" => .{ 'D', .@"<![CD" },
-                    .@"<![CD" => .{ 'A', .@"<![CDA" },
-                    .@"<![CDA" => .{ 'T', .@"<![CDAT" },
-                    .@"<![CDAT" => .{ 'A', .@"<![CDATA" },
-                    .@"<![CDATA" => .{ '[', .cdata },
-                    else => unreachable,
-                };
-                if (tokenizer.index == src.len) break .invalid_cdata_start;
-                if (src[tokenizer.index] != expected_char) break .invalid_cdata_start;
-                tokenizer.state = state_on_match;
-                tokenizer.index += 1;
-                if (state_on_match != .cdata) continue;
-                break .cdata_start;
+            .@"<!-" => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .invalid_comment_start_single_dash;
+                    }
+                    tokenizer.state = .blank;
+                    if (src[tokenizer.index] != '-') {
+                        break .invalid_comment_start_single_dash;
+                    }
+                    tokenizer.index += 1;
+                    break .comment_start;
+                },
+                .src => unreachable,
             },
-            .src => {
-                tokenizer.state = .cdata_start_invalid;
-                return helper.literalInit(switch (tag) {
-                    inline //
-                    .@"<![",
-                    .@"<![C",
-                    .@"<![CD",
-                    .@"<![CDA",
-                    .@"<![CDAT",
-                    .@"<![CDATA",
-                    => |itag| @field(TokenSrc.Literal, @tagName(itag)),
-                    else => unreachable,
-                });
-            },
-        },
-        .cdata_start_invalid => switch (ret_kind) {
-            .type => unreachable,
-            .src => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    return null;
-                }
-                const str_start = tokenizer.index;
-                const maybe_str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ &[_]u8{ '[', ']' }) orelse src.len;
-                const ends_with_lbracket = maybe_str_end != src.len and src[maybe_str_end] == '[';
-                const str_end = maybe_str_end + @intFromBool(ends_with_lbracket);
-                tokenizer.index = str_end;
-                if (str_start != str_end) {
-                    return helper.rangeInit(str_start, str_end);
-                }
-                tokenizer.state = .general;
-                return null;
-            },
-        },
-        .cdata => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .eof;
-                }
-                if (src[tokenizer.index] != ']') {
-                    break .text_data;
-                }
-                tokenizer.state = .@"cdata,]";
-                tokenizer.index += 1;
-                continue;
-            },
-            .src => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    return null;
-                }
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfScalarPos(u8, src, tokenizer.index, ']') orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start != str_end) {
-                    return helper.rangeInit(str_start, str_end);
-                }
-                tokenizer.state = .@"cdata,]";
-                tokenizer.index += 1;
-                continue;
-            },
-        },
-        .@"cdata,]" => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) break .text_data;
-                if (src[tokenizer.index] != ']') break .text_data;
-                tokenizer.state = .@"cdata,]]";
-                tokenizer.index += 1;
-                continue;
-            },
-            .src => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    return helper.literalInit(.@"]");
-                }
-                if (src[tokenizer.index] != ']') {
-                    tokenizer.state = .cdata;
-                    return helper.literalInit(.@"]");
-                }
-                tokenizer.state = .@"cdata,]]";
-                tokenizer.index += 1;
-                continue;
-            },
-        },
-        .@"cdata,]]" => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) break .text_data;
-                if (src[tokenizer.index] != '>') break .text_data;
-                tokenizer.state = .general;
-                tokenizer.index += 1;
-                break .cdata_end;
-            },
-            .src => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    return helper.literalInit(.@"]]");
-                }
-                switch (src[tokenizer.index]) {
-                    '>' => return null,
-                    ']' => {
-                        tokenizer.index += 1;
-                        return helper.literalInit(.@"]");
-                    },
-                    else => {
-                        tokenizer.state = .cdata;
-                        return helper.literalInit(.@"]]");
-                    },
-                }
-            },
-        },
 
-        .@"<!D",
-        .@"<!DO",
-        .@"<!DOC",
-        .@"<!DOCT",
-        .@"<!DOCTY",
-        .@"<!DOCTYP",
-        => |tag| switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) break .invalid_dtd_start;
-                const expected_char: u8, //
-                const state_on_match: State //
-                = switch (tag) {
-                    .@"<!D" => .{ 'O', .@"<!DO" },
-                    .@"<!DO" => .{ 'C', .@"<!DOC" },
-                    .@"<!DOC" => .{ 'T', .@"<!DOCT" },
-                    .@"<!DOCT" => .{ 'Y', .@"<!DOCTY" },
-                    .@"<!DOCTY" => .{ 'P', .@"<!DOCTYP" },
-                    .@"<!DOCTYP" => .{ 'E', .dtd },
-                    else => unreachable,
-                };
-                if (src[tokenizer.index] != expected_char) {
+            .@"<![",
+            .@"<![C",
+            .@"<![CD",
+            .@"<![CDA",
+            .@"<![CDAT",
+            .@"<![CDATA",
+            => |tag| switch (ret_kind) {
+                .type => {
+                    const expected_char: u8, //
+                    const state_on_match: State //
+                    = switch (tag) {
+                        .@"<![" => .{ 'C', .@"<![C" },
+                        .@"<![C" => .{ 'D', .@"<![CD" },
+                        .@"<![CD" => .{ 'A', .@"<![CDA" },
+                        .@"<![CDA" => .{ 'T', .@"<![CDAT" },
+                        .@"<![CDAT" => .{ 'A', .@"<![CDATA" },
+                        .@"<![CDATA" => .{ '[', .blank },
+                        else => unreachable,
+                    };
+                    if (tokenizer.index == src.len) break .invalid_cdata_start;
+                    if (src[tokenizer.index] != expected_char) break .invalid_cdata_start;
+                    tokenizer.state = state_on_match;
+                    tokenizer.index += 1;
+                    if (state_on_match != .blank) continue;
+                    break .cdata_start;
+                },
+                .src => {
+                    tokenizer.state = .angle_bracket_left_bang_invalid_tag_returned;
+                    return helper.literalInit(switch (tag) {
+                        inline //
+                        .@"<![",
+                        .@"<![C",
+                        .@"<![CD",
+                        .@"<![CDA",
+                        .@"<![CDAT",
+                        .@"<![CDATA",
+                        => |itag| @field(Literal, @tagName(itag)),
+                        else => unreachable,
+                    });
+                },
+            },
+
+            .@"<!D",
+            .@"<!DO",
+            .@"<!DOC",
+            .@"<!DOCT",
+            .@"<!DOCTY",
+            .@"<!DOCTYP",
+            => |tag| switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) break .invalid_dtd_start;
+                    const expected_char: u8, //
+                    const state_on_match: State //
+                    = switch (tag) {
+                        .@"<!D" => .{ 'O', .@"<!DO" },
+                        .@"<!DO" => .{ 'C', .@"<!DOC" },
+                        .@"<!DOC" => .{ 'T', .@"<!DOCT" },
+                        .@"<!DOCT" => .{ 'Y', .@"<!DOCTY" },
+                        .@"<!DOCTY" => .{ 'P', .@"<!DOCTYP" },
+                        .@"<!DOCTYP" => .{ 'E', .@"<!DOCTYPE" },
+                        else => unreachable,
+                    };
+                    if (src[tokenizer.index] != expected_char) {
+                        break .invalid_dtd_start;
+                    }
+                    tokenizer.state = state_on_match;
+                    tokenizer.index += 1;
+                    continue;
+                },
+                .src => {
+                    tokenizer.state = .angle_bracket_left_bang_invalid_tag_returned;
+                    return helper.literalInit(switch (tag) {
+                        inline //
+                        .@"<!D",
+                        .@"<!DO",
+                        .@"<!DOC",
+                        .@"<!DOCT",
+                        .@"<!DOCTY",
+                        .@"<!DOCTYP",
+                        => |itag| @field(Literal, @tagName(itag)),
+                        else => unreachable,
+                    });
+                },
+            },
+            .@"<!DOCTYPE" => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .dtd_start;
+                    }
+                    if (std.mem.indexOfScalar(u8, whitespace_set ++ helper.dtd_terminal_characters, src[tokenizer.index]) != null) {
+                        tokenizer.state = .blank;
+                        break .dtd_start;
+                    }
                     break .invalid_dtd_start;
-                }
-                tokenizer.state = state_on_match;
-                tokenizer.index += 1;
-                if (state_on_match != .dtd) continue;
-                break .dtd_start;
+                },
+                .src => {
+                    tokenizer.state = .angle_bracket_left_bang_invalid_tag_returned;
+                    break helper.literalInit(.@"<!DOCTYPE");
+                },
             },
-            .src => {
-                tokenizer.state = .dtd_invalid_start;
-                return helper.literalInit(switch (tag) {
-                    inline //
-                    .@"<!D",
-                    .@"<!DO",
-                    .@"<!DOC",
-                    .@"<!DOCT",
-                    .@"<!DOCTY",
-                    .@"<!DOCTYP",
-                    => |itag| @field(TokenSrc.Literal, @tagName(itag)),
-                    else => unreachable,
-                });
+
+            .angle_bracket_left_bang_invalid_tag_returned => switch (ret_kind) {
+                .type => unreachable,
+                .src => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break null;
+                    }
+                    const str_start = tokenizer.index;
+                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ helper.dtd_terminal_characters) orelse src.len;
+                    tokenizer.index = str_end;
+                    if (str_start != str_end) {
+                        break helper.rangeInit(str_start, str_end);
+                    }
+                    tokenizer.state = .blank;
+                    break null;
+                },
             },
+
+            else => unreachable,
         },
-        .dtd,
-        .dtd_subtag,
-        => |tag| switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .eof;
-                }
-                switch (src[tokenizer.index]) {
-                    // these cases do not affect the nesting context in any way
-                    inline '(', ')', '?', '*', '+', '|', ',', '%', ';' => |char| {
-                        tokenizer.index += 1;
-                        break comptime switch (char) {
-                            '(' => .lparen,
-                            ')' => .rparen,
-                            '?' => .qmark,
-                            '*' => .asterisk,
-                            '+' => .plus,
-                            '|' => .pipe,
-                            ',' => .comma,
-                            '%' => .percent,
-                            ';' => .semicolon,
-                            else => unreachable,
-                        };
-                    },
-                    // these quote cases retain the nesting context
-                    '\'' => {
-                        tokenizer.state = switch (tag) {
-                            .dtd => .dtd_sq,
-                            .dtd_subtag => .dtd_subtag_sq,
-                            else => unreachable,
-                        };
-                        tokenizer.index += 1;
-                        break .quote_single;
-                    },
-                    '\"' => {
-                        tokenizer.state = switch (tag) {
-                            .dtd => .dtd_dq,
-                            .dtd_subtag => .dtd_subtag_dq,
-                            else => unreachable,
-                        };
-                        tokenizer.index += 1;
-                        break .quote_double;
-                    },
-                    // the rest of these specific cases modify the nesting context
-                    '[' => {
-                        switch (tag) {
-                            .dtd => {},
-                            .dtd_subtag => tokenizer.state = .dtd,
-                            else => unreachable,
-                        }
-                        tokenizer.index += 1;
-                        break .square_bracket_left;
-                    },
-                    ']' => {
-                        switch (tag) {
-                            .dtd => {},
-                            .dtd_subtag => tokenizer.state = .dtd,
-                            else => unreachable,
-                        }
-                        tokenizer.index += 1;
-                        break .square_bracket_right;
-                    },
-                    '<' => {
-                        tokenizer.state = .@"dtd,<";
+
+        .dtd => switch (tokenizer.state) {
+            .eof => break eof_result,
+
+            .blank => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .eof;
+                    }
+                    switch (src[tokenizer.index]) {
+                        inline '(', ')', '?', '*', '+', '|', ',', '%', ';', '\'', '\"', '[', ']', '>' => |char| {
+                            tokenizer.index += 1;
+                            break comptime switch (char) {
+                                '(' => .lparen,
+                                ')' => .rparen,
+                                '?' => .qmark,
+                                '*' => .asterisk,
+                                '+' => .plus,
+                                '|' => .pipe,
+                                ',' => .comma,
+                                '%' => .percent,
+                                ';' => .semicolon,
+                                '\'' => .quote_single,
+                                '\"' => .quote_single,
+                                '[' => .square_bracket_left,
+                                ']' => .square_bracket_right,
+                                '>' => .angle_bracket_right,
+                                else => unreachable,
+                            };
+                        },
+                        '<' => {
+                            tokenizer.state = .@"<";
+                            tokenizer.index += 1;
+                            continue;
+                        },
+                        else => |char| {
+                            const not_whitespace = std.mem.indexOfScalar(u8, whitespace_set, char) == null;
+                            if (not_whitespace) break .tag_token;
+                            tokenizer.state = .whitespace;
+                            break .tag_whitespace;
+                        },
+                    }
+                },
+                .src => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break null;
+                    }
+                    const str_start = tokenizer.index;
+                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ helper.dtd_terminal_characters) orelse src.len;
+                    tokenizer.index = str_end;
+                    if (str_start == str_end) break null;
+                    break helper.rangeInit(str_start, str_end);
+                },
+            },
+
+            .whitespace => switch (ret_kind) {
+                .type => unreachable,
+                .src => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break null;
+                    }
+                    const str_start = tokenizer.index;
+                    const str_end = std.mem.indexOfNonePos(u8, src, tokenizer.index, whitespace_set) orelse src.len;
+                    tokenizer.index = str_end;
+                    if (str_start != str_end) {
+                        break helper.rangeInit(str_start, str_end);
+                    }
+                    tokenizer.state = .blank;
+                    break null;
+                },
+            },
+
+            .@"<" => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .angle_bracket_left;
+                    }
+                    switch (src[tokenizer.index]) {
+                        '?' => {
+                            tokenizer.state = .blank;
+                            tokenizer.index += 1;
+                            break .pi_start;
+                        },
+                        '!' => {
+                            tokenizer.state = .@"<!";
+                            tokenizer.index += 1;
+                            continue;
+                        },
+                        else => {
+                            tokenizer.state = .blank;
+                            break .angle_bracket_left;
+                        },
+                    }
+                },
+                .src => unreachable,
+            },
+
+            .@"<!" => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .invalid_angle_bracket_left_bang;
+                    }
+                    if (src[tokenizer.index] == '-') {
+                        tokenizer.state = .@"<!-";
                         tokenizer.index += 1;
                         continue;
-                    },
-                    '>' => {
-                        tokenizer.state = switch (tag) {
-                            .dtd => .general,
-                            .dtd_subtag => .dtd,
-                            else => unreachable,
-                        };
-                        tokenizer.index += 1;
-                        break .angle_bracket_right;
-                    },
-                    else => {
-                        const non_whitespace = std.mem.indexOfScalar(u8, whitespace_set, src[tokenizer.index]) == null;
-                        const token_state: State, //
-                        const whitespace_state: State //
-                        = switch (tag) {
-                            .dtd => .{ .dtd_token, .dtd_whitespace },
-                            .dtd_subtag => .{ .dtd_subtag_token, .dtd_subtag_whitespace },
-                            else => unreachable,
-                        };
-                        tokenizer.state = if (non_whitespace) token_state else whitespace_state;
-                        break if (non_whitespace) .tag_token else .tag_whitespace;
-                    },
-                }
+                    }
+                    if (std.mem.indexOfScalar(u8, whitespace_set ++ helper.dtd_terminal_characters, src[tokenizer.index]) != null) {
+                        tokenizer.state = .blank;
+                        break .invalid_angle_bracket_left_bang;
+                    }
+                    tokenizer.state = .dtd_subtag_start;
+                    break .dtd_decl;
+                },
+                .src => unreachable,
             },
-            .src => unreachable,
+
+            .@"<!-" => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .invalid_comment_start_single_dash;
+                    }
+                    tokenizer.state = .blank;
+                    if (src[tokenizer.index] != '-') {
+                        break .invalid_comment_start_single_dash;
+                    }
+                    tokenizer.index += 1;
+                    break .comment_start;
+                },
+                .src => unreachable,
+            },
+
+            .dtd_subtag_start => switch (ret_kind) {
+                .type => unreachable,
+                .src => {
+                    tokenizer.state = .blank; // fall through to the code for tokenizing tag_token
+                    break helper.literalInit(.@"<!");
+                },
+            },
+
+            else => unreachable,
         },
-        .dtd_sq,
-        .dtd_dq,
-        .dtd_subtag_sq,
-        .dtd_subtag_dq,
+
+        .element_tag => switch (tokenizer.state) {
+            .eof => break eof_result,
+
+            .blank => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .eof;
+                    }
+                    switch (src[tokenizer.index]) {
+                        inline '\'', '\"', '/', '=', '>' => |char| {
+                            tokenizer.index += 1;
+                            break comptime switch (char) {
+                                '\'' => .quote_single,
+                                '\"' => .quote_double,
+                                '/' => .slash,
+                                '=' => .equals,
+                                '>' => .angle_bracket_right,
+                                else => unreachable,
+                            };
+                        },
+                        else => |char| {
+                            const not_whitespace = std.mem.indexOfScalar(u8, whitespace_set, char) == null;
+                            if (not_whitespace) break .tag_token;
+                            tokenizer.state = .whitespace;
+                            break .tag_whitespace;
+                        },
+                    }
+                },
+                .src => {
+                    if (tokenizer.index == src.len) break null;
+                    const str_start = tokenizer.index;
+                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ &[_]u8{ '\'', '\"', '/', '=', '>' }) orelse src.len;
+                    tokenizer.index = str_end;
+                    if (str_start == str_end) break null;
+                    break helper.rangeInit(str_start, str_end);
+                },
+            },
+
+            .whitespace => switch (ret_kind) {
+                .type => unreachable,
+                .src => {
+                    if (tokenizer.index == src.len) break null;
+                    const str_start = tokenizer.index;
+                    const str_end = std.mem.indexOfNonePos(u8, src, tokenizer.index, whitespace_set) orelse src.len;
+                    tokenizer.index = str_end;
+                    if (str_start != str_end) {
+                        break helper.rangeInit(str_start, str_end);
+                    }
+                    tokenizer.state = .blank;
+                    break null;
+                },
+            },
+
+            else => unreachable,
+        },
+
+        .comment => switch (tokenizer.state) {
+            .eof => break eof_result,
+
+            .blank => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .eof;
+                    }
+                    if (src[tokenizer.index] != '-') {
+                        break .text_data;
+                    }
+                    tokenizer.state = .@"-";
+                    tokenizer.index += 1;
+                    continue;
+                },
+                .src => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break null;
+                    }
+                    const str_start = tokenizer.index;
+                    const str_end = std.mem.indexOfScalarPos(u8, src, tokenizer.index, '-') orelse src.len;
+                    tokenizer.index = str_end;
+                    if (str_start != str_end) {
+                        break helper.rangeInit(str_start, str_end);
+                    }
+                    if (src[tokenizer.index] == '-') {
+                        tokenizer.state = .@"-";
+                        tokenizer.index += 1;
+                        continue;
+                    }
+                    break null;
+                },
+            },
+
+            .@"-" => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) break .text_data;
+                    if (src[tokenizer.index] != '-') break .text_data;
+                    tokenizer.state = .@"--";
+                    tokenizer.index += 1;
+                    continue;
+                },
+                .src => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break helper.literalInit(.@"-");
+                    }
+                    if (src[tokenizer.index] != '-') {
+                        tokenizer.state = .blank;
+                        break helper.literalInit(.@"-");
+                    }
+                    tokenizer.state = .@"--";
+                    tokenizer.index += 1;
+                    continue;
+                },
+            },
+
+            .@"--" => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .blank;
+                        break .invalid_comment_dash_dash;
+                    }
+                    switch (src[tokenizer.index]) {
+                        '-' => {
+                            tokenizer.state = .@"---";
+                            tokenizer.index += 1;
+                            continue;
+                        },
+                        '>' => {
+                            tokenizer.state = .blank;
+                            tokenizer.index += 1;
+                            break .comment_end;
+                        },
+                        else => {
+                            tokenizer.state = .blank;
+                            break .invalid_comment_dash_dash;
+                        },
+                    }
+                },
+                .src => {
+                    if (tokenizer.index == src.len) break null;
+                    if (src[tokenizer.index] != '-') break null;
+                    tokenizer.state = .@"---";
+                    tokenizer.index += 1;
+                    break null;
+                },
+            },
+
+            .@"---" => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .@"-";
+                        break .invalid_comment_dash_dash;
+                    }
+                    switch (src[tokenizer.index]) {
+                        '-' => {
+                            tokenizer.state = .@"--";
+                            tokenizer.index += 1;
+                            break .invalid_comment_dash_dash;
+                        },
+                        '>' => {
+                            tokenizer.state = .blank;
+                            tokenizer.index += 1;
+                            break .invalid_comment_end_triple_dash;
+                        },
+                        else => {
+                            tokenizer.state = .@"-";
+                            break .invalid_comment_dash_dash;
+                        },
+                    }
+                },
+                .src => unreachable,
+            },
+
+            else => unreachable,
+        },
+        .pi => switch (tokenizer.state) {
+            .eof => break eof_result,
+
+            .blank => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .eof;
+                    }
+                    if (src[tokenizer.index] != '?') {
+                        break .text_data;
+                    }
+                    tokenizer.state = .@"?";
+                    tokenizer.index += 1;
+                    continue;
+                },
+                .src => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break null;
+                    }
+
+                    const str_start = tokenizer.index;
+                    const str_end = std.mem.indexOfScalarPos(u8, src, tokenizer.index, '?') orelse src.len;
+                    tokenizer.index = str_end;
+                    if (str_start != str_end) {
+                        break helper.rangeInit(str_start, str_end);
+                    }
+                    tokenizer.state = .@"?";
+                    tokenizer.index += 1;
+                    continue;
+                },
+            },
+
+            .@"?" => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) break .text_data;
+                    if (src[tokenizer.index] != '>') break .text_data;
+                    tokenizer.state = .blank;
+                    tokenizer.index += 1;
+                    break .pi_end;
+                },
+                .src => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .blank;
+                        break helper.literalInit(.@"?");
+                    }
+                    if (src[tokenizer.index] != '>') {
+                        tokenizer.state = .blank;
+                        break helper.literalInit(.@"?");
+                    }
+                    break null;
+                },
+            },
+
+            else => unreachable,
+        },
+        .cdata => switch (tokenizer.state) {
+            .eof => break eof_result,
+
+            .blank => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .eof;
+                    }
+                    if (src[tokenizer.index] != ']') {
+                        break .text_data;
+                    }
+                    tokenizer.state = .@"]";
+                    tokenizer.index += 1;
+                    continue;
+                },
+                .src => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break null;
+                    }
+                    const str_start = tokenizer.index;
+                    const str_end = std.mem.indexOfScalarPos(u8, src, tokenizer.index, ']') orelse src.len;
+                    tokenizer.index = str_end;
+                    if (str_start != str_end) {
+                        break helper.rangeInit(str_start, str_end);
+                    }
+                    tokenizer.state = .@"]";
+                    tokenizer.index += 1;
+                    continue;
+                },
+            },
+
+            inline .@"]", .@"]]", .@"]]]" => |state| switch (helper.handlePossibleCdataEnd(tokenizer, state)) {
+                .@"continue" => continue,
+                .@"return" => |result| break result,
+            },
+
+            else => unreachable,
+        },
+
+        .system_literal_quote_single,
+        .system_literal_quote_double,
         => |tag| switch (ret_kind) {
             .type => {
                 if (tokenizer.index == src.len) {
@@ -1323,19 +1233,15 @@ fn nextTypeOrSrcImpl(
                     break .eof;
                 }
                 const matching_quote_char: u8, //
-                const matching_quote_type: TokenType, //
-                const on_match_state: State //
+                const matching_quote_type: TokenType //
                 = switch (tag) {
-                    .dtd_sq => .{ '\'', .quote_single, .dtd },
-                    .dtd_dq => .{ '\"', .quote_double, .dtd },
-                    .dtd_subtag_sq => .{ '\'', .quote_single, .dtd_subtag },
-                    .dtd_subtag_dq => .{ '\"', .quote_double, .dtd_subtag },
+                    .system_literal_quote_single => .{ '\'', .quote_single },
+                    .system_literal_quote_double => .{ '\"', .quote_double },
                     else => unreachable,
                 };
                 if (src[tokenizer.index] != matching_quote_char) {
                     break .text_data;
                 }
-                tokenizer.state = on_match_state;
                 tokenizer.index += 1;
                 break matching_quote_type;
             },
@@ -1345,394 +1251,177 @@ fn nextTypeOrSrcImpl(
                     break null;
                 }
                 const matching_quote_char: u8 = switch (tag) {
-                    .dtd_sq, .dtd_subtag_sq => '\'',
-                    .dtd_dq, .dtd_subtag_dq => '\"',
+                    .system_literal_quote_single => '\'',
+                    .system_literal_quote_double => '\"',
                     else => unreachable,
                 };
                 const str_start = tokenizer.index;
                 const str_end = std.mem.indexOfScalarPos(u8, src, tokenizer.index, matching_quote_char) orelse src.len;
                 tokenizer.index = str_end;
-                if (str_start != str_end) {
-                    break helper.rangeInit(str_start, str_end);
-                }
-                break null;
+                if (str_start == str_end) return null;
+                break helper.rangeInit(str_start, str_end);
             },
         },
 
-        .dtd_token,
-        .dtd_subtag_token,
-        => |tag| switch (ret_kind) {
-            .type => unreachable,
-            .src => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
+        .attribute_value_single_quote,
+        .attribute_value_double_quote,
+        => |tag| switch (tokenizer.state) {
+            .eof => break eof_result,
+            .blank => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .eof;
+                    }
+
+                    const matching_quote_char: u8, //
+                    const matching_quote_type: TokenType //
+                    = comptime switch (tag) {
+                        .attribute_value_single_quote => .{ '\'', .quote_single },
+                        .attribute_value_double_quote => .{ '\"', .quote_double },
+                        else => unreachable,
+                    };
+                    switch (src[tokenizer.index]) {
+                        matching_quote_char => {
+                            tokenizer.index += 1;
+                            break matching_quote_type;
+                        },
+                        '&' => {
+                            tokenizer.index += 1;
+                            break .ampersand;
+                        },
+                        '<' => {
+                            tokenizer.index += 1;
+                            break .angle_bracket_left;
+                        },
+                        else => break .text_data,
+                    }
+                },
+                .src => {
+                    if (tokenizer.index == src.len) break null;
+                    const matching_quote_char: u8 = comptime switch (tag) {
+                        .attribute_value_single_quote => '\'',
+                        .attribute_value_double_quote => '\"',
+                        else => unreachable,
+                    };
+                    const str_start = tokenizer.index;
+                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, &[_]u8{ matching_quote_char, '&', '<' }) orelse src.len;
+                    tokenizer.index = str_end;
+                    if (str_start == str_end) break null;
+                    break helper.rangeInit(str_start, str_end);
+                },
+            },
+            else => unreachable,
+        },
+
+        .ref_text => switch (tokenizer.state) {
+            .blank => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .invalid_reference_end;
+                    }
+                    if (src[tokenizer.index] == ';') {
+                        tokenizer.state = .blank;
+                        tokenizer.index += 1;
+                        break .semicolon;
+                    }
+                    if (std.mem.indexOfScalar(u8, whitespace_set ++ &[_]u8{ ']', '&', '<' }, src[tokenizer.index]) != null) {
+                        tokenizer.state = .blank;
+                        break .invalid_reference_end;
+                    }
+                    break .tag_token;
+                },
+                .src => {
+                    if (tokenizer.index == src.len) break null;
+                    const str_start = tokenizer.index;
+                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ &[_]u8{ ';', ']', '&', '<' }) orelse src.len;
+                    tokenizer.index = str_end;
+                    if (str_start != str_end) {
+                        break helper.rangeInit(str_start, str_end);
+                    }
                     break null;
-                }
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ helper.dtd_terminal_characters) orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start != str_end) {
+                },
+            },
+            else => unreachable,
+        },
+        .ref_attr => switch (tokenizer.state) {
+            .blank => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .invalid_reference_end;
+                    }
+                    if (src[tokenizer.index] == ';') {
+                        tokenizer.state = .blank;
+                        tokenizer.index += 1;
+                        break .semicolon;
+                    }
+                    if (std.mem.indexOfScalar(u8, whitespace_set ++ &[_]u8{ '\'', '\"', '<', '&' }, src[tokenizer.index]) != null) {
+                        tokenizer.state = .blank;
+                        break .invalid_reference_end;
+                    }
+                    break .tag_token;
+                },
+                .src => {
+                    if (tokenizer.index == src.len) break null;
+                    const str_start = tokenizer.index;
+                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ &[_]u8{ '\'', '\"', '<', '&', ';' }) orelse src.len;
+                    tokenizer.index = str_end;
+                    if (str_start == str_end) break null;
                     break helper.rangeInit(str_start, str_end);
-                }
-                tokenizer.state = switch (tag) {
-                    .dtd_token => .dtd,
-                    .dtd_subtag_token => .dtd_subtag,
-                    else => unreachable,
-                };
-                break null;
+                },
             },
+            else => unreachable,
         },
-
-        .dtd_whitespace,
-        .dtd_subtag_whitespace,
-        => |tag| switch (ret_kind) {
-            .type => unreachable,
-            .src => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break null;
-                }
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfNonePos(u8, src, tokenizer.index, whitespace_set) orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start != str_end) {
+        .ref_dtd => switch (tokenizer.state) {
+            .blank => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .invalid_reference_end;
+                    }
+                    if (src[tokenizer.index] == ';') {
+                        tokenizer.state = .blank;
+                        tokenizer.index += 1;
+                        break .semicolon;
+                    }
+                    if (std.mem.indexOfScalar(u8, whitespace_set ++ helper.dtd_terminal_characters ++ &[_]u8{'&'}, src[tokenizer.index]) != null) {
+                        tokenizer.state = .blank;
+                        break .invalid_reference_end;
+                    }
+                    break .tag_token;
+                },
+                .src => {
+                    if (tokenizer.index == src.len) break null;
+                    const str_start = tokenizer.index;
+                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ helper.dtd_terminal_characters ++ &[_]u8{'&'}) orelse src.len;
+                    tokenizer.index = str_end;
+                    if (str_start == str_end) break null;
                     break helper.rangeInit(str_start, str_end);
-                }
-                tokenizer.state = switch (tag) {
-                    .dtd_whitespace => .dtd,
-                    .dtd_subtag_whitespace => .dtd_subtag,
-                    else => unreachable,
-                };
-                break null;
+                },
             },
-        },
-
-        .@"dtd,<" => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .angle_bracket_left;
-                }
-                switch (src[tokenizer.index]) {
-                    '?' => {
-                        tokenizer.state = .dtd_pi;
-                        tokenizer.index += 1;
-                        break .pi_start;
-                    },
-                    '!' => {
-                        tokenizer.state = .@"dtd,<!";
-                        tokenizer.index += 1;
-                        continue;
-                    },
-                    else => {
-                        tokenizer.state = .dtd;
-                        break .angle_bracket_left;
-                    },
-                }
-            },
-            .src => unreachable,
-        },
-
-        .@"dtd,<!" => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .invalid_angle_bracket_left_bang;
-                }
-                switch (src[tokenizer.index]) {
-                    inline '-', 'A', 'E', 'N' => |char| {
-                        tokenizer.state = comptime switch (char) {
-                            '-' => .@"dtd,<!-",
-                            'E' => .@"dtd,<!E",
-                            'A' => .@"dtd,<!A",
-                            'N' => .@"dtd,<!N",
-                            else => unreachable,
-                        };
-                        tokenizer.index += 1;
-                        continue;
-                    },
-                    else => {
-                        tokenizer.state = .dtd_subtag;
-                        break .invalid_angle_bracket_left_bang;
-                    },
-                }
-            },
-            .src => unreachable,
-        },
-
-        .dtd_invalid_start,
-        .dtd_subtag_invalid_start,
-        => |tag| switch (ret_kind) {
-            .type => unreachable,
-            .src => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    return null;
-                }
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ helper.dtd_terminal_characters) orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start != str_end) {
-                    return helper.rangeInit(str_start, str_end);
-                }
-                tokenizer.state = switch (tag) {
-                    .dtd_invalid_start => .dtd,
-                    .dtd_subtag_invalid_start => .dtd_subtag,
-                    else => unreachable,
-                };
-                return null;
-            },
-        },
-
-        .@"dtd,<!E",
-
-        .@"dtd,<!EL",
-        .@"dtd,<!ELE",
-        .@"dtd,<!ELEM",
-        .@"dtd,<!ELEME",
-        .@"dtd,<!ELEMEN",
-
-        .@"dtd,<!EN",
-        .@"dtd,<!ENT",
-        .@"dtd,<!ENTI",
-        .@"dtd,<!ENTIT",
-
-        .@"dtd,<!A",
-        .@"dtd,<!AT",
-        .@"dtd,<!ATT",
-        .@"dtd,<!ATTL",
-        .@"dtd,<!ATTLI",
-        .@"dtd,<!ATTLIS",
-
-        .@"dtd,<!N",
-        .@"dtd,<!NO",
-        .@"dtd,<!NOT",
-        .@"dtd,<!NOTA",
-        .@"dtd,<!NOTAT",
-        .@"dtd,<!NOTATI",
-        .@"dtd,<!NOTATIO",
-        => |tag| switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) break .invalid_token;
-                const expected_char: u8, //
-                const on_match: union(enum) { state: State, type: TokenType } //
-                = switch (tag) {
-                    .@"dtd,<!E" => {
-                        if (tokenizer.index == src.len) break .invalid_decl;
-                        switch (src[tokenizer.index]) {
-                            'L' => {
-                                tokenizer.state = .@"dtd,<!EL";
-                                tokenizer.index += 1;
-                                continue;
-                            },
-                            'N' => {
-                                tokenizer.state = .@"dtd,<!EN";
-                                tokenizer.index += 1;
-                                continue;
-                            },
-                            else => break .invalid_decl,
-                        }
-                    },
-
-                    .@"dtd,<!EL" => .{ 'E', .{ .state = .@"dtd,<!ELE" } },
-                    .@"dtd,<!ELE" => .{ 'M', .{ .state = .@"dtd,<!ELEM" } },
-                    .@"dtd,<!ELEM" => .{ 'E', .{ .state = .@"dtd,<!ELEME" } },
-                    .@"dtd,<!ELEME" => .{ 'N', .{ .state = .@"dtd,<!ELEMEN" } },
-                    .@"dtd,<!ELEMEN" => .{ 'T', .{ .type = .element_decl } },
-
-                    .@"dtd,<!EN" => .{ 'T', .{ .state = .@"dtd,<!ENT" } },
-                    .@"dtd,<!ENT" => .{ 'I', .{ .state = .@"dtd,<!ENTI" } },
-                    .@"dtd,<!ENTI" => .{ 'T', .{ .state = .@"dtd,<!ENTIT" } },
-                    .@"dtd,<!ENTIT" => .{ 'Y', .{ .type = .entity_decl } },
-
-                    .@"dtd,<!A" => .{ 'T', .{ .state = .@"dtd,<!AT" } },
-                    .@"dtd,<!AT" => .{ 'T', .{ .state = .@"dtd,<!ATT" } },
-                    .@"dtd,<!ATT" => .{ 'L', .{ .state = .@"dtd,<!ATTL" } },
-                    .@"dtd,<!ATTL" => .{ 'I', .{ .state = .@"dtd,<!ATTLI" } },
-                    .@"dtd,<!ATTLI" => .{ 'S', .{ .state = .@"dtd,<!ATTLIS" } },
-                    .@"dtd,<!ATTLIS" => .{ 'T', .{ .type = .attlist_decl } },
-
-                    .@"dtd,<!N" => .{ 'O', .{ .state = .@"dtd,<!NO" } },
-                    .@"dtd,<!NO" => .{ 'T', .{ .state = .@"dtd,<!NOT" } },
-                    .@"dtd,<!NOT" => .{ 'A', .{ .state = .@"dtd,<!NOTA" } },
-                    .@"dtd,<!NOTA" => .{ 'T', .{ .state = .@"dtd,<!NOTAT" } },
-                    .@"dtd,<!NOTAT" => .{ 'I', .{ .state = .@"dtd,<!NOTATI" } },
-                    .@"dtd,<!NOTATI" => .{ 'O', .{ .state = .@"dtd,<!NOTATIO" } },
-                    .@"dtd,<!NOTATIO" => .{ 'N', .{ .type = .notation_decl } },
-
-                    else => unreachable,
-                };
-                if (src[tokenizer.index] != expected_char) break .invalid_decl;
-                switch (on_match) {
-                    .state => |state_on_match| {
-                        tokenizer.state = state_on_match;
-                        tokenizer.index += 1;
-                        continue;
-                    },
-                    .type => |type_on_match| {
-                        tokenizer.state = .dtd_subtag;
-                        tokenizer.index += 1;
-                        break type_on_match;
-                    },
-                }
-            },
-
-            .src => {
-                tokenizer.state = .dtd_subtag_invalid_start;
-                return helper.literalInit(switch (tag) {
-                    inline //
-                    .@"dtd,<!E",
-
-                    .@"dtd,<!EL",
-                    .@"dtd,<!ELE",
-                    .@"dtd,<!ELEM",
-                    .@"dtd,<!ELEME",
-                    .@"dtd,<!ELEMEN",
-
-                    .@"dtd,<!EN",
-                    .@"dtd,<!ENT",
-                    .@"dtd,<!ENTI",
-                    .@"dtd,<!ENTIT",
-
-                    .@"dtd,<!A",
-                    .@"dtd,<!AT",
-                    .@"dtd,<!ATT",
-                    .@"dtd,<!ATTL",
-                    .@"dtd,<!ATTLI",
-                    .@"dtd,<!ATTLIS",
-
-                    .@"dtd,<!N",
-                    .@"dtd,<!NO",
-                    .@"dtd,<!NOT",
-                    .@"dtd,<!NOTA",
-                    .@"dtd,<!NOTAT",
-                    .@"dtd,<!NOTATI",
-                    .@"dtd,<!NOTATIO",
-                    => |itag| @field(TokenSrc.Literal, @tagName(itag)["dtd,".len..]),
-                    else => unreachable,
-                });
-            },
+            else => unreachable,
         },
     } else error.BufferUnderrun;
 }
 
-pub const TokenSrc = union(enum) {
-    range: Range,
-    literal: Literal,
-
-    pub const Range = struct {
-        start: usize,
-        end: usize,
-
-        /// For a streaming `Tokenizer`, this must be called with the `src` field
-        /// immediately after it is returned from `nextSrcStream` to get the source string.
-        /// For a non-streaming `Tokenizer`, this can be called at any time with
-        /// the `src` field.
-        /// The returned string aliases the `src` parameter.
-        pub inline fn toStr(range: Range, src: []const u8) []const u8 {
-            return src[range.start..range.end];
-        }
-    };
-
-    pub const Literal = enum {
-        @"]",
-        @"]]",
-        @"/",
-        @"?",
-
-        @"<!",
-        @"<!-",
-
-        @"<![",
-        @"<![C",
-        @"<![CD",
-        @"<![CDA",
-        @"<![CDAT",
-        @"<![CDATA",
-
-        @"<!D",
-        @"<!DO",
-        @"<!DOC",
-        @"<!DOCT",
-        @"<!DOCTY",
-        @"<!DOCTYP",
-
-        @"<!E",
-
-        @"<!EN",
-        @"<!ENT",
-        @"<!ENTI",
-        @"<!ENTIT",
-
-        @"<!EL",
-        @"<!ELE",
-        @"<!ELEM",
-        @"<!ELEME",
-        @"<!ELEMEN",
-
-        @"<!A",
-        @"<!AT",
-        @"<!ATT",
-        @"<!ATTL",
-        @"<!ATTLI",
-        @"<!ATTLIS",
-
-        @"<!N",
-        @"<!NO",
-        @"<!NOT",
-        @"<!NOTA",
-        @"<!NOTAT",
-        @"<!NOTATI",
-        @"<!NOTATIO",
-
-        @"-",
-
-        /// For a streaming `Tokenizer`, this is illegal.
-        /// For a non-streaming `Tokenizer`, this must be called immediately after it is returned
-        /// from `nextSrcStream` to get the source range, which may then be turned into a string which
-        /// aliases the `src` field.
-        pub inline fn toRange(literal_tok: Literal, tokenizer: *const Tokenizer) Range {
-            const len = literal_tok.toStr().len;
-            const result: Range = .{ .start = tokenizer.index - len, .end = tokenizer.index };
-            assert(result.end - result.start == len);
-            return result;
-        }
-
-        /// This is valid to call at any time, regardless of whether the source `Tokenizer` is
-        /// streaming, as it will simply return the represented string literal.
-        pub inline fn toStr(literal_tok: Literal) []const u8 {
-            return @tagName(literal_tok);
-        }
-    };
-};
-
 const State = enum {
     eof,
 
-    general,
-    @"general,]",
-    @"general,]]",
-    @"general,&",
+    blank,
 
-    @"general,<",
+    @"]",
+    @"]]",
+    /// At the time of writing, this is primarily used as an intermediate state to allow a non-streaming
+    /// tokenizer to be queried for the accurate range for the first ']' character in the source.
+    @"]]]",
 
-    @"general,<!",
-    @"general,<!-",
+    @"<",
 
-    pi,
-    @"pi,?",
+    @"<!",
 
-    element_tag,
-    element_tag_whitespace,
-    element_tag_sq,
-    element_tag_dq,
-    @"element_tag_sq,&",
-    @"element_tag_dq,&",
-
-    @"general,<!--",
-    @"general,<!--,-",
-    @"general,<!--,--",
-    @"general,<!--,---",
+    @"<!-",
 
     @"<![",
     @"<![C",
@@ -1740,10 +1429,6 @@ const State = enum {
     @"<![CDA",
     @"<![CDAT",
     @"<![CDATA",
-    cdata_start_invalid,
-    cdata,
-    @"cdata,]",
-    @"cdata,]]",
 
     @"<!D",
     @"<!DO",
@@ -1751,197 +1436,161 @@ const State = enum {
     @"<!DOCT",
     @"<!DOCTY",
     @"<!DOCTYP",
+    @"<!DOCTYPE",
 
-    dtd_invalid_start,
-    dtd,
-    dtd_sq,
-    dtd_dq,
-    dtd_token,
-    dtd_whitespace,
+    dtd_subtag_start,
 
-    dtd_subtag_invalid_start,
-    dtd_subtag,
-    dtd_subtag_sq,
-    dtd_subtag_dq,
-    dtd_subtag_token,
-    dtd_subtag_whitespace,
+    /// Finished returning the src for the invalid tag formed by
+    /// '<!', followed by a partial match of a recognized sequence,
+    /// including:
+    /// * '<!DOCTYPE'
+    /// * '<![CDATA['
+    /// * '<!ENTITY'
+    /// * '<!ELEMENT'
+    /// * '<!ATTLIST'
+    /// * '<!NOTATION'
+    angle_bracket_left_bang_invalid_tag_returned,
 
-    @"dtd,<",
+    whitespace,
 
-    dtd_pi,
-    @"dtd_pi,?",
+    @"-",
+    @"--",
+    @"---",
 
-    @"dtd,<!",
-    @"dtd,<!-",
-    @"dtd,<!--",
-    @"dtd_comment,-",
-    @"dtd_comment,--",
-    @"dtd_comment,---",
+    @"&",
 
-    @"dtd,<!E",
-
-    @"dtd,<!EL",
-    @"dtd,<!ELE",
-    @"dtd,<!ELEM",
-    @"dtd,<!ELEME",
-    @"dtd,<!ELEMEN",
-
-    @"dtd,<!EN",
-    @"dtd,<!ENT",
-    @"dtd,<!ENTI",
-    @"dtd,<!ENTIT",
-
-    @"dtd,<!A",
-    @"dtd,<!AT",
-    @"dtd,<!ATT",
-    @"dtd,<!ATTL",
-    @"dtd,<!ATTLI",
-    @"dtd,<!ATTLIS",
-
-    @"dtd,<!N",
-    @"dtd,<!NO",
-    @"dtd,<!NOT",
-    @"dtd,<!NOTA",
-    @"dtd,<!NOTAT",
-    @"dtd,<!NOTATI",
-    @"dtd,<!NOTATIO",
+    @"?",
 };
 
-/// A checked version of the tokenizer, mainly used for testing and debugging.
-/// Panics on API misuse instead of reacting with undefined behaviour.
-/// Acts as a drop-in replacement to facilitate this use case.
-pub const CheckedTokenizer = struct {
-    raw: Tokenizer,
-    is_streaming: bool,
-    prev_output: PrevOutput,
+fn testTokenizer(
+    opts: struct {
+        start_size: usize = 1,
+        max_buffer: ?usize = null,
+    },
+    src: []const u8,
+    contexts_expected_tokens: []const struct { Context, TokenType, ?[]const u8 },
+) !void {
+    {
+        var actual_src_buf = std.ArrayList(u8).init(std.testing.allocator);
+        defer actual_src_buf.deinit();
 
-    const PrevOutput = union(enum) {
-        init,
-        tok: TokenType,
-        str: enum { non_null, null },
-    };
-
-    pub inline fn initComplete(src: []const u8) CheckedTokenizer {
-        return .{
-            .raw = Tokenizer.initComplete(src),
-            .is_streaming = false,
-            .prev_output = .init,
-        };
-    }
-
-    pub inline fn initStreaming() CheckedTokenizer {
-        return .{
-            .raw = Tokenizer.initStreaming(),
-            .is_streaming = true,
-            .prev_output = .init,
-        };
-    }
-
-    pub fn feedInput(checked: *CheckedTokenizer, src: []const u8) void {
-        if (!checked.is_streaming) @panic("Can't feed input to a non-streaming tokenizer");
-        checked.raw.feedInput(src);
-    }
-
-    pub fn feedEof(checked: *CheckedTokenizer) void {
-        if (!checked.is_streaming) @panic("Can't feed input to a non-streaming tokenizer");
-        checked.raw.feedEof();
-    }
-
-    pub fn nextType(checked: *CheckedTokenizer) NextTypeError!TokenType {
-        switch (checked.prev_output) {
-            .init => {},
-            .tok => |prev| if (prev.hasString()) @panic(switch (prev) {
-                inline else => |tag| "Can't call `nextType` when the previous token '." ++ @tagName(tag) ++
-                    "' has a string pending - call `nextSrc` first.",
-            }),
-            .str => |str| switch (str) {
-                .non_null => @panic("Can't call `nextType` when there is still a string pending - call `nextSrc` until it returns null."),
-                .null => {},
-            },
-        }
-        const tok_type = try checked.raw.nextTypeStream();
-        checked.prev_output = .{ .tok = tok_type };
-        return tok_type;
-    }
-
-    pub fn nextSrc(checked: *CheckedTokenizer) NextSrcError!?TokenSrc {
-        switch (checked.prev_output) {
-            .init => {},
-            .tok => |prev| if (!prev.hasString()) @panic(switch (prev) {
-                inline else => |tag| "Can't call `nextSrc` for token type '." ++ @tagName(tag) ++ "'. Call `nextType` instead.",
-            }),
-            .str => |str| switch (str) {
-                .non_null => {},
-                .null => @panic("Can't call `nextSrc` after one of them have already returned null. Call `nextType` instead."),
-            },
-        }
-        const tok_src = try checked.raw.nextSrcStream();
-        checked.prev_output = .{ .str = if (tok_src != null) .non_null else .null };
-        return tok_src;
-    }
-
-    pub fn expectNextType(tokenizer: *CheckedTokenizer, expected: NextTypeError!TokenType) !void {
-        comptime assert(builtin.is_test);
-        const actual = tokenizer.nextType();
-        try std.testing.expectEqual(expected, actual);
-    }
-    pub fn expectNextString(tokenizer: *CheckedTokenizer, expected: NextSrcError!?[]const u8) !void {
-        comptime assert(builtin.is_test);
-        const actual: NextSrcError!?[]const u8 = blk: {
-            const maybe_tok_src = tokenizer.nextSrc() catch |err| break :blk err;
-            const tok_src = maybe_tok_src orelse break :blk null;
-            break :blk switch (tok_src) {
-                .range => |range| range.toStr(tokenizer.raw.src),
-                .literal => |literal| if (tokenizer.is_streaming)
-                    literal.toStr()
-                else
-                    literal.toRange(&tokenizer.raw).toStr(tokenizer.raw.src),
+        for (opts.start_size..opts.max_buffer orelse src.len) |buffer_size| {
+            const helper = struct {
+                fn getNextType(tokenizer: *Tokenizer, context: Context, feeder: *std.mem.WindowIterator(u8)) TokenType {
+                    return tokenizer.nextTypeStream(context) catch while (true) {
+                        if (feeder.next()) |input| {
+                            tokenizer.feedInput(input);
+                        } else {
+                            tokenizer.feedEof();
+                        }
+                        break tokenizer.nextTypeStream(context) catch continue;
+                    };
+                }
             };
-        };
 
-        const maybe_expected = expected catch |expected_err| {
-            const maybe_actual = actual catch |actual_err| {
-                return try std.testing.expectEqual(expected_err, actual_err);
-            };
-            testingPrint("expected {[expected]}, found {[actual_quote]s}{[actual]?}{[actual_quote]s}\n", .{
-                .expected = expected_err,
-                .actual_quote = if (maybe_actual == null) "" else "'",
-                .actual = if (maybe_actual) |actual_unwrapped| std.zig.fmtEscapes(actual_unwrapped) else null,
-            });
-            return error.TestExpectedEqual;
-        };
-        const maybe_actual = actual catch |actual_err| {
-            testingPrint("expected {[expected_quote]s}{[expected]?}{[expected_quote]s}, found {[actual]}\n", .{
-                .expected_quote = if (maybe_expected == null) "" else "'",
-                .expected = if (maybe_expected) |expected_unwrapped| std.zig.fmtEscapes(expected_unwrapped) else null,
-                .actual = actual_err,
-            });
-            return error.TestExpectedEqual;
-        };
+            var feeder = std.mem.window(u8, src, buffer_size, buffer_size);
 
-        const expected_unwrapped = maybe_expected orelse {
-            if (maybe_actual) |actual_unwrapped| {
-                testingPrint("expected null, found '{}'\n", .{std.zig.fmtEscapes(actual_unwrapped)});
-                return error.TestExpectedEqual;
+            var tokenizer = Tokenizer.initStreaming();
+            for (contexts_expected_tokens, 0..) |iteration_vals, i| {
+                errdefer testingPrint("difference occured on token {d}\n", .{i});
+
+                const context: Context, //
+                const expected_tt: TokenType, //
+                const expected_src: ?[]const u8 //
+                = iteration_vals;
+                if (expected_src != null) try std.testing.expect(expected_tt.hasSrc());
+
+                const actual_tt: TokenType = helper.getNextType(&tokenizer, context, &feeder);
+                const actual_src: ?[]const u8 = blk: {
+                    if (!actual_tt.hasSrc()) break :blk null;
+
+                    actual_src_buf.clearRetainingCapacity();
+                    while (true) {
+                        const segment = (tokenizer.nextSrcStream(context) catch while (true) {
+                            if (feeder.next()) |input| {
+                                tokenizer.feedInput(input);
+                            } else {
+                                tokenizer.feedEof();
+                            }
+                            break tokenizer.nextSrcStream(context) catch continue;
+                        }) orelse break;
+                        try actual_src_buf.appendSlice(segment);
+                    }
+
+                    assert(actual_src_buf.items.len != 0);
+                    break :blk actual_src_buf.items;
+                };
+
+                try std.testing.expectEqual(expected_tt, actual_tt);
+
+                const combo = packed struct(u2) {
+                    a: bool,
+                    b: bool,
+                    inline fn combo(a: bool, b: bool) u2 {
+                        return @bitCast(@This(){ .a = a, .b = b });
+                    }
+                }.combo;
+                switch (combo(expected_src != null, actual_src != null)) {
+                    combo(true, true) => try std.testing.expectEqualStrings(expected_src.?, actual_src.?),
+                    combo(false, false) => {},
+                    combo(true, false) => {
+                        testingPrint("expected '{}', found null\n", .{std.zig.fmtEscapes(expected_src.?)});
+                        return error.TestExpectedEqual;
+                    },
+                    combo(false, true) => {
+                        testingPrint("expected null, found '{}'\n", .{std.zig.fmtEscapes(actual_src.?)});
+                        return error.TestExpectedEqual;
+                    },
+                }
             }
-            return;
-        };
-        const actual_unwrapped = maybe_actual orelse {
-            testingPrint("expected '{}', found null\n", .{std.zig.fmtEscapes(expected_unwrapped)});
-            return error.TestExpectedEqual;
+            const ctx_count = contexts_expected_tokens.len;
+            errdefer testingPrint("difference occured on token {d}\n", .{ctx_count});
+            try std.testing.expectEqual(.eof, helper.getNextType(&tokenizer, if (ctx_count != 0) contexts_expected_tokens[ctx_count - 1][0] else .non_markup, &feeder));
+        }
+    }
+
+    var tokenizer = Tokenizer.initComplete(src);
+    for (contexts_expected_tokens, 0..) |iteration_vals, i| {
+        errdefer testingPrint("difference occured on token {d}\n", .{i});
+
+        const context: Context, //
+        const expected_tt: TokenType, //
+        const expected_src: ?[]const u8 //
+        = iteration_vals;
+
+        const actual_tt: TokenType = tokenizer.nextTypeNoUnderrun(context);
+        const actual_src: ?[]const u8 = blk: {
+            if (!actual_tt.hasSrc()) break :blk null;
+            const range = tokenizer.nextSrcNoUnderrun(context);
+            break :blk range.toStr(tokenizer.src);
         };
 
-        try std.testing.expectEqualStrings(expected_unwrapped, actual_unwrapped);
+        try std.testing.expectEqual(expected_tt, actual_tt);
+
+        const combo = packed struct(u2) {
+            a: bool,
+            b: bool,
+            inline fn combo(a: bool, b: bool) u2 {
+                return @bitCast(@This(){ .a = a, .b = b });
+            }
+        }.combo;
+        switch (combo(expected_src != null, actual_src != null)) {
+            combo(true, true) => try std.testing.expectEqualStrings(expected_src.?, actual_src.?),
+            combo(false, false) => {},
+            combo(true, false) => {
+                testingPrint("expected '{}', found null\n", .{std.zig.fmtEscapes(expected_src.?)});
+                return error.TestExpectedEqual;
+            },
+            combo(false, true) => {
+                testingPrint("expected null, found '{}'\n", .{std.zig.fmtEscapes(actual_src.?)});
+                return error.TestExpectedEqual;
+            },
+        }
     }
-    pub fn expectNextStringSeq(tokenizer: *CheckedTokenizer, expected_list: []const NextSrcError!?[]const u8) !void {
-        for (expected_list) |expected| try tokenizer.expectNextString(expected);
-    }
-    pub fn expectNextTypeStringSeq(tokenizer: *CheckedTokenizer, expected_tt: TokenType, expected_list: []const NextSrcError!?[]const u8) !void {
-        try tokenizer.expectNextType(expected_tt);
-        try std.testing.expect(expected_tt.hasString());
-        try tokenizer.expectNextStringSeq(expected_list);
-    }
-};
+    const ctx_count = contexts_expected_tokens.len;
+    errdefer testingPrint("difference occured on token {d}\n", .{ctx_count});
+    try std.testing.expectEqual(.eof, tokenizer.nextTypeNoUnderrun(if (ctx_count != 0) contexts_expected_tokens[ctx_count - 1][0] else .non_markup));
+}
 
 fn testingPrint(comptime fmt_str: []const u8, args: anytype) void {
     if (@inComptime()) {
@@ -1951,1177 +1600,286 @@ fn testingPrint(comptime fmt_str: []const u8, args: anytype) void {
     }
 }
 
-test "Tokenizer Invalid Markup" {
-    var tokenizer: CheckedTokenizer = undefined;
-
-    tokenizer = CheckedTokenizer.initComplete("<!");
-    try tokenizer.expectNextType(.invalid_angle_bracket_left_bang);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!-");
-    try tokenizer.expectNextType(.invalid_comment_start_single_dash);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE<!-");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextType(.invalid_comment_start_single_dash);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!-<");
-    try tokenizer.expectNextType(.invalid_comment_start_single_dash);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "<", null });
-    try tokenizer.expectNextType(.eof);
-
-    for ([_]struct { TokenType, []const u8 }{
-        .{ .invalid_cdata_start, "<![" },
-        .{ .invalid_cdata_start, "<![C" },
-        .{ .invalid_cdata_start, "<![CD" },
-        .{ .invalid_cdata_start, "<![CDA" },
-        .{ .invalid_cdata_start, "<![CDAT" },
-        .{ .invalid_cdata_start, "<![CDATA" },
-
-        .{ .invalid_dtd_start, "<!D" },
-        .{ .invalid_dtd_start, "<!DO" },
-        .{ .invalid_dtd_start, "<!DOC" },
-        .{ .invalid_dtd_start, "<!DOCT" },
-        .{ .invalid_dtd_start, "<!DOCTY" },
-        .{ .invalid_dtd_start, "<!DOCTYP" },
-    }) |values| {
-        const expected_tt, const incomplete_mk_str = values;
-
-        tokenizer = CheckedTokenizer.initComplete(incomplete_mk_str);
-        try tokenizer.expectNextTypeStringSeq(expected_tt, &.{ incomplete_mk_str, null });
-        try tokenizer.expectNextType(.eof);
-
-        tokenizer = CheckedTokenizer.initStreaming();
-        for (0..incomplete_mk_str.len) |i| {
-            tokenizer.feedInput(incomplete_mk_str[i..][0..1]);
-            try tokenizer.expectNextType(error.BufferUnderrun);
-        }
-
-        var eof_copy = tokenizer;
-        eof_copy.feedEof();
-        try eof_copy.expectNextTypeStringSeq(expected_tt, &.{ incomplete_mk_str, null });
-        try eof_copy.expectNextType(.eof);
-
-        tokenizer.feedInput("a");
-        tokenizer.feedEof();
-        try tokenizer.expectNextType(expected_tt);
-        try tokenizer.expectNextString(incomplete_mk_str);
-        try tokenizer.expectNextString("a");
-        try tokenizer.expectNextString(null);
-        try tokenizer.expectNextType(.eof);
-    }
-
-    tokenizer = CheckedTokenizer.initComplete("<! a <");
-    try tokenizer.expectNextType(.invalid_angle_bracket_left_bang);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ " a ", null });
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<! a");
-    try tokenizer.expectNextType(.invalid_angle_bracket_left_bang);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ " a", null });
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<![CDATAR a");
-    try tokenizer.expectNextTypeStringSeq(.invalid_cdata_start, &.{ "<![CDATA", "R", null });
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ " a", null });
-    try tokenizer.expectNextType(.eof);
+test "Non-Markup" {
+    try testTokenizer(.{}, "  <", &.{
+        .{ .non_markup, .text_data, "  " },
+        .{ .non_markup, .angle_bracket_left, null },
+    });
+    try testTokenizer(.{}, "  &", &.{
+        .{ .non_markup, .text_data, "  " },
+        .{ .non_markup, .ampersand, null },
+    });
+    try testTokenizer(.{}, "  ]", &.{
+        .{ .non_markup, .text_data, "  ]" },
+    });
+    try testTokenizer(.{}, "  ]]", &.{
+        .{ .non_markup, .text_data, "  ]]" },
+    });
+    try testTokenizer(.{}, "  ]]>", &.{
+        .{ .non_markup, .text_data, "  " },
+        .{ .non_markup, .cdata_end, null },
+    });
 }
 
-test "Tokenizer Processing Instructions" {
-    var tokenizer: CheckedTokenizer = undefined;
+test "References" {
+    try testTokenizer(.{}, ";", &.{ .{ .ref_text, .semicolon, null }, .{ .non_markup, .eof, null } });
+    try testTokenizer(.{}, ";", &.{ .{ .ref_attr, .semicolon, null }, .{ .non_markup, .eof, null } });
+    try testTokenizer(.{}, ";", &.{ .{ .ref_dtd, .semicolon, null }, .{ .non_markup, .eof, null } });
 
-    tokenizer = CheckedTokenizer.initComplete("<??>");
-    try tokenizer.expectNextType(.pi_start);
-    try tokenizer.expectNextType(.pi_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<?");
-    try tokenizer.expectNextType(.pi_start);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<? ?>");
-    try tokenizer.expectNextType(.pi_start);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ " ", null });
-    try tokenizer.expectNextType(.pi_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<?foo?>");
-    try tokenizer.expectNextType(.pi_start);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "foo", null });
-    try tokenizer.expectNextType(.pi_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<?foo ?>");
-    try tokenizer.expectNextType(.pi_start);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "foo ", null });
-    try tokenizer.expectNextType(.pi_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<?foo bar?>");
-    try tokenizer.expectNextType(.pi_start);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "foo bar", null });
-    try tokenizer.expectNextType(.pi_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<?" ++ "???" ++ "?>");
-    try tokenizer.expectNextType(.pi_start);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "?", "?", "?", null });
-    try tokenizer.expectNextType(.pi_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("<?foo");
-    try tokenizer.expectNextType(.pi_start);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "foo", error.BufferUnderrun });
-    tokenizer.feedInput("?>");
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.pi_end);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("<?foo");
-    try tokenizer.expectNextType(.pi_start);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "foo", error.BufferUnderrun });
-    tokenizer.feedInput("?");
-    try tokenizer.expectNextString(error.BufferUnderrun);
-    tokenizer.feedInput(">");
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.pi_end);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("<?");
-    try tokenizer.expectNextType(.pi_start);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput("fizz?>");
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "fizz", null });
-    try tokenizer.expectNextType(.pi_end);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("<?bar");
-    try tokenizer.expectNextType(.pi_start);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "bar", error.BufferUnderrun });
-    tokenizer.feedInput("?");
-    try tokenizer.expectNextString(error.BufferUnderrun);
-    tokenizer.feedInput("?");
-    try tokenizer.expectNextStringSeq(&.{ "?", error.BufferUnderrun });
-    tokenizer.feedInput("baz");
-    try tokenizer.expectNextStringSeq(&.{ "?", "baz", error.BufferUnderrun });
-    tokenizer.feedInput("?>");
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.pi_end);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput("<");
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput("?");
-    try tokenizer.expectNextType(.pi_start);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput("fo");
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "fo", error.BufferUnderrun });
-    tokenizer.feedInput("o?");
-    try tokenizer.expectNextStringSeq(&.{ "o", error.BufferUnderrun });
-    tokenizer.feedInput("bar");
-    try tokenizer.expectNextStringSeq(&.{ "?", "bar", error.BufferUnderrun });
-    tokenizer.feedInput(" ");
-    try tokenizer.expectNextStringSeq(&.{ " ", error.BufferUnderrun });
-    tokenizer.feedInput("?");
-    try tokenizer.expectNextString(error.BufferUnderrun);
-    tokenizer.feedInput(" ");
-    try tokenizer.expectNextStringSeq(&.{ "?", " ", error.BufferUnderrun });
-    tokenizer.feedInput("?");
-    try tokenizer.expectNextString(error.BufferUnderrun);
-    tokenizer.feedInput(">");
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.pi_end);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextType(.eof);
+    try testTokenizer(.{}, " ", &.{ .{ .ref_text, .invalid_reference_end, null }, .{ .non_markup, .text_data, " " } });
+    try testTokenizer(.{}, " ", &.{ .{ .ref_attr, .invalid_reference_end, null }, .{ .attribute_value_single_quote, .text_data, " " } });
+    try testTokenizer(.{}, " ", &.{ .{ .ref_dtd, .invalid_reference_end, null }, .{ .dtd, .tag_whitespace, " " } });
+    try testTokenizer(.{}, "lt", &.{ .{ .ref_dtd, .tag_token, "lt" }, .{ .ref_dtd, .invalid_reference_end, null }, .{ .dtd, .eof, null } });
+    try testTokenizer(.{}, "lt;", &.{ .{ .ref_dtd, .tag_token, "lt" }, .{ .ref_dtd, .semicolon, null }, .{ .dtd, .eof, null } });
+    // TODO: more exhaustive testing of invariants
 }
 
-test "Tokenizer Comments" {
-    var tokenizer: CheckedTokenizer = undefined;
-
-    tokenizer = CheckedTokenizer.initComplete("<!--" ++ "-->");
-    try tokenizer.expectNextType(.comment_start);
-    try tokenizer.expectNextType(.comment_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!--" ++ "-" ++ "-->");
-    try tokenizer.expectNextType(.comment_start);
-    try tokenizer.expectNextType(.invalid_comment_end_triple_dash);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!--" ++ "--" ++ "-->");
-    try tokenizer.expectNextType(.comment_start);
-    try tokenizer.expectNextType(.invalid_comment_dash_dash);
-    try tokenizer.expectNextType(.comment_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!--" ++ "--" ++ "-" ++ "-->");
-    try tokenizer.expectNextType(.comment_start);
-    try tokenizer.expectNextType(.invalid_comment_dash_dash);
-    try tokenizer.expectNextType(.invalid_comment_end_triple_dash);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!-- <foo bar> -->");
-    try tokenizer.expectNextType(.comment_start);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ " <foo bar> ", null });
-    try tokenizer.expectNextType(.comment_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("<!--");
-    try tokenizer.expectNextType(.comment_start);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput("--");
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput(">");
-    try tokenizer.expectNextType(.comment_end);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("<");
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput("!");
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput("-");
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput("-");
-    try tokenizer.expectNextType(.comment_start);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput("-");
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput("-");
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput(">");
-    try tokenizer.expectNextType(.comment_end);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("<!--");
-    try tokenizer.expectNextType(.comment_start);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput("--a");
-    try tokenizer.expectNextType(.invalid_comment_dash_dash);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "a", error.BufferUnderrun });
-    tokenizer.feedInput("-->");
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.comment_end);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextType(.eof);
+test "Attribute Value" {
+    try testTokenizer(.{}, "\'", &.{.{ .attribute_value_single_quote, .quote_single, null }});
+    try testTokenizer(.{}, "\"", &.{.{ .attribute_value_double_quote, .quote_double, null }});
+    // TODO: more exhaustive testing of invariants
 }
 
-test "Tokenizer CDATA Sections" {
-    var tokenizer: CheckedTokenizer = undefined;
-
-    tokenizer = CheckedTokenizer.initComplete("<![CDATA[" ++ "]]>");
-    try tokenizer.expectNextType(.cdata_start);
-    try tokenizer.expectNextType(.cdata_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<![CDATA[" ++ " foo " ++ "]]>");
-    try tokenizer.expectNextType(.cdata_start);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ " foo ", null });
-    try tokenizer.expectNextType(.cdata_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<![CDATA[" ++ "]]" ++ "]]>");
-    try tokenizer.expectNextType(.cdata_start);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "]", "]", null });
-    try tokenizer.expectNextType(.cdata_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<![CDATA[" ++ "]" ++ "]]" ++ "]]>");
-    try tokenizer.expectNextType(.cdata_start);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "]", "]", "]", null });
-    try tokenizer.expectNextType(.cdata_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<![CDATA[" ++ "]>" ++ "]]>");
-    try tokenizer.expectNextType(.cdata_start);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "]", ">", null });
-    try tokenizer.expectNextType(.cdata_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    for ("<![CDATA[") |c| {
-        try tokenizer.expectNextType(error.BufferUnderrun);
-        tokenizer.feedInput(&.{c});
-    }
-    try tokenizer.expectNextType(.cdata_start);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput("foo");
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "foo", error.BufferUnderrun });
-    try tokenizer.expectNextString(error.BufferUnderrun);
-    tokenizer.feedInput("]]");
-    try tokenizer.expectNextString(error.BufferUnderrun);
-    tokenizer.feedInput("]");
-    try tokenizer.expectNextString("]");
-    try tokenizer.expectNextString(error.BufferUnderrun);
-    tokenizer.feedInput("]]]");
-    try tokenizer.expectNextStringSeq(&.{ "]", "]", "]", error.BufferUnderrun }); // from the first to `feedInput`s, not the latest one
-    tokenizer.feedInput(">");
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.cdata_end);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextType(.eof);
+test "Element tags" {
+    try testTokenizer(.{}, "/foo/bar/>", &.{
+        .{ .element_tag, .slash, null },
+        .{ .element_tag, .tag_token, "foo" },
+        .{ .element_tag, .slash, null },
+        .{ .element_tag, .tag_token, "bar" },
+        .{ .element_tag, .slash, null },
+        .{ .element_tag, .angle_bracket_right, null },
+    });
 }
 
-test "Tokenizer Character/Entity References" {
-    var tokenizer: CheckedTokenizer = undefined;
+test "CDATA" {
+    try testTokenizer(.{}, "<![CDATA[", &.{.{ .non_markup, .cdata_start, null }});
+    try testTokenizer(.{}, "]]>", &.{.{ .non_markup, .cdata_end, null }}); // invalid token in textual data
+    try testTokenizer(.{}, "<![CDATA", &.{
+        .{ .non_markup, .invalid_cdata_start, "<![CDATA" },
+    });
 
-    tokenizer = CheckedTokenizer.initComplete("&abc;");
-    try tokenizer.expectNextType(.ampersand);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "abc", null });
-    try tokenizer.expectNextType(.semicolon);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("&;");
-    try tokenizer.expectNextType(.ampersand);
-    try tokenizer.expectNextType(.semicolon);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("&");
-    try tokenizer.expectNextType(.ampersand);
-    try tokenizer.expectNextType(.invalid_reference_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("&foo");
-    try tokenizer.expectNextType(.ampersand);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextType(.invalid_reference_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("&foo ");
-    try tokenizer.expectNextType(.ampersand);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextType(.invalid_reference_end);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ " ", null });
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("&");
-    try tokenizer.expectNextType(.ampersand);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput(";");
-    try tokenizer.expectNextType(.semicolon);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("&");
-    try tokenizer.expectNextType(.ampersand);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput("foo");
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", error.BufferUnderrun });
-    tokenizer.feedInput("bar");
-    try tokenizer.expectNextStringSeq(&.{ "bar", error.BufferUnderrun });
-    tokenizer.feedEof();
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.invalid_reference_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("&");
-    try tokenizer.expectNextType(.ampersand);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput("foo");
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", error.BufferUnderrun });
-    tokenizer.feedInput("bar");
-    try tokenizer.expectNextStringSeq(&.{ "bar", error.BufferUnderrun });
-    tokenizer.feedInput(";");
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.semicolon);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("&");
-    try tokenizer.expectNextType(.ampersand);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput("foo");
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", error.BufferUnderrun });
-    tokenizer.feedInput("bar");
-    try tokenizer.expectNextStringSeq(&.{ "bar", error.BufferUnderrun });
-    tokenizer.feedInput(" ");
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.invalid_reference_end);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ " ", error.BufferUnderrun });
-    tokenizer.feedEof();
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.eof);
+    try testTokenizer(.{}, "]]>", &.{
+        .{ .cdata, .cdata_end, null },
+    });
+    try testTokenizer(.{}, "]]]>", &.{
+        .{ .cdata, .text_data, "]" },
+        .{ .cdata, .cdata_end, null },
+    });
+    try testTokenizer(.{}, "] ]]>", &.{
+        .{ .cdata, .text_data, "] " },
+        .{ .cdata, .cdata_end, null },
+    });
+    try testTokenizer(.{}, "]>]]>", &.{
+        .{ .cdata, .text_data, "]>" },
+        .{ .cdata, .cdata_end, null },
+    });
+    try testTokenizer(.{}, "]>", &.{
+        .{ .cdata, .text_data, "]>" },
+    });
+    try testTokenizer(.{}, "]>]]", &.{
+        .{ .cdata, .text_data, "]>]]" },
+    });
+    try testTokenizer(.{}, " stuff ]] >]]]>", &.{
+        .{ .cdata, .text_data, " stuff ]] >]" },
+        .{ .cdata, .cdata_end, null },
+    });
 }
 
-test "Tokenizer Text Data" {
-    var tokenizer: CheckedTokenizer = undefined;
+test "PI" {
+    try testTokenizer(.{}, "<?", &.{.{ .non_markup, .pi_start, null }});
+    try testTokenizer(.{}, "<?", &.{.{ .dtd, .pi_start, null }});
+    try testTokenizer(.{}, "?>", &.{.{ .pi, .pi_end, null }});
 
-    tokenizer = CheckedTokenizer.initComplete("");
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedEof();
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("foo bar");
-    try tokenizer.expectNextType(.text_data);
-    try tokenizer.expectNextString("foo bar");
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("foo bar");
-    try tokenizer.expectNextType(.text_data);
-    try tokenizer.expectNextString("foo bar");
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("foo");
-    try tokenizer.expectNextType(.text_data);
-    try tokenizer.expectNextString("foo");
-    try tokenizer.expectNextString(error.BufferUnderrun);
-    tokenizer.feedInput(" bar");
-    try tokenizer.expectNextString(" bar");
-    try tokenizer.expectNextString(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("]]>");
-    try tokenizer.expectNextType(.cdata_end);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("]]>");
-    try tokenizer.expectNextType(.cdata_end);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput("foo");
-    try tokenizer.expectNextType(.text_data);
-    try tokenizer.expectNextString("foo");
-    try tokenizer.expectNextString(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("foo]]> bar");
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "foo", null });
-    try tokenizer.expectNextType(.cdata_end);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ " bar", null });
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("]");
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "]", null });
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("]]");
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "]]", null });
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("]]>");
-    try tokenizer.expectNextType(.cdata_end);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextType(.eof);
+    try testTokenizer(.{}, "?", &.{
+        .{ .pi, .text_data, "?" },
+    });
+    try testTokenizer(.{}, "? >", &.{
+        .{ .pi, .text_data, "? >" },
+    });
+    try testTokenizer(.{}, " ? >", &.{
+        .{ .pi, .text_data, " ? >" },
+    });
+    try testTokenizer(.{}, "??>", &.{
+        .{ .pi, .text_data, "?" },
+        .{ .pi, .pi_end, null },
+    });
+    try testTokenizer(.{}, ">??>", &.{
+        .{ .pi, .text_data, ">?" },
+        .{ .pi, .pi_end, null },
+    });
+    try testTokenizer(.{}, "xml version=\"1.0\" encoding=\"UTF-8\"?>", &.{
+        .{ .pi, .text_data, "xml version=\"1.0\" encoding=\"UTF-8\"" },
+        .{ .pi, .pi_end, null },
+    });
 }
 
-test "Tokenizer Element Closing Tags" {
-    var tokenizer: CheckedTokenizer = undefined;
+test "Comment" {
+    try testTokenizer(.{}, "<!--", &.{.{ .non_markup, .comment_start, null }});
+    try testTokenizer(.{}, "<!--", &.{.{ .dtd, .comment_start, null }});
+    try testTokenizer(.{}, "<!-", &.{.{ .non_markup, .invalid_comment_start_single_dash, null }});
+    try testTokenizer(.{}, "<!-", &.{.{ .dtd, .invalid_comment_start_single_dash, null }});
+    try testTokenizer(.{}, "-->", &.{.{ .comment, .comment_end, null }});
 
-    tokenizer = CheckedTokenizer.initComplete("</foo>");
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextType(.slash);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("</foo >");
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextType(.slash);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("</ >");
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextType(.slash);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("</>");
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextType(.slash);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
+    try testTokenizer(.{}, "--", &.{.{ .comment, .invalid_comment_dash_dash, null }});
+    try testTokenizer(.{}, "--->", &.{.{ .comment, .invalid_comment_end_triple_dash, null }});
+    try testTokenizer(.{}, " - ->", &.{.{ .comment, .text_data, " - ->" }});
+    try testTokenizer(.{}, "foo-bar -- -->", &.{
+        .{ .comment, .text_data, "foo-bar " },
+        .{ .comment, .invalid_comment_dash_dash, null },
+        .{ .comment, .text_data, " " },
+        .{ .comment, .comment_end, null },
+    });
 }
 
-test "Tokenizer Element Opening Tags" {
-    var tokenizer: CheckedTokenizer = undefined;
+test "DTD" {
+    try testTokenizer(.{}, "<!DOCTYPE", &.{.{ .non_markup, .dtd_start, null }});
+    try testTokenizer(.{}, "<!DOCTY", &.{.{ .non_markup, .invalid_dtd_start, "<!DOCTY" }});
+    try testTokenizer(.{}, "<!DOCTYPEE", &.{.{ .non_markup, .invalid_dtd_start, "<!DOCTYPEE" }});
+    try testTokenizer(.{}, "<!DOCTYPEE>", &.{
+        .{ .non_markup, .invalid_dtd_start, "<!DOCTYPEE" },
+        .{ .dtd, .angle_bracket_right, null },
+    });
 
-    tokenizer = CheckedTokenizer.initComplete("<");
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextType(.eof);
+    try testTokenizer(.{}, "<!ENTITY> <!ATTLIST> <!ELEMENT> <!NOTATION> <!EEEE> >", &.{
+        .{ .dtd, .dtd_decl, "<!ENTITY" },
+        .{ .dtd, .angle_bracket_right, null },
+        .{ .dtd, .tag_whitespace, " " },
 
-    tokenizer = CheckedTokenizer.initComplete("<foo  />");
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ "  ", null });
-    try tokenizer.expectNextType(.slash);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
+        .{ .dtd, .dtd_decl, "<!ATTLIST" },
+        .{ .dtd, .angle_bracket_right, null },
+        .{ .dtd, .tag_whitespace, " " },
 
-    tokenizer = CheckedTokenizer.initComplete("<foo  >");
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ "  ", null });
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
+        .{ .dtd, .dtd_decl, "<!ELEMENT" },
+        .{ .dtd, .angle_bracket_right, null },
+        .{ .dtd, .tag_whitespace, " " },
 
-    tokenizer = CheckedTokenizer.initComplete("<foo  / >");
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ "  ", null });
-    try tokenizer.expectNextType(.slash);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
+        .{ .dtd, .dtd_decl, "<!NOTATION" },
+        .{ .dtd, .angle_bracket_right, null },
+        .{ .dtd, .tag_whitespace, " " },
 
-    tokenizer = CheckedTokenizer.initComplete("<foo bar='fizz'>");
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "bar", null });
-    try tokenizer.expectNextType(.equals);
-    try tokenizer.expectNextType(.quote_single);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "fizz", null });
-    try tokenizer.expectNextType(.quote_single);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
+        .{ .dtd, .dtd_decl, "<!EEEE" },
+        .{ .dtd, .angle_bracket_right, null },
+        .{ .dtd, .tag_whitespace, " " },
 
-    tokenizer = CheckedTokenizer.initComplete("<foo bar = 'fizz' >");
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "bar", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.equals);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.quote_single);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "fizz", null });
-    try tokenizer.expectNextType(.quote_single);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
+        .{ .dtd, .angle_bracket_right, null },
+    });
 
-    tokenizer = CheckedTokenizer.initComplete("<foo bar=\"fizz\">");
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "bar", null });
-    try tokenizer.expectNextType(.equals);
-    try tokenizer.expectNextType(.quote_double);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "fizz", null });
-    try tokenizer.expectNextType(.quote_double);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<foo bar='&baz;'>");
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "bar", null });
-    try tokenizer.expectNextType(.equals);
-    try tokenizer.expectNextType(.quote_single);
-    try tokenizer.expectNextType(.ampersand);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "baz", null });
-    try tokenizer.expectNextType(.semicolon);
-    try tokenizer.expectNextType(.quote_single);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<foo  bar='fizz&baz;buzz'>");
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ "  ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "bar", null });
-    try tokenizer.expectNextType(.equals);
-    try tokenizer.expectNextType(.quote_single);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "fizz", null });
-    try tokenizer.expectNextType(.ampersand);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "baz", null });
-    try tokenizer.expectNextType(.semicolon);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "buzz", null });
-    try tokenizer.expectNextType(.quote_single);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("<fo");
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "fo", error.BufferUnderrun });
-    tokenizer.feedInput("o  ba");
-    try tokenizer.expectNextStringSeq(&.{ "o", null });
-
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ "  ", null });
-
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "ba", error.BufferUnderrun });
-    tokenizer.feedInput("r='fi");
-    try tokenizer.expectNextStringSeq(&.{ "r", null });
-
-    try tokenizer.expectNextType(.equals);
-
-    try tokenizer.expectNextType(.quote_single);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "fi", error.BufferUnderrun });
-    tokenizer.feedInput("zz&ba");
-    try tokenizer.expectNextStringSeq(&.{ "zz", null });
-
-    try tokenizer.expectNextType(.ampersand);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "ba", error.BufferUnderrun });
-    try tokenizer.expectNextString(error.BufferUnderrun);
-    tokenizer.feedInput("z;bu");
-    try tokenizer.expectNextStringSeq(&.{ "z", null });
-    try tokenizer.expectNextType(.semicolon);
-
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "bu", error.BufferUnderrun });
-    tokenizer.feedInput("zz'");
-    try tokenizer.expectNextStringSeq(&.{ "zz", null });
-    try tokenizer.expectNextType(.quote_single);
-
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput(">");
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedEof();
-    try tokenizer.expectNextType(.eof);
+    try testTokenizer(.{}, "<!ENTITYYY", &.{.{ .dtd, .dtd_decl, "<!ENTITYYY" }});
+    try testTokenizer(.{}, "()?*+|,%;[]", &.{
+        .{ .dtd, .lparen, null },
+        .{ .dtd, .rparen, null },
+        .{ .dtd, .qmark, null },
+        .{ .dtd, .asterisk, null },
+        .{ .dtd, .plus, null },
+        .{ .dtd, .pipe, null },
+        .{ .dtd, .comma, null },
+        .{ .dtd, .percent, null },
+        .{ .dtd, .semicolon, null },
+        .{ .dtd, .square_bracket_left, null },
+        .{ .dtd, .square_bracket_right, null },
+    });
 }
 
-test "Tokenizer Document Type Definition" {
-    var tokenizer: CheckedTokenizer = undefined;
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE>");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPEfoo");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initStreaming();
-    tokenizer.feedInput("<!DOCTYPEfoo");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", error.BufferUnderrun });
-    tokenizer.feedEof();
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE foo SYSTEM 'bar");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "SYSTEM", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.quote_single);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "bar", null });
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE foo SYSTEM 'bar' >");
-    try tokenizer.expectNextType(.dtd_start);
-
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "SYSTEM", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-
-    try tokenizer.expectNextType(.quote_single);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "bar", null });
-    try tokenizer.expectNextType(.quote_single);
-
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE []>");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.square_bracket_left);
-    try tokenizer.expectNextType(.square_bracket_right);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE [ asdf ]>");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.square_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "asdf", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.square_bracket_right);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE [ asdf%foo; ]>");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.square_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "asdf", null });
-    try tokenizer.expectNextType(.percent);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextType(.semicolon);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.square_bracket_right);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE foo PUBLIC 'bar' [\n\n] >");
-    try tokenizer.expectNextType(.dtd_start);
-
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "PUBLIC", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-
-    try tokenizer.expectNextType(.quote_single);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "bar", null });
-    try tokenizer.expectNextType(.quote_single);
-
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-
-    try tokenizer.expectNextType(.square_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ "\n\n", null });
-    try tokenizer.expectNextType(.square_bracket_right);
-
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete(
-        \\<!DOCTYPE [%foo;]>
-    );
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.square_bracket_left);
-    try tokenizer.expectNextType(.percent);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextType(.semicolon);
-    try tokenizer.expectNextType(.square_bracket_right);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete(
-        \\<!DOCTYPE 'fizz buzz'>
-    );
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.quote_single);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "fizz buzz", null });
-    try tokenizer.expectNextType(.quote_single);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE[<??>]>");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextType(.square_bracket_left);
-    try tokenizer.expectNextType(.pi_start);
-    try tokenizer.expectNextType(.pi_end);
-    try tokenizer.expectNextType(.square_bracket_right);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE[<?fizz buzz?>]>");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextType(.square_bracket_left);
-    try tokenizer.expectNextType(.pi_start);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "fizz buzz", null });
-    try tokenizer.expectNextType(.pi_end);
-    try tokenizer.expectNextType(.square_bracket_right);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE[<!--fizz buzz-->]>");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextType(.square_bracket_left);
-    try tokenizer.expectNextType(.comment_start);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "fizz buzz", null });
-    try tokenizer.expectNextType(.comment_end);
-    try tokenizer.expectNextType(.square_bracket_right);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE[<!---->]>");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextType(.square_bracket_left);
-    try tokenizer.expectNextType(.comment_start);
-    try tokenizer.expectNextType(.comment_end);
-    try tokenizer.expectNextType(.square_bracket_right);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete(
-        \\<!DOCTYPE [
-        \\  <!ELEMENT foo EMPTY>
-        \\]>
-    );
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.square_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ "\n  ", null });
-    try tokenizer.expectNextType(.element_decl);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "EMPTY", null });
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ "\n", null });
-    try tokenizer.expectNextType(.square_bracket_right);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete(
-        \\<!DOCTYPE[
-        \\  <!ELEMENT br EMPTY>
-        \\  <!ELEMENT p (#PCDATA|emph)* >
-        \\  <!ELEMENT %name.para; %content.para; >
-        \\]>
-        \\
-    );
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextType(.square_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ "\n  ", null });
-
-    try tokenizer.expectNextType(.element_decl);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "br", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "EMPTY", null });
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ "\n  ", null });
-
-    try tokenizer.expectNextType(.element_decl);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "p", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.lparen);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "#PCDATA", null });
-    try tokenizer.expectNextType(.pipe);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "emph", null });
-    try tokenizer.expectNextType(.rparen);
-    try tokenizer.expectNextType(.asterisk);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ "\n  ", null });
-
-    try tokenizer.expectNextType(.element_decl);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.percent);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "name.para", null });
-    try tokenizer.expectNextType(.semicolon);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.percent);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "content.para", null });
-    try tokenizer.expectNextType(.semicolon);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ "\n", null });
-
-    try tokenizer.expectNextType(.square_bracket_right);
-    try tokenizer.expectNextType(.angle_bracket_right);
-
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "\n", null });
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE[<!ENTITY% >]>");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextType(.square_bracket_left);
-    try tokenizer.expectNextType(.entity_decl);
-    try tokenizer.expectNextType(.percent);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.square_bracket_right);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE[<!ENTITY%>]>");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextType(.square_bracket_left);
-    try tokenizer.expectNextType(.entity_decl);
-    try tokenizer.expectNextType(.percent);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.square_bracket_right);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE[<!ENTITY %>]>");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextType(.square_bracket_left);
-    try tokenizer.expectNextType(.entity_decl);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.percent);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.square_bracket_right);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete(
-        \\<!DOCTYPE[
-        \\  <!ENTITY copyright "Copyright &#169;2005 Test Name.">
-        \\  <!ENTITY % autoelems "year, make, model">
-        \\]>
-    );
-
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextType(.square_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ "\n  ", null });
-
-    try tokenizer.expectNextType(.entity_decl);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "copyright", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.quote_double);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "Copyright &#169;2005 Test Name.", null });
-    try tokenizer.expectNextType(.quote_double);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ "\n  ", null });
-
-    try tokenizer.expectNextType(.entity_decl);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.percent);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "autoelems", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.quote_double);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "year, make, model", null });
-    try tokenizer.expectNextType(.quote_double);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ "\n", null });
-
-    try tokenizer.expectNextType(.square_bracket_right);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPR a");
-    try tokenizer.expectNextTypeStringSeq(.invalid_dtd_start, &.{ "<!DOCTYP", "R", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "a", null });
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE <!> > ");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.invalid_angle_bracket_left_bang);
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ " ", null });
-    try tokenizer.expectNextType(.eof);
-
-    tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE<!EL>foo");
-    try tokenizer.expectNextType(.dtd_start);
-    try tokenizer.expectNextTypeStringSeq(.invalid_decl, &.{ "<!EL", null });
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-    try tokenizer.expectNextType(.eof);
-
-    inline for (.{
-        .{ "<!", .invalid_angle_bracket_left_bang },
-        .{ "<!ELEMENT", .element_decl },
-        .{ "<!ENTITY", .entity_decl },
-        .{ "<!ATTLIST", .attlist_decl },
-        .{ "<!NOTATION", .notation_decl },
-    }) |values| {
-        const decl_src: []const u8, const expected_decl_tt: TokenType = values;
-
-        tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE" ++ decl_src ++ "]>foo");
-        try tokenizer.expectNextType(.dtd_start);
-        try tokenizer.expectNextType(expected_decl_tt);
-        try tokenizer.expectNextType(.square_bracket_right);
-        try tokenizer.expectNextType(.angle_bracket_right);
-        try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "foo", null });
-        try tokenizer.expectNextType(.eof);
-
-        tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE" ++ decl_src ++ ">]foo");
-        try tokenizer.expectNextType(.dtd_start);
-        try tokenizer.expectNextType(expected_decl_tt);
-        try tokenizer.expectNextType(.angle_bracket_right);
-        try tokenizer.expectNextType(.square_bracket_right);
-        try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-        try tokenizer.expectNextType(.eof);
-
-        tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE" ++ decl_src ++ "<!>]foo");
-        try tokenizer.expectNextType(.dtd_start);
-        try tokenizer.expectNextType(expected_decl_tt);
-        try tokenizer.expectNextType(.invalid_angle_bracket_left_bang);
-        try tokenizer.expectNextType(.angle_bracket_right);
-        try tokenizer.expectNextType(.square_bracket_right);
-        try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "foo", null });
-        try tokenizer.expectNextType(.eof);
-
-        tokenizer = CheckedTokenizer.initComplete("<!DOCTYPE" ++ decl_src);
-        try tokenizer.expectNextType(.dtd_start);
-        try tokenizer.expectNextType(expected_decl_tt);
-        try tokenizer.expectNextType(.eof);
-    }
+test "SystemLiteral" {
+    try testTokenizer(.{}, "\'", &.{.{ .system_literal_quote_single, .quote_single, null }});
+    try testTokenizer(.{}, "\"", &.{.{ .system_literal_quote_double, .quote_double, null }});
+    try testTokenizer(.{}, "\"", &.{.{ .system_literal_quote_single, .text_data, "\"" }});
+    try testTokenizer(.{}, "\'", &.{.{ .system_literal_quote_double, .text_data, "\'" }});
+    try testTokenizer(.{}, "foo bar\"\'", &.{
+        .{ .system_literal_quote_single, .text_data, "foo bar\"" },
+        .{ .system_literal_quote_single, .quote_single, null },
+    });
+    try testTokenizer(.{}, "foo bar\'\"", &.{
+        .{ .system_literal_quote_double, .text_data, "foo bar\'" },
+        .{ .system_literal_quote_double, .quote_double, null },
+    });
 }
 
-test Tokenizer {
-    var feeder = std.mem.window(u8,
+test "General Test" {
+    try testTokenizer(
+        .{},
         \\<?xml version="1.0" encoding="UTF-8"?>
+        \\
+        \\]]>
+        \\
+        \\ <!-- commented -- -->
+        \\ <!-- commented -- --->
         \\
         \\<foo>
         \\  Lorem ipsum
         \\  <bar fizz='buzz'><baz/></bar>
+        \\<![CDATA[ stuff ]] >]]]>
         \\</foo>
         \\
-    , 2, 2);
+    ,
+        &[_]struct { Context, TokenType, ?[]const u8 }{
+            .{ .non_markup, .pi_start, null },
+            .{ .pi, .text_data, "xml version=\"1.0\" encoding=\"UTF-8\"" },
+            .{ .pi, .pi_end, null },
 
-    var tokenizer = CheckedTokenizer.initStreaming();
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextType(.pi_start);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextType(.text_data);
-    for ([_][]const u8{
-        "xm", "l ", "ve", "rs", "io", "n=", "\"1", ".0", "\" ", "en", "co", "di", "ng", "=\"", "UT", "F-", "8\"",
-    }) |expected| {
-        try tokenizer.expectNextStringSeq(&.{ expected, error.BufferUnderrun });
-        tokenizer.feedInput(feeder.next().?);
-    }
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.pi_end);
+            .{ .non_markup, .text_data, "\n\n" },
 
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "\n\n", error.BufferUnderrun });
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextString(null);
+            .{ .non_markup, .cdata_end, null },
 
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "f", error.BufferUnderrun });
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextStringSeq(&.{ "oo", error.BufferUnderrun });
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.angle_bracket_right);
+            .{ .non_markup, .text_data, "\n\n " },
 
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "\n", error.BufferUnderrun });
+            .{ .non_markup, .comment_start, null },
+            .{ .comment, .text_data, " commented " },
+            .{ .comment, .invalid_comment_dash_dash, null },
+            .{ .comment, .text_data, " " },
+            .{ .comment, .comment_end, null },
 
-    for (comptime &[_]*const [2:0]u8{
-        "  ", "Lo", "re", "m ", "ip", "su", "m\n", "  ",
-    }) |expected| {
-        tokenizer.feedInput(feeder.next().?);
-        try tokenizer.expectNextString(expected);
-    }
-    try tokenizer.expectNextString(error.BufferUnderrun);
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextString(null);
+            .{ .non_markup, .text_data, "\n " },
 
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "b", error.BufferUnderrun });
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextStringSeq(&.{ "ar", error.BufferUnderrun });
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextString(null);
+            .{ .non_markup, .comment_start, null },
+            .{ .comment, .text_data, " commented " },
+            .{ .comment, .invalid_comment_dash_dash, null },
+            .{ .comment, .text_data, " " },
+            .{ .comment, .invalid_comment_end_triple_dash, null },
 
-    try tokenizer.expectNextTypeStringSeq(.tag_whitespace, &.{ " ", null });
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "f", error.BufferUnderrun });
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextStringSeq(&.{ "iz", error.BufferUnderrun });
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextStringSeq(&.{ "z", null });
+            .{ .non_markup, .text_data, "\n\n" },
 
-    try tokenizer.expectNextType(.equals);
+            .{ .non_markup, .angle_bracket_left, null },
+            .{ .element_tag, .tag_token, "foo" },
+            .{ .element_tag, .angle_bracket_right, null },
+            .{ .non_markup, .text_data, "\n  Lorem ipsum\n  " },
 
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextType(.quote_single);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "b", error.BufferUnderrun });
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextStringSeq(&.{ "uz", error.BufferUnderrun });
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextStringSeq(&.{ "z", null });
-    try tokenizer.expectNextType(.quote_single);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextType(.angle_bracket_right);
+            .{ .non_markup, .angle_bracket_left, null },
+            .{ .element_tag, .tag_token, "bar" },
+            .{ .element_tag, .tag_whitespace, " " },
+            .{ .element_tag, .tag_token, "fizz" },
+            .{ .element_tag, .equals, null },
+            .{ .element_tag, .quote_single, null },
+            .{ .attribute_value_single_quote, .text_data, "buzz" },
+            .{ .attribute_value_single_quote, .quote_single, null },
+            .{ .element_tag, .angle_bracket_right, null },
 
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "ba", error.BufferUnderrun });
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextStringSeq(&.{ "z", null });
-    try tokenizer.expectNextType(.slash);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextType(.angle_bracket_right);
+            .{ .non_markup, .angle_bracket_left, null },
+            .{ .element_tag, .tag_token, "baz" },
+            .{ .element_tag, .slash, null },
+            .{ .element_tag, .angle_bracket_right, null },
 
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextType(.slash);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "b", error.BufferUnderrun });
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextStringSeq(&.{ "ar", error.BufferUnderrun });
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextString(null);
+            .{ .non_markup, .angle_bracket_left, null },
+            .{ .element_tag, .slash, null },
+            .{ .element_tag, .tag_token, "bar" },
+            .{ .element_tag, .angle_bracket_right, null },
 
-    try tokenizer.expectNextType(.angle_bracket_right);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "\n", error.BufferUnderrun });
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextString(null);
+            .{ .non_markup, .text_data, "\n" },
 
-    try tokenizer.expectNextType(.angle_bracket_left);
-    try tokenizer.expectNextType(.slash);
-    try tokenizer.expectNextType(error.BufferUnderrun);
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextTypeStringSeq(.tag_token, &.{ "fo", error.BufferUnderrun });
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextStringSeq(&.{ "o", null });
-    try tokenizer.expectNextType(.angle_bracket_right);
-    tokenizer.feedInput(feeder.next().?);
-    try tokenizer.expectNextTypeStringSeq(.text_data, &.{ "\n", error.BufferUnderrun });
-    tokenizer.feedEof();
-    try tokenizer.expectNextString(null);
-    try tokenizer.expectNextType(.eof);
+            .{ .non_markup, .cdata_start, null },
+            .{ .cdata, .text_data, " stuff ]] >]" },
+            .{ .cdata, .cdata_end, null },
+
+            .{ .non_markup, .text_data, "\n" },
+
+            .{ .non_markup, .angle_bracket_left, null },
+            .{ .element_tag, .slash, null },
+            .{ .element_tag, .tag_token, "foo" },
+            .{ .element_tag, .angle_bracket_right, null },
+
+            .{ .non_markup, .text_data, "\n" },
+
+            .{ .non_markup, .eof, null },
+        },
+    );
 }
