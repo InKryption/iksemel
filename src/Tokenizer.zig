@@ -38,6 +38,8 @@ index: usize,
 state: State,
 eof_specified: bool,
 
+debug: Debug,
+
 /// Initializes the `Tokenizer` with the full input.
 /// Calling `feedInput` or `feedEof` is illegal.
 /// Treating `error.BufferUnderrun` as `unreachable` is safe.
@@ -56,6 +58,8 @@ pub inline fn initStreaming() Tokenizer {
         .index = 0,
         .state = .blank,
         .eof_specified = false,
+
+        .debug = .{},
     };
 }
 
@@ -75,6 +79,8 @@ pub fn feedEof(tokenizer: *Tokenizer) void {
 pub const BufferError = error{BufferUnderrun};
 
 pub const Context = enum {
+    // TODO: properly document what token types each of these contexts imply.
+
     non_markup,
 
     dtd,
@@ -84,14 +90,19 @@ pub const Context = enum {
     pi,
     cdata,
 
+    /// Should be used for both system literals and pubid literals, single quoted.
     system_literal_quote_single,
+    /// Same as `.system_literal_quote_single`, but double quoted.
     system_literal_quote_double,
 
-    attribute_value_single_quote,
-    attribute_value_double_quote,
+    attribute_value_quote_single,
+    attribute_value_quote_double,
+
+    entity_value_quote_single,
+    entity_value_quote_double,
 
     ref_text,
-    ref_attr,
+    ref_quoted,
     ref_dtd,
 };
 
@@ -155,8 +166,6 @@ pub const TokenType = enum(u8) {
     /// The way in which it is delimited from other data and its meaning are
     /// dependent on the context in which it's being scanned.
     tag_token,
-    /// Some form of contextually invalid token, not featuring whitespace.
-    invalid_token,
 
     /// The end of the XML source.
     /// This is the last token that will appear.
@@ -277,7 +286,6 @@ pub const TokenType = enum(u8) {
             .text_data,
             .tag_whitespace,
             .tag_token,
-            .invalid_token,
 
             .invalid_cdata_start,
             .invalid_dtd_start,
@@ -293,7 +301,6 @@ pub const TokenType = enum(u8) {
             .text_data => null,
             .tag_whitespace => null,
             .tag_token => null,
-            .invalid_token => null,
 
             .eof => null,
 
@@ -420,149 +427,20 @@ pub const whitespace_set: []const u8 = &[_]u8{
     '\u{0A}',
 };
 
-const ReturnType = enum {
-    type,
-    type_no_underrun,
-    src,
-    src_no_underrun,
-
-    fn Type(ret_type: ReturnType) type {
-        return switch (ret_type) {
-            .type => BufferError!TokenType,
-            .type_no_underrun => TokenType,
-            .src => BufferError!?TokenSrc,
-            .src_no_underrun => ?TokenSrc,
-        };
-    }
-};
-
 fn nextTypeOrSrcImpl(
     tokenizer: *Tokenizer,
     comptime context: Context,
-    comptime ret_type: ReturnType,
+    comptime ret_type: next_helper.ReturnType,
 ) ret_type.Type() {
-    const ret_kind: enum { type, src }, //
-    const assert_eof_specified: bool //
-    = comptime switch (ret_type) {
-        .type => .{ .type, false },
-        .src => .{ .src, false },
-        .type_no_underrun => .{ .type, true },
-        .src_no_underrun => .{ .src, true },
+    const ret_kind = comptime ret_type.kind();
+    const assert_eof_specified: bool = comptime switch (ret_type) {
+        .type, .src => false,
+        .type_no_underrun, .src_no_underrun => true,
     };
 
-    const helper = struct {
-        const helper = @This();
-
-        const dtd_terminal_characters = &[_]u8{
-            '[',  ']', '(', ')',
-            '?',  '*', '+', '|',
-            ',',  '%', ';', '\'',
-            '\"', '<', '>',
-        };
-
-        inline fn rangeInit(range_start: usize, range_end: usize) TokenSrc {
-            return .{ .range = .{ .start = range_start, .end = range_end } };
-        }
-        inline fn literalInit(literal: Literal) TokenSrc {
-            return .{ .literal = literal };
-        }
-
-        inline fn handlePossibleCdataEnd(
-            _tokenizer: *Tokenizer,
-            comptime state: State,
-        ) union(enum) { @"continue", @"return": ret_type.Type() } {
-            const src = _tokenizer.src;
-            return switch (state) {
-                .@"]" => switch (ret_kind) {
-                    .type => {
-                        if (_tokenizer.index == src.len) return .{ .@"return" = .text_data };
-                        if (src[_tokenizer.index] != ']') return .{ .@"return" = .text_data };
-                        _tokenizer.state = .@"]]";
-                        _tokenizer.index += 1;
-                        return .@"continue";
-                    },
-                    .src => {
-                        if (_tokenizer.index == src.len) {
-                            _tokenizer.state = .eof;
-                            return .{ .@"return" = helper.literalInit(.@"]") };
-                        }
-                        if (src[_tokenizer.index] != ']') {
-                            _tokenizer.state = .blank;
-                            return .{ .@"return" = helper.literalInit(.@"]") };
-                        }
-                        _tokenizer.state = .@"]]";
-                        _tokenizer.index += 1;
-                        return .@"continue";
-                    },
-                },
-                .@"]]" => switch (ret_kind) {
-                    .type => {
-                        if (_tokenizer.index == src.len) return .{ .@"return" = .text_data };
-                        switch (src[_tokenizer.index]) {
-                            '>' => {
-                                _tokenizer.state = .blank;
-                                _tokenizer.index += 1;
-                                return .{ .@"return" = .cdata_end };
-                            },
-                            ']' => return .{ .@"return" = .text_data },
-                            else => return .{ .@"return" = .text_data },
-                        }
-                    },
-                    .src => {
-                        if (_tokenizer.index == src.len) {
-                            _tokenizer.state = .eof;
-                            return .{ .@"return" = helper.literalInit(.@"]]") };
-                        }
-                        switch (src[_tokenizer.index]) {
-                            '>' => return .{ .@"return" = null },
-                            ']' => {
-                                const prev_str = "]]";
-                                if (_tokenizer.index >= prev_str.len) {
-                                    if (std.debug.runtime_safety) {
-                                        const prev_str_start = _tokenizer.index - prev_str.len;
-                                        assert(std.mem.eql(u8, prev_str, src[prev_str_start..][0..prev_str.len]));
-                                    }
-                                    // If the index is greater than the length of ']]', that means we have not been fed
-                                    // any input since encountering the first ']', meaning that `src[index - 2][0..3]` is
-                                    // equal to "]]]". If we're in streaming mode, this doesn't matter, as it is not legal
-                                    // to convert the `Literal` into a range; however, if we're in non-streaming mode, we
-                                    // must leave the tokenizer in a state which allows the caller to convert the returned
-                                    // `Literal` value into a range which accurately points at the first ']' character, and
-                                    // then return back to this state to continue checking if the ']]' sequence is followed
-                                    // by a '>' to form ']]>'.
-                                    // NOTE: we cannot limit this to `assert_eof_specified`, as the `*Stream` API could be
-                                    // used either equivalently to the `*NoUnderrun` API or during transition to the latter
-                                    // after `feedEof`.
-                                    // TODO: measure if limiting this to when `eof_specified` is true is worth the branch
-                                    // to avoid the future branch switch from `.@"]]]"` to `.@"]]"`.
-                                    _tokenizer.state = .@"]]]";
-                                    _tokenizer.index -= 1; // we move backwards one, so that the previous character is the first ']'.
-                                } else {
-                                    _tokenizer.index += 1;
-                                }
-                                return .{ .@"return" = helper.literalInit(.@"]") };
-                            },
-                            else => {
-                                _tokenizer.state = .blank;
-                                return .{ .@"return" = helper.literalInit(.@"]]") };
-                            },
-                        }
-                    },
-                },
-                .@"]]]" => switch (ret_kind) {
-                    .type => unreachable,
-                    .src => {
-                        // currently the index is just in front of the first ']', indexing the second ']',
-                        // so we move forwards two characters, to be just in front of the third ']'.
-                        assert(std.mem.eql(u8, src[_tokenizer.index - 1 ..][0.."]]]".len], "]]]"));
-                        _tokenizer.state = .@"]]";
-                        _tokenizer.index += 2;
-                        return .@"continue";
-                    },
-                },
-                else => comptime unreachable,
-            };
-        }
+    if (std.debug.runtime_safety) switch (ret_kind) {
+        .type => tokenizer.debug.expected_context = context,
+        .src => assert(context == tokenizer.debug.expected_context.?),
     };
 
     const src = tokenizer.src;
@@ -574,7 +452,7 @@ fn nextTypeOrSrcImpl(
         .src => null,
     };
 
-    return while (tokenizer.index != src.len or eof_specified) break switch (context) {
+    const result_or_err: ret_type.Type() = while (tokenizer.index != src.len or eof_specified) break switch (context) {
         .non_markup => switch (tokenizer.state) {
             .eof => break eof_result,
 
@@ -603,7 +481,7 @@ fn nextTypeOrSrcImpl(
                     const str_start = tokenizer.index;
                     const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, &[_]u8{ ']', '&', '<' }) orelse src.len;
                     tokenizer.index = str_end;
-                    if (str_start != str_end) break helper.rangeInit(str_start, str_end);
+                    if (str_start != str_end) break next_helper.rangeInit(str_start, str_end);
                     if (src[tokenizer.index] != ']') break null;
                     tokenizer.state = .@"]";
                     tokenizer.index += 1;
@@ -611,7 +489,7 @@ fn nextTypeOrSrcImpl(
                 },
             },
 
-            inline .@"]", .@"]]", .@"]]]" => |state| switch (helper.handlePossibleCdataEnd(tokenizer, state)) {
+            inline .@"]", .@"]]", .@"]]]" => |state| switch (next_helper.handlePossibleCdataEnd(tokenizer, state, ret_type)) {
                 .@"continue" => continue,
                 .@"return" => |result| break result,
             },
@@ -707,7 +585,7 @@ fn nextTypeOrSrcImpl(
                 },
                 .src => {
                     tokenizer.state = .angle_bracket_left_bang_invalid_tag_returned;
-                    return helper.literalInit(switch (tag) {
+                    break next_helper.literalInit(switch (tag) {
                         inline //
                         .@"<![",
                         .@"<![C",
@@ -750,7 +628,7 @@ fn nextTypeOrSrcImpl(
                 },
                 .src => {
                     tokenizer.state = .angle_bracket_left_bang_invalid_tag_returned;
-                    return helper.literalInit(switch (tag) {
+                    break next_helper.literalInit(switch (tag) {
                         inline //
                         .@"<!D",
                         .@"<!DO",
@@ -769,7 +647,7 @@ fn nextTypeOrSrcImpl(
                         tokenizer.state = .eof;
                         break .dtd_start;
                     }
-                    if (std.mem.indexOfScalar(u8, whitespace_set ++ helper.dtd_terminal_characters, src[tokenizer.index]) != null) {
+                    if (std.mem.indexOfScalar(u8, whitespace_set ++ next_helper.dtd_terminal_characters, src[tokenizer.index]) != null) {
                         tokenizer.state = .blank;
                         break .dtd_start;
                     }
@@ -777,7 +655,7 @@ fn nextTypeOrSrcImpl(
                 },
                 .src => {
                     tokenizer.state = .angle_bracket_left_bang_invalid_tag_returned;
-                    break helper.literalInit(.@"<!DOCTYPE");
+                    break next_helper.literalInit(.@"<!DOCTYPE");
                 },
             },
 
@@ -789,10 +667,10 @@ fn nextTypeOrSrcImpl(
                         break null;
                     }
                     const str_start = tokenizer.index;
-                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ helper.dtd_terminal_characters) orelse src.len;
+                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ next_helper.dtd_terminal_characters) orelse src.len;
                     tokenizer.index = str_end;
                     if (str_start != str_end) {
-                        break helper.rangeInit(str_start, str_end);
+                        break next_helper.rangeInit(str_start, str_end);
                     }
                     tokenizer.state = .blank;
                     break null;
@@ -825,7 +703,7 @@ fn nextTypeOrSrcImpl(
                                 '%' => .percent,
                                 ';' => .semicolon,
                                 '\'' => .quote_single,
-                                '\"' => .quote_single,
+                                '\"' => .quote_double,
                                 '[' => .square_bracket_left,
                                 ']' => .square_bracket_right,
                                 '>' => .angle_bracket_right,
@@ -851,10 +729,10 @@ fn nextTypeOrSrcImpl(
                         break null;
                     }
                     const str_start = tokenizer.index;
-                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ helper.dtd_terminal_characters) orelse src.len;
+                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ next_helper.dtd_terminal_characters) orelse src.len;
                     tokenizer.index = str_end;
                     if (str_start == str_end) break null;
-                    break helper.rangeInit(str_start, str_end);
+                    break next_helper.rangeInit(str_start, str_end);
                 },
             },
 
@@ -869,7 +747,7 @@ fn nextTypeOrSrcImpl(
                     const str_end = std.mem.indexOfNonePos(u8, src, tokenizer.index, whitespace_set) orelse src.len;
                     tokenizer.index = str_end;
                     if (str_start != str_end) {
-                        break helper.rangeInit(str_start, str_end);
+                        break next_helper.rangeInit(str_start, str_end);
                     }
                     tokenizer.state = .blank;
                     break null;
@@ -913,7 +791,7 @@ fn nextTypeOrSrcImpl(
                         tokenizer.index += 1;
                         continue;
                     }
-                    if (std.mem.indexOfScalar(u8, whitespace_set ++ helper.dtd_terminal_characters, src[tokenizer.index]) != null) {
+                    if (std.mem.indexOfScalar(u8, whitespace_set ++ next_helper.dtd_terminal_characters, src[tokenizer.index]) != null) {
                         tokenizer.state = .blank;
                         break .invalid_angle_bracket_left_bang;
                     }
@@ -943,7 +821,7 @@ fn nextTypeOrSrcImpl(
                 .type => unreachable,
                 .src => {
                     tokenizer.state = .blank; // fall through to the code for tokenizing tag_token
-                    break helper.literalInit(.@"<!");
+                    break next_helper.literalInit(.@"<!");
                 },
             },
 
@@ -985,7 +863,7 @@ fn nextTypeOrSrcImpl(
                     const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ &[_]u8{ '\'', '\"', '/', '=', '>' }) orelse src.len;
                     tokenizer.index = str_end;
                     if (str_start == str_end) break null;
-                    break helper.rangeInit(str_start, str_end);
+                    break next_helper.rangeInit(str_start, str_end);
                 },
             },
 
@@ -997,7 +875,7 @@ fn nextTypeOrSrcImpl(
                     const str_end = std.mem.indexOfNonePos(u8, src, tokenizer.index, whitespace_set) orelse src.len;
                     tokenizer.index = str_end;
                     if (str_start != str_end) {
-                        break helper.rangeInit(str_start, str_end);
+                        break next_helper.rangeInit(str_start, str_end);
                     }
                     tokenizer.state = .blank;
                     break null;
@@ -1032,7 +910,7 @@ fn nextTypeOrSrcImpl(
                     const str_end = std.mem.indexOfScalarPos(u8, src, tokenizer.index, '-') orelse src.len;
                     tokenizer.index = str_end;
                     if (str_start != str_end) {
-                        break helper.rangeInit(str_start, str_end);
+                        break next_helper.rangeInit(str_start, str_end);
                     }
                     if (src[tokenizer.index] == '-') {
                         tokenizer.state = .@"-";
@@ -1054,11 +932,11 @@ fn nextTypeOrSrcImpl(
                 .src => {
                     if (tokenizer.index == src.len) {
                         tokenizer.state = .eof;
-                        break helper.literalInit(.@"-");
+                        break next_helper.literalInit(.@"-");
                     }
                     if (src[tokenizer.index] != '-') {
                         tokenizer.state = .blank;
-                        break helper.literalInit(.@"-");
+                        break next_helper.literalInit(.@"-");
                     }
                     tokenizer.state = .@"--";
                     tokenizer.index += 1;
@@ -1152,7 +1030,7 @@ fn nextTypeOrSrcImpl(
                     const str_end = std.mem.indexOfScalarPos(u8, src, tokenizer.index, '?') orelse src.len;
                     tokenizer.index = str_end;
                     if (str_start != str_end) {
-                        break helper.rangeInit(str_start, str_end);
+                        break next_helper.rangeInit(str_start, str_end);
                     }
                     tokenizer.state = .@"?";
                     tokenizer.index += 1;
@@ -1171,11 +1049,11 @@ fn nextTypeOrSrcImpl(
                 .src => {
                     if (tokenizer.index == src.len) {
                         tokenizer.state = .blank;
-                        break helper.literalInit(.@"?");
+                        break next_helper.literalInit(.@"?");
                     }
                     if (src[tokenizer.index] != '>') {
                         tokenizer.state = .blank;
-                        break helper.literalInit(.@"?");
+                        break next_helper.literalInit(.@"?");
                     }
                     break null;
                 },
@@ -1208,7 +1086,7 @@ fn nextTypeOrSrcImpl(
                     const str_end = std.mem.indexOfScalarPos(u8, src, tokenizer.index, ']') orelse src.len;
                     tokenizer.index = str_end;
                     if (str_start != str_end) {
-                        break helper.rangeInit(str_start, str_end);
+                        break next_helper.rangeInit(str_start, str_end);
                     }
                     tokenizer.state = .@"]";
                     tokenizer.index += 1;
@@ -1216,7 +1094,7 @@ fn nextTypeOrSrcImpl(
                 },
             },
 
-            inline .@"]", .@"]]", .@"]]]" => |state| switch (helper.handlePossibleCdataEnd(tokenizer, state)) {
+            inline .@"]", .@"]]", .@"]]]" => |state| switch (next_helper.handlePossibleCdataEnd(tokenizer, state, ret_type)) {
                 .@"continue" => continue,
                 .@"return" => |result| break result,
             },
@@ -1258,13 +1136,16 @@ fn nextTypeOrSrcImpl(
                 const str_start = tokenizer.index;
                 const str_end = std.mem.indexOfScalarPos(u8, src, tokenizer.index, matching_quote_char) orelse src.len;
                 tokenizer.index = str_end;
-                if (str_start == str_end) return null;
-                break helper.rangeInit(str_start, str_end);
+                if (str_start == str_end) break null;
+                break next_helper.rangeInit(str_start, str_end);
             },
         },
 
-        .attribute_value_single_quote,
-        .attribute_value_double_quote,
+        .attribute_value_quote_single,
+        .attribute_value_quote_double,
+
+        .entity_value_quote_single,
+        .entity_value_quote_double,
         => |tag| switch (tokenizer.state) {
             .eof => break eof_result,
             .blank => switch (ret_kind) {
@@ -1277,38 +1158,44 @@ fn nextTypeOrSrcImpl(
                     const matching_quote_char: u8, //
                     const matching_quote_type: TokenType //
                     = comptime switch (tag) {
-                        .attribute_value_single_quote => .{ '\'', .quote_single },
-                        .attribute_value_double_quote => .{ '\"', .quote_double },
+                        .attribute_value_quote_single, .entity_value_quote_single => .{ '\'', .quote_single },
+                        .attribute_value_quote_double, .entity_value_quote_double => .{ '\"', .quote_double },
                         else => unreachable,
                     };
-                    switch (src[tokenizer.index]) {
-                        matching_quote_char => {
-                            tokenizer.index += 1;
-                            break matching_quote_type;
-                        },
-                        '&' => {
-                            tokenizer.index += 1;
-                            break .ampersand;
-                        },
-                        '<' => {
+                    if (src[tokenizer.index] == matching_quote_char) {
+                        tokenizer.index += 1;
+                        break matching_quote_type;
+                    }
+                    if (src[tokenizer.index] == '&') {
+                        tokenizer.index += 1;
+                        break .ampersand;
+                    }
+                    switch (tag) {
+                        .attribute_value_quote_single,
+                        .attribute_value_quote_double,
+                        => {},
+                        .entity_value_quote_single,
+                        .entity_value_quote_double,
+                        => if (src[tokenizer.index] == '<') {
                             tokenizer.index += 1;
                             break .angle_bracket_left;
                         },
-                        else => break .text_data,
+                        else => unreachable,
                     }
+                    break .text_data;
                 },
                 .src => {
                     if (tokenizer.index == src.len) break null;
                     const matching_quote_char: u8 = comptime switch (tag) {
-                        .attribute_value_single_quote => '\'',
-                        .attribute_value_double_quote => '\"',
+                        .attribute_value_quote_single, .entity_value_quote_single => '\'',
+                        .attribute_value_quote_double, .entity_value_quote_double => '\"',
                         else => unreachable,
                     };
                     const str_start = tokenizer.index;
                     const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, &[_]u8{ matching_quote_char, '&', '<' }) orelse src.len;
                     tokenizer.index = str_end;
                     if (str_start == str_end) break null;
-                    break helper.rangeInit(str_start, str_end);
+                    break next_helper.rangeInit(str_start, str_end);
                 },
             },
             else => unreachable,
@@ -1338,14 +1225,14 @@ fn nextTypeOrSrcImpl(
                     const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ &[_]u8{ ';', ']', '&', '<' }) orelse src.len;
                     tokenizer.index = str_end;
                     if (str_start != str_end) {
-                        break helper.rangeInit(str_start, str_end);
+                        break next_helper.rangeInit(str_start, str_end);
                     }
                     break null;
                 },
             },
             else => unreachable,
         },
-        .ref_attr => switch (tokenizer.state) {
+        .ref_quoted => switch (tokenizer.state) {
             .blank => switch (ret_kind) {
                 .type => {
                     if (tokenizer.index == src.len) {
@@ -1369,7 +1256,7 @@ fn nextTypeOrSrcImpl(
                     const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ &[_]u8{ '\'', '\"', '<', '&', ';' }) orelse src.len;
                     tokenizer.index = str_end;
                     if (str_start == str_end) break null;
-                    break helper.rangeInit(str_start, str_end);
+                    break next_helper.rangeInit(str_start, str_end);
                 },
             },
             else => unreachable,
@@ -1386,7 +1273,7 @@ fn nextTypeOrSrcImpl(
                         tokenizer.index += 1;
                         break .semicolon;
                     }
-                    if (std.mem.indexOfScalar(u8, whitespace_set ++ helper.dtd_terminal_characters ++ &[_]u8{'&'}, src[tokenizer.index]) != null) {
+                    if (std.mem.indexOfScalar(u8, whitespace_set ++ next_helper.dtd_terminal_characters ++ &[_]u8{'&'}, src[tokenizer.index]) != null) {
                         tokenizer.state = .blank;
                         break .invalid_reference_end;
                     }
@@ -1395,16 +1282,171 @@ fn nextTypeOrSrcImpl(
                 .src => {
                     if (tokenizer.index == src.len) break null;
                     const str_start = tokenizer.index;
-                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ helper.dtd_terminal_characters ++ &[_]u8{'&'}) orelse src.len;
+                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ next_helper.dtd_terminal_characters ++ &[_]u8{'&'}) orelse src.len;
                     tokenizer.index = str_end;
                     if (str_start == str_end) break null;
-                    break helper.rangeInit(str_start, str_end);
+                    break next_helper.rangeInit(str_start, str_end);
                 },
             },
             else => unreachable,
         },
     } else error.BufferUnderrun;
+
+    const result: switch (ret_kind) {
+        .type => TokenType,
+        .src => ?TokenSrc,
+    } = switch (assert_eof_specified) {
+        true => result_or_err,
+        false => try result_or_err,
+    };
+
+    if (std.debug.runtime_safety) switch (ret_kind) {
+        .type => {},
+        .src => if (result == null) {
+            tokenizer.debug.expected_context = null;
+        },
+    };
+
+    return result_or_err;
 }
+
+const next_helper = struct {
+    const dtd_terminal_characters = &[_]u8{
+        '[',  ']', '(', ')',
+        '?',  '*', '+', '|',
+        ',',  '%', ';', '\'',
+        '\"', '<', '>',
+    };
+
+    inline fn rangeInit(range_start: usize, range_end: usize) TokenSrc {
+        return .{ .range = .{ .start = range_start, .end = range_end } };
+    }
+    inline fn literalInit(literal: Literal) TokenSrc {
+        return .{ .literal = literal };
+    }
+
+    const ReturnType = enum {
+        type,
+        type_no_underrun,
+        src,
+        src_no_underrun,
+
+        const Kind = enum { type, src };
+        inline fn kind(ret_type: ReturnType) Kind {
+            return switch (ret_type) {
+                .type, .type_no_underrun => .type,
+                .src, .src_no_underrun => .src,
+            };
+        }
+
+        fn Type(ret_type: ReturnType) type {
+            return switch (ret_type) {
+                .type => BufferError!TokenType,
+                .type_no_underrun => TokenType,
+                .src => BufferError!?TokenSrc,
+                .src_no_underrun => ?TokenSrc,
+            };
+        }
+    };
+
+    fn handlePossibleCdataEnd(
+        _tokenizer: *Tokenizer,
+        comptime state: State,
+        comptime ret_type: ReturnType,
+    ) union(enum) { @"continue", @"return": ret_type.Type() } {
+        const src = _tokenizer.src;
+        return switch (state) {
+            .@"]" => switch (ret_type.kind()) {
+                .type => {
+                    if (_tokenizer.index == src.len) return .{ .@"return" = .text_data };
+                    if (src[_tokenizer.index] != ']') return .{ .@"return" = .text_data };
+                    _tokenizer.state = .@"]]";
+                    _tokenizer.index += 1;
+                    return .@"continue";
+                },
+                .src => {
+                    if (_tokenizer.index == src.len) {
+                        _tokenizer.state = .eof;
+                        return .{ .@"return" = literalInit(.@"]") };
+                    }
+                    if (src[_tokenizer.index] != ']') {
+                        _tokenizer.state = .blank;
+                        return .{ .@"return" = literalInit(.@"]") };
+                    }
+                    _tokenizer.state = .@"]]";
+                    _tokenizer.index += 1;
+                    return .@"continue";
+                },
+            },
+            .@"]]" => switch (ret_type.kind()) {
+                .type => {
+                    if (_tokenizer.index == src.len) return .{ .@"return" = .text_data };
+                    switch (src[_tokenizer.index]) {
+                        '>' => {
+                            _tokenizer.state = .blank;
+                            _tokenizer.index += 1;
+                            return .{ .@"return" = .cdata_end };
+                        },
+                        ']' => return .{ .@"return" = .text_data },
+                        else => return .{ .@"return" = .text_data },
+                    }
+                },
+                .src => {
+                    if (_tokenizer.index == src.len) {
+                        _tokenizer.state = .eof;
+                        return .{ .@"return" = literalInit(.@"]]") };
+                    }
+                    switch (src[_tokenizer.index]) {
+                        '>' => return .{ .@"return" = null },
+                        ']' => {
+                            const prev_str = "]]";
+                            if (_tokenizer.index >= prev_str.len) {
+                                if (std.debug.runtime_safety) {
+                                    const prev_str_start = _tokenizer.index - prev_str.len;
+                                    assert(std.mem.eql(u8, prev_str, src[prev_str_start..][0..prev_str.len]));
+                                }
+                                // If the index is greater than the length of ']]', that means we have not been fed
+                                // any input since encountering the first ']', meaning that `src[index - 2][0..3]` is
+                                // equal to "]]]". If we're in streaming mode, this doesn't matter, as it is not legal
+                                // to convert the `Literal` into a range; however, if we're in non-streaming mode, we
+                                // must leave the tokenizer in a state which allows the caller to convert the returned
+                                // `Literal` value into a range which accurately points at the first ']' character, and
+                                // then return back to this state to continue checking if the ']]' sequence is followed
+                                // by a '>' to form ']]>'.
+                                // NOTE: we cannot limit this to `assert_eof_specified`, as the `*Stream` API could be
+                                // used either equivalently to the `*NoUnderrun` API or during transition to the latter
+                                // after `feedEof`.
+                                // TODO: measure if limiting this to when `eof_specified` is true is worth the branch
+                                // to avoid the future branch switch from `.@"]]]"` to `.@"]]"`.
+                                _tokenizer.state = .@"]]]";
+                                _tokenizer.index -= 1; // we move backwards one, so that the previous character is the first ']'.
+                            } else {
+                                _tokenizer.index += 1;
+                            }
+                            return .{ .@"return" = literalInit(.@"]") };
+                        },
+                        else => {
+                            _tokenizer.state = .blank;
+                            return .{ .@"return" = literalInit(.@"]]") };
+                        },
+                    }
+                },
+            },
+            .@"]]]" => switch (ret_type.kind()) {
+                .type => unreachable,
+                .src => {
+                    // currently the index is just in front of the first ']', indexing the second ']',
+                    // so we move forwards two characters, to be just in front of the third ']'.
+                    assert(std.mem.eql(u8, src[_tokenizer.index - 1 ..][0.."]]]".len], "]]]"));
+                    _tokenizer.state = .@"]]";
+                    _tokenizer.index += 2;
+                    return .@"continue";
+                },
+            },
+            else => comptime unreachable,
+        };
+    }
+};
 
 const State = enum {
     eof,
@@ -1460,6 +1502,10 @@ const State = enum {
     @"&",
 
     @"?",
+};
+
+const Debug = struct {
+    expected_context: if (std.debug.runtime_safety) ?Context else ?noreturn = null,
 };
 
 fn testTokenizer(
@@ -1623,11 +1669,11 @@ test "Non-Markup" {
 
 test "References" {
     try testTokenizer(.{}, ";", &.{ .{ .ref_text, .semicolon, null }, .{ .non_markup, .eof, null } });
-    try testTokenizer(.{}, ";", &.{ .{ .ref_attr, .semicolon, null }, .{ .non_markup, .eof, null } });
+    try testTokenizer(.{}, ";", &.{ .{ .ref_quoted, .semicolon, null }, .{ .non_markup, .eof, null } });
     try testTokenizer(.{}, ";", &.{ .{ .ref_dtd, .semicolon, null }, .{ .non_markup, .eof, null } });
 
     try testTokenizer(.{}, " ", &.{ .{ .ref_text, .invalid_reference_end, null }, .{ .non_markup, .text_data, " " } });
-    try testTokenizer(.{}, " ", &.{ .{ .ref_attr, .invalid_reference_end, null }, .{ .attribute_value_single_quote, .text_data, " " } });
+    try testTokenizer(.{}, " ", &.{ .{ .ref_quoted, .invalid_reference_end, null }, .{ .attribute_value_quote_single, .text_data, " " } });
     try testTokenizer(.{}, " ", &.{ .{ .ref_dtd, .invalid_reference_end, null }, .{ .dtd, .tag_whitespace, " " } });
     try testTokenizer(.{}, "lt", &.{ .{ .ref_dtd, .tag_token, "lt" }, .{ .ref_dtd, .invalid_reference_end, null }, .{ .dtd, .eof, null } });
     try testTokenizer(.{}, "lt;", &.{ .{ .ref_dtd, .tag_token, "lt" }, .{ .ref_dtd, .semicolon, null }, .{ .dtd, .eof, null } });
@@ -1635,8 +1681,8 @@ test "References" {
 }
 
 test "Attribute Value" {
-    try testTokenizer(.{}, "\'", &.{.{ .attribute_value_single_quote, .quote_single, null }});
-    try testTokenizer(.{}, "\"", &.{.{ .attribute_value_double_quote, .quote_double, null }});
+    try testTokenizer(.{}, "\'", &.{.{ .attribute_value_quote_single, .quote_single, null }});
+    try testTokenizer(.{}, "\"", &.{.{ .attribute_value_quote_double, .quote_double, null }});
     // TODO: more exhaustive testing of invariants
 }
 
@@ -1850,8 +1896,8 @@ test "General Test" {
             .{ .element_tag, .tag_token, "fizz" },
             .{ .element_tag, .equals, null },
             .{ .element_tag, .quote_single, null },
-            .{ .attribute_value_single_quote, .text_data, "buzz" },
-            .{ .attribute_value_single_quote, .quote_single, null },
+            .{ .attribute_value_quote_single, .text_data, "buzz" },
+            .{ .attribute_value_quote_single, .quote_single, null },
             .{ .element_tag, .angle_bracket_right, null },
 
             .{ .non_markup, .angle_bracket_left, null },
