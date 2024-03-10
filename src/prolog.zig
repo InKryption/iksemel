@@ -58,6 +58,20 @@ pub fn ParseCtx(comptime Inner: type) type {
         inner: Inner,
         const Self = @This();
 
+        inline fn checkSrcType(comptime optional: enum { is_optional, not_optional }, comptime T: type) ?[]const u8 {
+            const ExpectedSlice: type, //
+            const ExpectedRange: type //
+            = switch (optional) {
+                .is_optional => .{ ?[]const u8, ?Tokenizer.Range },
+                .not_optional => .{ []const u8, Tokenizer.Range },
+            };
+            comptime return switch (T) {
+                ExpectedSlice => null,
+                ExpectedRange => null,
+                else => "Expected " ++ @typeName(ExpectedSlice) ++ " or " ++ @typeName(ExpectedRange) ++ ", instead got " ++ @typeName(T),
+            };
+        }
+
         /// Feeds the data from a PI section.
         pub fn feedPI(
             ctx: Self,
@@ -65,19 +79,26 @@ pub fn ParseCtx(comptime Inner: type) type {
             /// * `Tokenizer.Range`
             data: anytype,
         ) !void {
+            comptime if (checkSrcType(.not_optional, @TypeOf(data))) |err| @compileError(err);
             return ctx.inner.feedPI(data);
         }
 
         /// Marks the start of the DTD, providing the DTD name.
         /// Optionally followed by a call to `feedDTDExternalId`,
-        /// and then afterwards, optionally followed by calls to:
-        ///
+        /// and then afterwards, possibly followed by a series
+        /// of interspersed calls to:
+        /// * `feedPI`.
+        /// * `feedDTDEntityStart`, followed by calls described in its docs.
+        /// * `feedDTDElementStart`, followed by calls described in its docs.
+        /// * `feedDTDAttlistStart`, followed by calls described in its docs.
+        /// * `feedDTDNotation`.
         pub fn feedDTDName(
             ctx: Self,
             /// * `[]const u8`
             /// * `Tokenizer.Range`
             name: anytype,
         ) !void {
+            comptime if (checkSrcType(.not_optional, @TypeOf(name))) |err| @compileError(err);
             return ctx.inner.feedDTDName(name);
         }
 
@@ -91,6 +112,8 @@ pub fn ParseCtx(comptime Inner: type) type {
             /// * `Tokenizer.Range`
             system_lit: anytype,
         ) !void {
+            comptime if (checkSrcType(.is_optional, @TypeOf(pubid_lit))) |err| @compileError(err);
+            comptime if (checkSrcType(.not_optional, @TypeOf(system_lit))) |err| @compileError(err);
             return ctx.inner.feedDTDExternalId(kind, pubid_lit, system_lit);
         }
 
@@ -111,6 +134,7 @@ pub fn ParseCtx(comptime Inner: type) type {
             /// * `Tokenizer.Range`
             name: anytype,
         ) !void {
+            comptime if (checkSrcType(.not_optional, @TypeOf(name))) |err| @compileError(err);
             return ctx.inner.feedDTDEntityStart(kind, name);
         }
 
@@ -123,6 +147,7 @@ pub fn ParseCtx(comptime Inner: type) type {
             /// * `Tokenizer.Range`
             text: anytype,
         ) !void {
+            comptime if (checkSrcType(.not_optional, @TypeOf(text))) |err| @compileError(err);
             return ctx.inner.feedDTDEntityValueTextSegment(text);
         }
 
@@ -133,6 +158,7 @@ pub fn ParseCtx(comptime Inner: type) type {
             /// * `Tokenizer.Range`
             id: anytype,
         ) !void {
+            comptime if (checkSrcType(.not_optional, @TypeOf(id))) |err| @compileError(err);
             return ctx.inner.feedDTDEntityValueReference(kind, id);
         }
 
@@ -153,6 +179,9 @@ pub fn ParseCtx(comptime Inner: type) type {
             /// * `?Tokenizer.Range`
             ndata_name: anytype,
         ) !void {
+            comptime if (checkSrcType(.is_optional, @TypeOf(pubid_lit))) |err| @compileError(err);
+            comptime if (checkSrcType(.not_optional, @TypeOf(system_lit))) |err| @compileError(err);
+            comptime if (checkSrcType(.is_optional, @TypeOf(ndata_name))) |err| @compileError(err);
             return ctx.inner.feedDTDEntityValueExternalId(kind, pubid_lit, system_lit, ndata_name);
         }
 
@@ -168,6 +197,7 @@ pub fn ParseCtx(comptime Inner: type) type {
             /// * `Tokenizer.Range`
             name: anytype,
         ) !void {
+            comptime if (checkSrcType(.not_optional, @TypeOf(name))) |err| @compileError(err);
             return ctx.inner.feedDTDElementStart(name);
         }
 
@@ -183,6 +213,7 @@ pub fn ParseCtx(comptime Inner: type) type {
             name: anytype,
             quantity: ?ContentParticleQuantity,
         ) !void {
+            comptime if (checkSrcType(.not_optional, @TypeOf(name))) |err| @compileError(err);
             return ctx.inner.feedDTDElementIdentifier(name, quantity);
         }
 
@@ -228,6 +259,7 @@ pub fn ParseCtx(comptime Inner: type) type {
             /// * `Tokenizer.Range`
             name: anytype,
         ) !void {
+            comptime if (checkSrcType(.not_optional, @TypeOf(name))) |err| @compileError(err);
             return ctx.inner.feedDTDAttlistStart(name);
         }
 
@@ -243,6 +275,7 @@ pub fn ParseCtx(comptime Inner: type) type {
             name: anytype,
             attr_type: AttributeType,
         ) !void {
+            comptime if (checkSrcType(.not_optional, @TypeOf(name))) |err| @compileError(err);
             return ctx.inner.feedDTDAttlistDefStart(name, attr_type);
         }
 
@@ -254,11 +287,7 @@ pub fn ParseCtx(comptime Inner: type) type {
             /// * `Tokenizer.Range`
             name: anytype,
         ) !void {
-            switch (@TypeOf(name)) {
-                []const u8 => {},
-                Tokenizer.Range => {},
-                else => |T| @compileError("Expected " ++ @typeName([]const u8) ++ " or " ++ @typeName(Tokenizer.Range) ++ ", got " ++ @typeName(T)),
-            }
+            comptime if (checkSrcType(.not_optional, @TypeOf(name))) |err| @compileError(err);
             return ctx.inner.feedDTDAttlistDefNmtoken(name);
         }
 
@@ -276,6 +305,7 @@ pub fn ParseCtx(comptime Inner: type) type {
             /// * `Tokenizer.Range`
             text: anytype,
         ) !void {
+            comptime if (checkSrcType(.not_optional, @TypeOf(text))) |err| @compileError(err);
             return ctx.inner.feedDTDAttlistDefaultDeclValueSegment(text);
         }
 
@@ -285,6 +315,7 @@ pub fn ParseCtx(comptime Inner: type) type {
             /// * `Tokenizer.Range`
             name: anytype,
         ) !void {
+            comptime if (checkSrcType(.not_optional, @TypeOf(name))) |err| @compileError(err);
             return ctx.inner.feedDTDAttlistDefaultDeclValueReference(name);
         }
 
@@ -313,6 +344,9 @@ pub fn ParseCtx(comptime Inner: type) type {
             /// * `?Tokenizer.Range`
             pubid_literal: anytype,
         ) !void {
+            comptime if (checkSrcType(.not_optional, @TypeOf(name))) |err| @compileError(err);
+            comptime if (checkSrcType(.is_optional, @TypeOf(sys_literal))) |err| @compileError(err);
+            comptime if (checkSrcType(.is_optional, @TypeOf(pubid_literal))) |err| @compileError(err);
             return ctx.inner.feedDTDNotation(name, ext_id_kind, sys_literal, pubid_literal);
         }
     };
@@ -589,11 +623,9 @@ fn parseUntilAngleBracketLeftReaderOrFull(
                                                     while (try parse_helper.nextTokenSegment(tokenizer, str_ctx, mbr)) |segment| {
                                                         try parse_ctx.feedDTDEntityValueTextSegment(segment);
                                                     }
-                                                    try parse_ctx.feedDTDEntityValueTextSegment(null);
                                                 } else {
                                                     const range = tokenizer.nextSrcNoUnderrun(str_ctx);
                                                     try parse_ctx.feedDTDEntityValueTextSegment(range);
-                                                    try parse_ctx.feedDTDEntityValueTextSegment(null);
                                                 },
                                                 .ampersand, .percent => |ref_start| {
                                                     const ref_kind: ReferenceKind = switch (ref_start) {
