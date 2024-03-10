@@ -101,9 +101,7 @@ pub const Context = enum {
     entity_value_quote_single,
     entity_value_quote_double,
 
-    ref_text,
-    ref_quoted,
-    ref_dtd,
+    reference,
 };
 
 pub fn nextTypeStream(tokenizer: *Tokenizer, context: Context) BufferError!TokenType {
@@ -1201,94 +1199,39 @@ fn nextTypeOrSrcImpl(
             else => unreachable,
         },
 
-        .ref_text => switch (tokenizer.state) {
-            .blank => switch (ret_kind) {
-                .type => {
-                    if (tokenizer.index == src.len) {
-                        tokenizer.state = .eof;
-                        break .invalid_reference_end;
-                    }
-                    if (src[tokenizer.index] == ';') {
-                        tokenizer.state = .blank;
-                        tokenizer.index += 1;
-                        break .semicolon;
-                    }
-                    if (std.mem.indexOfScalar(u8, whitespace_set ++ &[_]u8{ ']', '&', '<' }, src[tokenizer.index]) != null) {
-                        tokenizer.state = .blank;
-                        break .invalid_reference_end;
-                    }
-                    break .tag_token;
+        .reference => {
+            const terminal_chars = whitespace_set ++ next_helper.dtd_terminal_characters ++ &[_]u8{'&'};
+            switch (tokenizer.state) {
+                .blank => switch (ret_kind) {
+                    .type => {
+                        if (tokenizer.index == src.len) {
+                            tokenizer.state = .eof;
+                            break .invalid_reference_end;
+                        }
+                        if (src[tokenizer.index] == ';') {
+                            tokenizer.state = .blank;
+                            tokenizer.index += 1;
+                            break .semicolon;
+                        }
+                        if (std.mem.indexOfScalar(u8, terminal_chars, src[tokenizer.index]) != null) {
+                            tokenizer.state = .blank;
+                            break .invalid_reference_end;
+                        }
+                        break .tag_token;
+                    },
+                    .src => {
+                        if (tokenizer.index == src.len) break null;
+                        const str_start = tokenizer.index;
+                        const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, terminal_chars) orelse src.len;
+                        tokenizer.index = str_end;
+                        if (str_start != str_end) {
+                            break next_helper.rangeInit(str_start, str_end);
+                        }
+                        break null;
+                    },
                 },
-                .src => {
-                    if (tokenizer.index == src.len) break null;
-                    const str_start = tokenizer.index;
-                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ &[_]u8{ ';', ']', '&', '<' }) orelse src.len;
-                    tokenizer.index = str_end;
-                    if (str_start != str_end) {
-                        break next_helper.rangeInit(str_start, str_end);
-                    }
-                    break null;
-                },
-            },
-            else => unreachable,
-        },
-        .ref_quoted => switch (tokenizer.state) {
-            .blank => switch (ret_kind) {
-                .type => {
-                    if (tokenizer.index == src.len) {
-                        tokenizer.state = .eof;
-                        break .invalid_reference_end;
-                    }
-                    if (src[tokenizer.index] == ';') {
-                        tokenizer.state = .blank;
-                        tokenizer.index += 1;
-                        break .semicolon;
-                    }
-                    if (std.mem.indexOfScalar(u8, whitespace_set ++ &[_]u8{ '\'', '\"', '<', '&' }, src[tokenizer.index]) != null) {
-                        tokenizer.state = .blank;
-                        break .invalid_reference_end;
-                    }
-                    break .tag_token;
-                },
-                .src => {
-                    if (tokenizer.index == src.len) break null;
-                    const str_start = tokenizer.index;
-                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ &[_]u8{ '\'', '\"', '<', '&', ';' }) orelse src.len;
-                    tokenizer.index = str_end;
-                    if (str_start == str_end) break null;
-                    break next_helper.rangeInit(str_start, str_end);
-                },
-            },
-            else => unreachable,
-        },
-        .ref_dtd => switch (tokenizer.state) {
-            .blank => switch (ret_kind) {
-                .type => {
-                    if (tokenizer.index == src.len) {
-                        tokenizer.state = .eof;
-                        break .invalid_reference_end;
-                    }
-                    if (src[tokenizer.index] == ';') {
-                        tokenizer.state = .blank;
-                        tokenizer.index += 1;
-                        break .semicolon;
-                    }
-                    if (std.mem.indexOfScalar(u8, whitespace_set ++ next_helper.dtd_terminal_characters ++ &[_]u8{'&'}, src[tokenizer.index]) != null) {
-                        tokenizer.state = .blank;
-                        break .invalid_reference_end;
-                    }
-                    break .tag_token;
-                },
-                .src => {
-                    if (tokenizer.index == src.len) break null;
-                    const str_start = tokenizer.index;
-                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ next_helper.dtd_terminal_characters ++ &[_]u8{'&'}) orelse src.len;
-                    tokenizer.index = str_end;
-                    if (str_start == str_end) break null;
-                    break next_helper.rangeInit(str_start, str_end);
-                },
-            },
-            else => unreachable,
+                else => unreachable,
+            }
         },
     } else error.BufferUnderrun;
 
@@ -1668,15 +1611,15 @@ test "Non-Markup" {
 }
 
 test "References" {
-    try testTokenizer(.{}, ";", &.{ .{ .ref_text, .semicolon, null }, .{ .non_markup, .eof, null } });
-    try testTokenizer(.{}, ";", &.{ .{ .ref_quoted, .semicolon, null }, .{ .non_markup, .eof, null } });
-    try testTokenizer(.{}, ";", &.{ .{ .ref_dtd, .semicolon, null }, .{ .non_markup, .eof, null } });
+    try testTokenizer(.{}, ";", &.{ .{ .reference, .semicolon, null }, .{ .non_markup, .eof, null } });
+    try testTokenizer(.{}, ";", &.{ .{ .reference, .semicolon, null }, .{ .non_markup, .eof, null } });
+    try testTokenizer(.{}, ";", &.{ .{ .reference, .semicolon, null }, .{ .non_markup, .eof, null } });
 
-    try testTokenizer(.{}, " ", &.{ .{ .ref_text, .invalid_reference_end, null }, .{ .non_markup, .text_data, " " } });
-    try testTokenizer(.{}, " ", &.{ .{ .ref_quoted, .invalid_reference_end, null }, .{ .attribute_value_quote_single, .text_data, " " } });
-    try testTokenizer(.{}, " ", &.{ .{ .ref_dtd, .invalid_reference_end, null }, .{ .dtd, .tag_whitespace, " " } });
-    try testTokenizer(.{}, "lt", &.{ .{ .ref_dtd, .tag_token, "lt" }, .{ .ref_dtd, .invalid_reference_end, null }, .{ .dtd, .eof, null } });
-    try testTokenizer(.{}, "lt;", &.{ .{ .ref_dtd, .tag_token, "lt" }, .{ .ref_dtd, .semicolon, null }, .{ .dtd, .eof, null } });
+    try testTokenizer(.{}, " ", &.{ .{ .reference, .invalid_reference_end, null }, .{ .non_markup, .text_data, " " } });
+    try testTokenizer(.{}, " ", &.{ .{ .reference, .invalid_reference_end, null }, .{ .attribute_value_quote_single, .text_data, " " } });
+    try testTokenizer(.{}, " ", &.{ .{ .reference, .invalid_reference_end, null }, .{ .dtd, .tag_whitespace, " " } });
+    try testTokenizer(.{}, "lt", &.{ .{ .reference, .tag_token, "lt" }, .{ .reference, .invalid_reference_end, null }, .{ .dtd, .eof, null } });
+    try testTokenizer(.{}, "lt;", &.{ .{ .reference, .tag_token, "lt" }, .{ .reference, .semicolon, null }, .{ .dtd, .eof, null } });
     // TODO: more exhaustive testing of invariants
 }
 

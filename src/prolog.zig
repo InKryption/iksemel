@@ -634,15 +634,15 @@ fn parseUntilAngleBracketLeftReaderOrFull(
                                                         else => unreachable,
                                                     };
 
-                                                    // TODO: check that `.ref_quoted` behaves correctly here
-                                                    switch (try parse_helper.nextTokenType(tokenizer, .ref_quoted, MaybeReader, mbr)) {
+                                                    // TODO: check that `.reference` behaves correctly here
+                                                    switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
                                                         else => unreachable,
                                                         .invalid_reference_end => return ParseError.InvalidReferenceEnd,
                                                         .semicolon => return ParseError.EmptyReference,
                                                         .tag_token => {
                                                             mbr_and_src.clearSrcBuffer();
-                                                            const ref_id = try parse_helper.nextTokenFullStrOrRange(tokenizer, .ref_quoted, MaybeReader, mbr_and_src);
-                                                            switch (try parse_helper.nextTokenType(tokenizer, .ref_quoted, MaybeReader, mbr)) {
+                                                            const ref_id = try parse_helper.nextTokenFullStrOrRange(tokenizer, .reference, MaybeReader, mbr_and_src);
+                                                            switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
                                                                 .invalid_reference_end => return ParseError.InvalidReferenceEnd,
                                                                 .tag_token => unreachable,
                                                                 .semicolon => {},
@@ -1092,14 +1092,14 @@ fn parseUntilAngleBracketLeftReaderOrFull(
 
                                             .angle_bracket_left => return ParseError.AngleBracketLeftInAttributeValue,
                                             .ampersand => {
-                                                switch (try parse_helper.nextTokenType(tokenizer, .ref_quoted, MaybeReader, mbr)) {
+                                                switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
                                                     .invalid_reference_end => return ParseError.InvalidReferenceEnd,
                                                     .semicolon => return ParseError.EmptyReference,
                                                     .tag_token => {},
                                                     else => unreachable,
                                                 }
                                                 mbr_and_src.clearSrcBuffer();
-                                                const ref_name = try parse_helper.nextTokenFullStrOrRange(tokenizer, .ref_quoted, MaybeReader, mbr_and_src);
+                                                const ref_name = try parse_helper.nextTokenFullStrOrRange(tokenizer, .reference, MaybeReader, mbr_and_src);
                                                 try parse_ctx.feedDTDAttlistDefaultDeclValueReference(ref_name);
                                             },
                                             .text_data => {
