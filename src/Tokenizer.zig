@@ -309,12 +309,6 @@ pub const TokenType = enum(u8) {
     square_bracket_right,
 
     /// The '&' token.
-    ///
-    /// Represents the start of a Character or Entity reference.
-    /// The subsequent token sequence will be one of:
-    /// * `.tag_token`.
-    /// * `.semicolon`.
-    /// * `.invalid_reference_end`.
     ampersand,
     /// The ';' token.
     semicolon,
@@ -329,12 +323,6 @@ pub const TokenType = enum(u8) {
     pi_end,
 
     /// The '<![CDATA[' token.
-    ///
-    /// Starts a CDATA Section.
-    /// The subsequent token sequence will be one of:
-    /// * `.text_data`.
-    /// * `.cdata_end` ending the token sequence.
-    /// * `.eof`.
     cdata_start,
     /// A token which partially matches the '<![CDATA[' token.
     ///
