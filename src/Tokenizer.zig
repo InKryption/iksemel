@@ -79,28 +79,125 @@ pub fn feedEof(tokenizer: *Tokenizer) void {
 pub const BufferError = error{BufferUnderrun};
 
 pub const Context = enum {
-    // TODO: properly document what token types each of these contexts imply.
-
+    /// * `.eof`
+    /// * `.angle_bracket_left`
+    /// * `.text_data`
+    /// * `.ampersand`
+    /// * `.pi_start`
+    /// * `.comment_start`
+    /// * `.invalid_comment_start_single_dash`
+    /// * `.cdata_start`
+    /// * `.invalid_cdata_start`
+    /// * `.cdata_end`
+    /// * `.dtd_start`
+    /// * `.invalid_dtd_start`
+    /// * `.invalid_angle_bracket_left_bang`
     non_markup,
 
+    /// * `.eof`
+    /// * `.lparen`
+    /// * `.rparen`
+    /// * `.qmark`
+    /// * `.asterisk`
+    /// * `.plus`
+    /// * `.pipe`
+    /// * `.comma`
+    /// * `.percent`
+    /// * `.semicolon`
+    /// * `.quote_single`
+    /// * `.quote_double`
+    /// * `.square_bracket_left`
+    /// * `.square_bracket_right`
+    /// * `.angle_bracket_left`
+    /// * `.angle_bracket_right`
+    /// * `.pi_start`
+    /// * `.invalid_angle_bracket_left_bang`
+    /// * `.dtd_decl`
+    /// * `.invalid_comment_start_single_dash`
+    /// * `.comment_start`
+    /// * `.tag_whitespace`
+    /// * `.tag_token`
     dtd,
+
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.slash`
+    /// * `.equals`
+    /// * `.quote_single`
+    /// * `.quote_double`
+    /// * `.angle_bracket_right`
+    /// * `.tag_whitespace`
+    /// * `.tag_token`
     element_tag,
 
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.text_data`
+    /// * `.invalid_comment_start_single_dash`
+    /// * `.invalid_comment_dash_dash`
+    /// * `.invalid_comment_end_triple_dash`
+    /// * `.comment_end`
     comment,
+
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.text_data`
+    /// * `.pi_end`
     pi,
+
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.text_data`
+    /// * `.cdata_end`
     cdata,
 
     /// Should be used for both system literals and pubid literals, single quoted.
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.quote_single`
+    /// * `.text_data`
     system_literal_quote_single,
-    /// Same as `.system_literal_quote_single`, but double quoted.
+    /// Should be used for both system literals and pubid literals, single quoted.
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.quote_single`
+    /// * `.text_data`
     system_literal_quote_double,
 
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.quote_single`
+    /// * `.ampersand`
+    /// * `.angle_bracket_left`
+    /// * `.text_data`
     attribute_value_quote_single,
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.quote_double`
+    /// * `.ampersand`
+    /// * `.angle_bracket_left`
+    /// * `.text_data`
     attribute_value_quote_double,
 
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.quote_single`
+    /// * `.ampersand`
+    /// * `.percent`
+    /// * `.text_data`
     entity_value_quote_single,
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.quote_single`
+    /// * `.ampersand`
+    /// * `.percent`
+    /// * `.text_data`
     entity_value_quote_double,
 
+    /// Possible token types are:
+    /// * `.tag_token`
+    /// * `.invalid_reference_end`
+    /// * `.semicolon`
     reference,
 };
 
@@ -1171,7 +1268,10 @@ fn nextTypeOrSrcImpl(
                     switch (tag) {
                         .attribute_value_quote_single,
                         .attribute_value_quote_double,
-                        => {},
+                        => if (src[tokenizer.index] == '%') {
+                            tokenizer.index += 1;
+                            break .percent;
+                        },
                         .entity_value_quote_single,
                         .entity_value_quote_double,
                         => if (src[tokenizer.index] == '<') {
