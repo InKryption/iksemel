@@ -102,8 +102,8 @@ pub const Context = enum {
     /// * `.plus`
     /// * `.pipe`
     /// * `.comma`
+    /// * `.hashtag`
     /// * `.percent`
-    /// * `.semicolon`
     /// * `.quote_single`
     /// * `.quote_double`
     /// * `.square_bracket_left`
@@ -160,7 +160,7 @@ pub const Context = enum {
     /// Should be used for both system literals and pubid literals, single quoted.
     /// Possible token types are:
     /// * `.eof`
-    /// * `.quote_single`
+    /// * `.quote_double`
     /// * `.text_data`
     system_literal_quote_double,
 
@@ -188,7 +188,7 @@ pub const Context = enum {
     entity_value_quote_single,
     /// Possible token types are:
     /// * `.eof`
-    /// * `.quote_single`
+    /// * `.quote_double`
     /// * `.ampersand`
     /// * `.percent`
     /// * `.text_data`
@@ -280,6 +280,8 @@ pub const TokenType = enum(u8) {
     pipe,
     /// The ',' token.
     comma,
+    /// The '#' token.
+    hashtag,
     /// The '?' token.
     qmark,
     /// The '*' token.
@@ -363,7 +365,7 @@ pub const TokenType = enum(u8) {
     /// which does not ultimately form a recognized markup tag.
     invalid_angle_bracket_left_bang,
 
-    /// Whether or not the token represents any text to be returned by `nextSrcStream`.
+    /// Whether or not the token represents any text to be returned by `nextSrc*`.
     pub inline fn hasSrc(token_type: TokenType) bool {
         return switch (token_type) {
             .text_data,
@@ -522,8 +524,14 @@ fn nextTypeOrSrcImpl(
     };
 
     if (std.debug.runtime_safety) switch (ret_kind) {
-        .type => tokenizer.debug.expected_context = context,
-        .src => assert(context == tokenizer.debug.expected_context.?),
+        .type => {
+            tokenizer.debug.expected_context = context;
+            assert(!tokenizer.debug.src_queued_up);
+        },
+        .src => {
+            assert(context == tokenizer.debug.expected_context.?);
+            assert(tokenizer.debug.src_queued_up);
+        },
     };
 
     const src = tokenizer.src;
@@ -773,7 +781,7 @@ fn nextTypeOrSrcImpl(
                         break .eof;
                     }
                     switch (src[tokenizer.index]) {
-                        inline '(', ')', '?', '*', '+', '|', ',', '%', ';', '\'', '\"', '[', ']', '>' => |char| {
+                        inline '(', ')', '?', '*', '+', '|', ',', '#', '%', '\'', '\"', '[', ']', '>' => |char| {
                             tokenizer.index += 1;
                             break comptime switch (char) {
                                 '(' => .lparen,
@@ -783,8 +791,8 @@ fn nextTypeOrSrcImpl(
                                 '+' => .plus,
                                 '|' => .pipe,
                                 ',' => .comma,
+                                '#' => .hashtag,
                                 '%' => .percent,
-                                ';' => .semicolon,
                                 '\'' => .quote_single,
                                 '\"' => .quote_double,
                                 '[' => .square_bracket_left,
@@ -1332,21 +1340,24 @@ fn nextTypeOrSrcImpl(
     };
 
     if (std.debug.runtime_safety) switch (ret_kind) {
-        .type => {},
+        .type => {
+            tokenizer.debug.src_queued_up = result.hasSrc();
+        },
         .src => if (result == null) {
             tokenizer.debug.expected_context = null;
+            tokenizer.debug.src_queued_up = false;
         },
     };
 
-    return result_or_err;
+    return result;
 }
 
 const next_helper = struct {
     const dtd_terminal_characters = &[_]u8{
-        '[',  ']', '(', ')',
-        '?',  '*', '+', '|',
-        ',',  '%', ';', '\'',
-        '\"', '<', '>',
+        '[',  ']',  '(', ')',
+        '?',  '*',  '+', '|',
+        ',',  '#',  '%', ';',
+        '\'', '\"', '<', '>',
     };
 
     inline fn rangeInit(range_start: usize, range_end: usize) TokenSrc {
@@ -1537,6 +1548,7 @@ const State = enum {
 
 const Debug = struct {
     expected_context: if (std.debug.runtime_safety) ?Context else ?noreturn = null,
+    src_queued_up: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false,
 };
 
 fn testTokenizer(
@@ -1842,7 +1854,7 @@ test "DTD" {
     });
 
     try testTokenizer(.{}, "<!ENTITYYY", &.{.{ .dtd, .dtd_decl, "<!ENTITYYY" }});
-    try testTokenizer(.{}, "()?*+|,%;[]", &.{
+    try testTokenizer(.{}, "()?*+|,%[]#", &.{
         .{ .dtd, .lparen, null },
         .{ .dtd, .rparen, null },
         .{ .dtd, .qmark, null },
@@ -1851,9 +1863,10 @@ test "DTD" {
         .{ .dtd, .pipe, null },
         .{ .dtd, .comma, null },
         .{ .dtd, .percent, null },
-        .{ .dtd, .semicolon, null },
+        // .{ .dtd, .tag_token, ";" },
         .{ .dtd, .square_bracket_left, null },
         .{ .dtd, .square_bracket_right, null },
+        .{ .dtd, .hashtag, null },
     });
 }
 
