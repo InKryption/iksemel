@@ -3,108 +3,86 @@ const assert = std.debug.assert;
 
 const iksemel = @import("iksemel.zig");
 const Tokenizer = iksemel.Tokenizer;
-const StrBuffer = iksemel.StrBuffer;
+
 const parse_helper = @import("parse_helper.zig");
+
+pub const ElementOpenEnd = enum {
+    normal,
+    inline_close,
+};
 
 pub fn ParseCtx(comptime Impl: type) type {
     return struct {
         inner: Impl,
         const Self = @This();
 
-        /// Opens an element, providing the name. It may be followed
-        /// by a series of consecutive calls to `feedElementAttribute`.
-        pub fn feedElementOpen(
+        /// Called consecutively to construct the source.
+        /// Terminated when `segment == null`.
+        pub fn feedSrc(
             ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            name: anytype,
+            /// * `?[]const u8`
+            /// * `?Tokenizer.Range`
+            segment: anytype,
         ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(name));
-            return ctx.inner.feedElementOpen(name);
+            switch (@TypeOf(segment)) {
+                ?[]const u8, ?Tokenizer.Range => {},
+                else => @compileError(
+                    "" ++
+                        "Expected one of " ++
+                        @typeName(?[]const u8) ++
+                        " or " ++
+                        @typeName(?Tokenizer.Range) ++
+                        ", instead got " ++
+                        @typeName(@TypeOf(segment)),
+                ),
+            }
+            return ctx.inner.feedSrc(segment);
         }
 
-        pub fn feedAttributeName(
-            ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            name: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(name));
-            return ctx.inner.feedAttributeName(name);
-        }
-
-        pub fn feedAttributeValueSegment(
-            ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            text: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(text));
-            return ctx.inner.feedAttributeValueSegment(text);
-        }
-
-        /// If `inline_close` is true, the element open tag was terminated with '/>',
-        /// meaning it should not be matched against an element close tag.
-        pub fn feedElementOpenEnd(
-            ctx: Self,
-            inline_close: bool,
-        ) !void {
-            return ctx.inner.feedElementOpenEnd(inline_close);
-        }
-
-        pub fn feedAttributeValueReference(
-            ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            name: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(name));
-            return ctx.inner.feedAttributeValueReference(name);
-        }
-
-        pub fn feedAttributeValueEnd(ctx: Self) !void {
-            return ctx.inner.feedAttributeValueEnd();
-        }
-
-        pub fn feedElementClose(
-            ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            name: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(name));
-            return ctx.inner.feedElementClose(name);
-        }
-
-        pub fn feedTextDataSegment(
-            ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            text_segment: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(text_segment));
-            return ctx.inner.feedTextDataSegment(text_segment);
-        }
-
-        pub fn feedTextDataReference(
-            ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            name: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(name));
-            return ctx.inner.feedTextDataReference(name);
-        }
-
-        pub fn feedTextDataEnd(ctx: Self) !void {
-            return ctx.inner.feedTextDataEnd();
-        }
-
-        pub fn feedPI(ctx: Self, data: anytype) !void {
-            return ctx.inner.feedPI(data);
+        pub fn feedMarker(ctx: Self, marker: ParseMarker) !void {
+            return ctx.inner.feedMarker(marker);
         }
     };
 }
+
+pub const ParseMarker = union(enum) {
+    /// Followed by `feedSrc*` to construct the reference id/name.
+    reference,
+    /// Followed by `feedSrc*` to construct the text data.
+    text,
+
+    /// Followed by `feedSrc*` to consruct the name.
+    /// Afterwards, it may be followed by one of:
+    /// * `attribute_start`
+    /// * `element_open_end`
+    element_open_start,
+
+    /// May be followed by one of:
+    /// * `element_open_start`
+    /// * `text`
+    /// * `reference`
+    /// * `element_close`
+    element_open_end: ElementOpenEnd,
+
+    /// Followed by `feedSrc*` to construct the name.
+    element_close,
+
+    /// Followed by `feedSrc*` to construct the attribute name.
+    /// Afterwards, it will be followed by a series of
+    /// interspersed `reference`s and `text`s, terminated
+    /// by `attribute_end`.
+    attribute_start,
+    /// Terminates the attribute.
+    /// May be followed by one of:
+    /// * `element_open_end`
+    attribute_end,
+
+    /// Followed by `feedSrc*` to construct the Processing Instructions.
+    /// Interpretation and validation of the PI are left up to the context.
+    /// NOTE: the procedure does not validate the target, or that there
+    /// even is a target.
+    pi,
+};
 
 pub const ParseError = error{
     UnclosedElementTag,
@@ -122,7 +100,6 @@ pub const ParseError = error{
     UnclosedCDataSection,
     InvalidCDataStart,
     InvalidCDataEnd,
-    InvalidAngleBracketLeftBang,
 };
 
 pub inline fn parseSlice(
@@ -142,18 +119,13 @@ pub inline fn parseReader(
     reader: anytype,
     /// Used as a temporary buffer for certain reads.
     read_buffer: []u8,
-    /// Used as a buffer for strings that will be forwarded to `parse_ctx_impl`.
-    src_buffer: StrBuffer,
     /// Must satisfy the interface described by `ParseCtx`.
     parse_ctx_impl: anytype,
 ) !void {
     var tokenizer = Tokenizer.initStreaming();
     return parseImpl(parse_ctx_impl, &tokenizer, @TypeOf(reader), .{
-        .mbr = .{
-            .reader = reader,
-            .read_buffer = read_buffer,
-        },
-        .src_buffer = src_buffer,
+        .reader = reader,
+        .read_buffer = read_buffer,
     });
 }
 
@@ -163,9 +135,89 @@ fn parseImpl(
     comptime MaybeReader: ?type,
     mbr: parse_helper.MaybeBufferedReader(MaybeReader),
 ) !void {
-    _ = parse_ctx_impl;
-    _ = tokenizer;
-    _ = mbr;
+    const Impl = @TypeOf(parse_ctx_impl);
+    const parse_ctx: ParseCtx(Impl) = .{ .inner = parse_ctx_impl };
+
+    const root_has_children = switch (try handleLeftAngleBracket(Impl, parse_ctx, tokenizer, MaybeReader, mbr)) {
+        .element_open => true,
+        .element_open_inline_close => false,
+        .element_close => return ParseError.UnopenedRootElement,
+    };
+
+    var depth: u64 = @intFromBool(root_has_children);
+
+    if (root_has_children) while (true) switch (try parse_helper.nextTokenType(tokenizer, .non_markup, MaybeReader, mbr)) {
+        .eof => return ParseError.UnclosedElement,
+        .angle_bracket_left => switch (try handleLeftAngleBracket(Impl, parse_ctx, tokenizer, MaybeReader, mbr)) {
+            .element_open => {
+                depth += 1;
+            },
+            .element_open_inline_close => {},
+            .element_close => {
+                depth -= 1;
+                if (depth == 0) break;
+            },
+        },
+        .text_data => {
+            try parse_ctx.feedMarker(.text);
+            try feedTokenSrc(Impl, parse_ctx, tokenizer, .non_markup, MaybeReader, mbr);
+        },
+        .ampersand => try handleAmpersand(Impl, parse_ctx, tokenizer, MaybeReader, mbr),
+
+        .comment_start => switch (try parse_helper.handleCommentSkip(tokenizer, MaybeReader, mbr)) {
+            .normal_end => {},
+            .invalid_end_triple_dash => return ParseError.CommentEndTripleDash,
+            .invalid_dash_dash => return ParseError.CommentDashDash,
+        },
+        .cdata_start => switch (try parse_helper.nextTokenType(tokenizer, .cdata, MaybeReader, mbr)) {
+            else => unreachable,
+            .eof => return ParseError.UnclosedCDataSection,
+            .cdata_end => {},
+            .text_data => {
+                try parse_ctx.feedMarker(.text);
+                try feedTokenSrc(Impl, parse_ctx, tokenizer, .cdata, MaybeReader, mbr);
+
+                switch (try parse_helper.nextTokenType(tokenizer, .cdata, MaybeReader, mbr)) {
+                    else => unreachable,
+                    .eof => return ParseError.UnclosedCDataSection,
+                    .text_data => unreachable,
+                    .cdata_end => {},
+                }
+            },
+        },
+        .pi_start => switch (try parse_helper.nextTokenType(tokenizer, .pi, MaybeReader, mbr)) {
+            else => unreachable,
+            .eof => return ParseError.UnclosedPI,
+            .pi_end => return ParseError.EmptyPI,
+            .text_data => {
+                try parse_ctx.feedMarker(.pi);
+                try feedTokenSrc(Impl, parse_ctx, tokenizer, .pi, MaybeReader, mbr);
+
+                switch (try parse_helper.nextTokenType(tokenizer, .pi, MaybeReader, mbr)) {
+                    else => unreachable,
+                    .text_data => unreachable,
+                    .eof => return ParseError.UnclosedPI,
+                    .pi_end => {},
+                }
+            },
+        },
+        .invalid_comment_start_single_dash => return ParseError.InvalidCommentStartSingleDash,
+        .invalid_cdata_start => return ParseError.InvalidCDataStart,
+        .cdata_end => return ParseError.InvalidCDataEnd,
+        .dtd_start => return ParseError.UnexpectedToken,
+        .invalid_dtd_start => return ParseError.UnexpectedToken,
+        .invalid_angle_bracket_left_bang => return ParseError.UnexpectedToken,
+        else => unreachable,
+    };
+
+    while (true) switch (try parse_helper.nextTokenType(tokenizer, .non_markup, MaybeReader, mbr)) {
+        .eof => break,
+        .text_data => switch (try parse_helper.skipWhitespaceTokenSrc(tokenizer, .non_markup, MaybeReader, mbr)) {
+            .all_whitespace => {},
+            .non_whitespace => return ParseError.UnexpectedToken,
+        },
+        else => return ParseError.UnexpectedToken,
+    };
 }
 
 const LabResult = enum {
@@ -179,11 +231,10 @@ fn handleLeftAngleBracket(
     tokenizer: *Tokenizer,
     comptime MaybeReader: ?type,
     /// May be cleared at some point during this function.
-    mbr_and_src: parse_helper.MBRAndSrcBuf(MaybeReader),
+    mbr: parse_helper.MaybeBufferedReader(MaybeReader),
 ) !LabResult {
-    const mbr = mbr_and_src.mbr;
     switch (try parse_helper.nextTokenType(tokenizer, .element_tag, MaybeReader, mbr)) {
-        .eof => return ParseError.UnclosedElement,
+        .eof => return ParseError.UnclosedElementTag,
         .equals,
         .quote_single,
         .quote_double,
@@ -204,9 +255,8 @@ fn handleLeftAngleBracket(
                 else => unreachable,
             }
 
-            mbr_and_src.clearSrcBuffer();
-            const name = try parse_helper.nextTokenFullStrOrRange(tokenizer, .element_tag, MaybeReader, mbr_and_src);
-            try parse_ctx.feedElementClose(name);
+            try parse_ctx.feedMarker(.element_close);
+            try feedTokenSrc(Impl, parse_ctx, tokenizer, .element_tag, MaybeReader, mbr);
 
             switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .element_tag, MaybeReader, mbr)) {
                 .eof => return ParseError.UnclosedElementTag,
@@ -224,18 +274,18 @@ fn handleLeftAngleBracket(
             return .element_close;
         },
         .tag_token => {
-            mbr_and_src.clearSrcBuffer();
-            try parse_ctx.feedElementOpen(try parse_helper.nextTokenFullStrOrRange(tokenizer, .element_tag, MaybeReader, mbr_and_src));
+            try parse_ctx.feedMarker(.element_open_start);
+            try feedTokenSrc(Impl, parse_ctx, tokenizer, .element_tag, MaybeReader, mbr);
 
-            const inline_close = while (true) {
+            const end_kind: ElementOpenEnd = while (true) {
                 switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .element_tag, MaybeReader, mbr)) {
                     .eof => return ParseError.UnclosedElementTag,
                     .tag_whitespace => unreachable,
-                    .angle_bracket_right => break false,
+                    .angle_bracket_right => break .normal,
                     .slash => switch (try parse_helper.nextTokenType(tokenizer, .element_tag, MaybeReader, mbr)) {
                         else => return ParseError.UnexpectedToken,
                         .eof => return ParseError.UnclosedElementTag,
-                        .angle_bracket_right => break true,
+                        .angle_bracket_right => break .inline_close,
                     },
 
                     .equals,
@@ -247,8 +297,9 @@ fn handleLeftAngleBracket(
 
                     else => unreachable,
                 }
-                mbr_and_src.clearSrcBuffer();
-                try parse_ctx.feedAttributeName(try parse_helper.nextTokenFullStrOrRange(tokenizer, .element_tag, MaybeReader, mbr_and_src));
+
+                try parse_ctx.feedMarker(.attribute_start);
+                try feedTokenSrc(Impl, parse_ctx, tokenizer, .element_tag, MaybeReader, mbr);
 
                 switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .element_tag, MaybeReader, mbr)) {
                     else => return ParseError.UnexpectedToken,
@@ -280,118 +331,79 @@ fn handleLeftAngleBracket(
                     },
 
                     .text_data => {
-                        if (MaybeReader != null) {
-                            while (try parse_helper.nextTokenSegment(tokenizer, str_ctx, mbr.reader, mbr.read_buffer)) |segment| {
-                                try parse_ctx.feedAttributeValueSegment(segment);
-                            }
-                        } else {
-                            const range = tokenizer.nextSrcNoUnderrun(str_ctx);
-                            try parse_ctx.feedAttributeValueSegment(range);
-                        }
+                        try parse_ctx.feedMarker(.text);
+                        try feedTokenSrc(Impl, parse_ctx, tokenizer, str_ctx, MaybeReader, mbr);
                     },
 
-                    .ampersand => switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
-                        else => unreachable,
-                        .invalid_reference_end => return ParseError.InvalidReferenceEnd,
-                        .semicolon => return ParseError.EmptyReference,
-                        .tag_token => {
-                            mbr_and_src.clearSrcBuffer();
-                            const ref_name = try parse_helper.nextTokenFullStrOrRange(tokenizer, .reference, MaybeReader, mbr_and_src);
-                            try parse_ctx.feedAttributeValueReference(ref_name);
-                        },
-                    },
+                    .ampersand => try handleAmpersand(Impl, parse_ctx, tokenizer, MaybeReader, mbr),
 
                     else => unreachable,
                 };
-                try parse_ctx.feedAttributeValueEnd();
+                try parse_ctx.feedMarker(.attribute_end);
             };
 
-            try parse_ctx.feedElementOpenEnd(inline_close);
-            return if (inline_close)
-                .element_open_inline_close
-            else
-                .element_open;
+            try parse_ctx.feedMarker(.{ .element_open_end = end_kind });
+            return switch (end_kind) {
+                .normal => .element_open,
+                .inline_close => .element_open_inline_close,
+            };
         },
         else => unreachable,
     }
 }
 
+fn handleAmpersand(
+    comptime Impl: type,
+    parse_ctx: ParseCtx(Impl),
+    tokenizer: *Tokenizer,
+    comptime MaybeReader: ?type,
+    /// May be cleared at some point during this function.
+    mbr: parse_helper.MaybeBufferedReader(MaybeReader),
+) !void {
+    switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
+        else => unreachable,
+        .invalid_reference_end => return ParseError.InvalidReferenceEnd,
+        .semicolon => return ParseError.EmptyReference,
+        .tag_token => {},
+    }
+    try parse_ctx.feedMarker(.reference);
+    try feedTokenSrc(Impl, parse_ctx, tokenizer, .reference, MaybeReader, mbr);
+    switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
+        else => unreachable,
+        .invalid_reference_end => return ParseError.InvalidReferenceEnd,
+        .semicolon => {},
+        .tag_token => unreachable,
+    }
+}
+
+fn feedTokenSrc(
+    comptime Impl: type,
+    parse_ctx: ParseCtx(Impl),
+    tokenizer: *Tokenizer,
+    context: Tokenizer.Context,
+    comptime MaybeReader: ?type,
+    mbr: parse_helper.MaybeBufferedReader(MaybeReader),
+) !void {
+    var iter: parse_helper.TokenSrcIter(MaybeReader) = .{};
+    while (true) {
+        const segment = try iter.next(tokenizer, context, mbr);
+        try parse_ctx.feedSrc(segment);
+        if (segment == null) break;
+    }
+}
+
 pub const IgnoreCtx = struct {
-    pub fn feedElementOpen(
+    pub fn feedSrc(
         ctx: @This(),
-        name: anytype,
+        segment: anytype,
     ) !void {
-        _ = ctx;
-        _ = name;
-    }
-
-    pub fn feedAttributeName(
-        ctx: @This(),
-        name: anytype,
-    ) !void {
-        _ = ctx;
-        _ = name;
-    }
-
-    pub fn feedAttributeValueSegment(
-        ctx: @This(),
-        text: anytype,
-    ) !void {
-        _ = ctx;
-        _ = text;
-    }
-
-    pub fn feedElementOpenEnd(
-        ctx: @This(),
-        inline_close: bool,
-    ) !void {
-        _ = ctx;
-        _ = inline_close;
-    }
-
-    pub fn feedAttributeValueReference(
-        ctx: @This(),
-        name: anytype,
-    ) !void {
-        _ = ctx;
-        _ = name;
-    }
-
-    pub fn feedAttributeValueEnd(ctx: @This()) !void {
+        _ = segment;
         _ = ctx;
     }
 
-    pub fn feedElementClose(
-        ctx: @This(),
-        name: anytype,
-    ) !void {
+    pub fn feedMarker(ctx: @This(), marker: ParseMarker) !void {
+        _ = marker;
         _ = ctx;
-        _ = name;
-    }
-
-    pub fn feedTextDataSegment(
-        ctx: @This(),
-        text_segment: anytype,
-    ) !void {
-        _ = ctx;
-        _ = text_segment;
-    }
-
-    pub fn feedTextDataReference(
-        ctx: @This(),
-        name: anytype,
-    ) !void {
-        _ = ctx;
-        _ = name;
-    }
-
-    pub fn feedTextDataEnd(ctx: @This()) !void {
-        _ = ctx;
-    }
-
-    pub fn feedPI(ctx: @This(), data: anytype) !void {
-        _ = ctx;
-        _ = data;
     }
 };
 
