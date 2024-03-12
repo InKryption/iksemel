@@ -1,12 +1,8 @@
 const std = @import("std");
+const assert = std.debug.assert;
 
 const iksemel = @import("iksemel.zig");
 const Tokenizer = iksemel.Tokenizer;
-
-pub const StrBuffer = union(enum) {
-    static: *std.ArrayListUnmanaged(u8),
-    dyn: *std.ArrayList(u8),
-};
 
 pub inline fn checkSrcType(comptime optional: enum { is_optional, not_optional }, comptime T: type) void {
     const ExpectedSlice: type, //
@@ -27,21 +23,6 @@ pub fn MaybeBufferedReader(comptime MaybeReader: ?type) type {
     return struct {
         reader: (MaybeReader orelse void),
         read_buffer: if (MaybeReader != null) []u8 else void,
-    };
-}
-
-pub fn MBRAndSrcBuf(comptime MaybeReader: ?type) type {
-    return struct {
-        mbr: MaybeBufferedReader(MaybeReader),
-        src_buffer: if (MaybeReader != null) StrBuffer else void,
-        const Self = @This();
-
-        pub fn clearSrcBuffer(mbr_and_src: Self) void {
-            if (MaybeReader == null) return;
-            switch (mbr_and_src.src_buffer) {
-                inline else => |buf| buf.clearRetainingCapacity(),
-            }
-        }
     };
 }
 
@@ -115,50 +96,24 @@ pub fn nextTokenSrcAsEnum(
     return std.meta.stringToEnum(E, str.constSlice());
 }
 
-pub fn nextTokenFullStrOrRange(
-    tokenizer: *Tokenizer,
-    context: Tokenizer.Context,
-    comptime MaybeReader: ?type,
-    mbr_and_src: MBRAndSrcBuf(MaybeReader),
-) //
-if (MaybeReader) |Reader|
-    (error{ SrcStaticBufferTooSmall, SrcDynamicBufferOutOfMemory } || Reader.Error)![]const u8
-else
-    error{}!Tokenizer.Range //
-{
-    if (MaybeReader == null) {
-        return tokenizer.nextSrcNoUnderrun(context);
-    }
+pub fn TokenSrcIter(comptime MaybeReader: ?type) type {
+    return struct {
+        iterated_once: if (MaybeReader == null) bool else void = if (MaybeReader == null) false,
+        const Self = @This();
 
-    const src_buffer = mbr_and_src.src_buffer;
-
-    const mbr = mbr_and_src.mbr;
-    const reader = mbr.reader;
-    const read_buffer = mbr.read_buffer;
-
-    const start = switch (src_buffer) {
-        inline else => |buf| buf.items.len,
-    };
-    while (true) {
-        const maybe_str = tokenizer.nextSrcStream(context) catch {
-            const bytes_read = try reader.read(read_buffer);
-            if (bytes_read != 0) {
-                tokenizer.feedInput(read_buffer[0..bytes_read]);
+        pub fn next(
+            iter: *Self,
+            tokenizer: *Tokenizer,
+            context: Tokenizer.Context,
+            mbr: MaybeBufferedReader(MaybeReader),
+        ) !?if (MaybeReader != null) []const u8 else Tokenizer.Range {
+            if (MaybeReader != null) {
+                return nextTokenSegment(tokenizer, context, mbr.reader, mbr.read_buffer);
             } else {
-                tokenizer.feedEof();
+                defer iter.iterated_once = true;
+                return if (iter.iterated_once) null else tokenizer.nextSrcNoUnderrun(context);
             }
-            continue;
-        };
-        const str = maybe_str orelse break;
-        switch (src_buffer) {
-            .static => |static| if (str.len <= static.unusedCapacitySlice().len) {
-                static.appendSliceAssumeCapacity(str);
-            } else return error.SrcStaticBufferTooSmall,
-            .dyn => |dyn| dyn.appendSlice(str) catch return error.SrcDynamicBufferOutOfMemory,
         }
-    }
-    return switch (src_buffer) {
-        inline else => |buf| buf.items[start..],
     };
 }
 
@@ -186,7 +141,7 @@ pub fn nextTokenTypeIgnoreTagWhitespace(
     context: Tokenizer.Context,
     comptime MaybeReader: ?type,
     mbr: MaybeBufferedReader(MaybeReader),
-) !Tokenizer.TokenType {
+) (if (MaybeReader) |Reader| Reader.Error else error{})!Tokenizer.TokenType {
     switch (try nextTokenType(tokenizer, context, MaybeReader, mbr)) {
         else => |tag| return tag,
         .tag_whitespace => {},
@@ -209,7 +164,7 @@ pub fn expectAndSkipIfTagWhitespace(
     context: Tokenizer.Context,
     comptime MaybeReader: ?type,
     mbr: MaybeBufferedReader(MaybeReader),
-) !?Tokenizer.TokenType {
+) (if (MaybeReader) |Reader| Reader.Error else error{})!?Tokenizer.TokenType {
     switch (try nextTokenType(tokenizer, context, MaybeReader, mbr)) {
         else => |tag| return tag,
         .tag_whitespace => {},
@@ -226,10 +181,29 @@ pub fn skipTokenStr(
     context: Tokenizer.Context,
     comptime MaybeReader: ?type,
     mbr: MaybeBufferedReader(MaybeReader),
-) !void {
+) (if (MaybeReader) |Reader| Reader.Error else error{})!void {
     if (MaybeReader == null) {
         _ = tokenizer.nextSrcNoUnderrun(context);
         return;
     }
     while (try nextTokenSegment(tokenizer, context, mbr.reader, mbr.read_buffer)) |_| {}
+}
+
+pub const CommentSkipResult = enum {
+    normal_end,
+    invalid_end_triple_dash,
+    invalid_dash_dash,
+};
+pub fn handleCommentSkip(
+    tokenizer: *Tokenizer,
+    comptime MaybeReader: ?type,
+    mbr: MaybeBufferedReader(MaybeReader),
+) (if (MaybeReader) |Reader| Reader.Error else error{})!CommentSkipResult {
+    return while (true) switch (try nextTokenType(tokenizer, .comment, MaybeReader, mbr)) {
+        .text_data => try skipTokenStr(tokenizer, .comment, MaybeReader, mbr),
+        .invalid_comment_dash_dash => break .invalid_dash_dash,
+        .invalid_comment_end_triple_dash => break .invalid_end_triple_dash,
+        .comment_end => break .normal_end,
+        else => unreachable,
+    };
 }

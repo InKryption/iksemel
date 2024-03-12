@@ -132,11 +132,8 @@ pub inline fn parseSlice(
     parse_ctx_impl: anytype,
 ) !void {
     return parseImpl(parse_ctx_impl, tokenizer, null, .{
-        .mbr = .{
-            .reader = {},
-            .read_buffer = {},
-        },
-        .src_buffer = {},
+        .reader = {},
+        .read_buffer = {},
     });
 }
 
@@ -164,140 +161,11 @@ fn parseImpl(
     parse_ctx_impl: anytype,
     tokenizer: *Tokenizer,
     comptime MaybeReader: ?type,
-    mbr_and_src: parse_helper.MBRAndSrcBuf(MaybeReader),
+    mbr: parse_helper.MaybeBufferedReader(MaybeReader),
 ) !void {
-    const Impl = @TypeOf(parse_ctx_impl);
-    const parse_ctx: ParseCtx(Impl) = .{ .inner = parse_ctx_impl };
-
-    const mbr = mbr_and_src.mbr;
-    mbr_and_src.clearSrcBuffer();
-
-    const root_is_already_closed = switch (try handleLeftAngleBracket(Impl, parse_ctx, tokenizer, MaybeReader, mbr_and_src)) {
-        .element_open => false,
-        .element_open_inline_close => true,
-        .element_close => return ParseError.UnopenedRootElement,
-    };
-    var depth: u64 = 1;
-
-    // set to true while feeding text, to indicate when
-    // to `feedTextDataEnd`, such that a string of references
-    // interspersed with text are fed as a single stream of
-    // textual data.
-    var feeding_text = false;
-
-    if (!root_is_already_closed) while (true) switch (try parse_helper.nextTokenType(tokenizer, .non_markup, MaybeReader, mbr)) {
-        .eof => return ParseError.UnclosedElement,
-        .angle_bracket_left => {
-            if (feeding_text) {
-                feeding_text = false;
-                try parse_ctx.feedTextDataEnd();
-            }
-
-            switch (try handleLeftAngleBracket(Impl, parse_ctx, tokenizer, MaybeReader, mbr_and_src)) {
-                .element_open => depth += 1,
-                .element_open_inline_close => {},
-                .element_close => {
-                    depth -= 1;
-                    if (depth == 0) break;
-                },
-            }
-        },
-        .text_data => {
-            feeding_text = true;
-            if (MaybeReader != null) {
-                while (try parse_helper.nextTokenSegment(tokenizer, .non_markup, mbr.reader, mbr.read_buffer)) |segment| {
-                    try parse_ctx.feedTextDataSegment(segment);
-                }
-            } else {
-                const range = tokenizer.nextSrcNoUnderrun(.non_markup);
-                try parse_ctx.feedTextDataSegment(range);
-            }
-        },
-        .ampersand => {
-            feeding_text = true;
-            switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
-                else => unreachable,
-                .invalid_reference_end => return ParseError.InvalidReferenceEnd,
-                .semicolon => return ParseError.EmptyReference,
-                .tag_token => {},
-            }
-            mbr_and_src.clearSrcBuffer();
-            const name = try parse_helper.nextTokenFullStrOrRange(tokenizer, .reference, MaybeReader, mbr_and_src);
-            try parse_ctx.feedTextDataReference(name);
-        },
-
-        .pi_start => {
-            if (feeding_text) {
-                feeding_text = false;
-                try parse_ctx.feedTextDataEnd();
-            }
-
-            switch (try parse_helper.nextTokenType(tokenizer, .pi, MaybeReader, mbr)) {
-                .text_data => {
-                    const pi_data = try parse_helper.nextTokenFullStrOrRange(tokenizer, .pi, MaybeReader, mbr_and_src);
-                    try parse_ctx.feedPI(pi_data);
-                    switch (try parse_helper.nextTokenType(tokenizer, .pi, MaybeReader, mbr)) {
-                        .pi_end => {},
-                        .eof => return ParseError.UnclosedPI,
-                        else => unreachable,
-                    }
-                },
-                .pi_end => return ParseError.EmptyPI,
-                .eof => return ParseError.UnclosedPI,
-                else => unreachable,
-            }
-        },
-
-        .invalid_comment_start_single_dash => return ParseError.InvalidCommentStartSingleDash,
-        .cdata_start => while (true) switch (try parse_helper.nextTokenType(tokenizer, .cdata, MaybeReader, mbr)) {
-            .eof => return ParseError.UnclosedCDataSection,
-            .text_data => if (MaybeReader != null) {
-                while (try parse_helper.nextTokenSegment(tokenizer, .non_markup, mbr.reader, mbr.read_buffer)) |segment| {
-                    try parse_ctx.feedTextDataSegment(segment);
-                }
-            } else {
-                const range = tokenizer.nextSrcNoUnderrun(.non_markup);
-                try parse_ctx.feedTextDataSegment(range);
-            },
-            .cdata_end => break,
-            else => unreachable,
-        },
-
-        .invalid_cdata_start => {
-            try parse_helper.skipTokenStr(tokenizer, .non_markup, MaybeReader, mbr);
-            return ParseError.InvalidCDataStart;
-        },
-        .cdata_end => return ParseError.InvalidCDataEnd,
-        .dtd_start => return ParseError.UnexpectedToken,
-        .invalid_dtd_start => {
-            try parse_helper.skipTokenStr(tokenizer, .non_markup, MaybeReader, mbr);
-            return ParseError.UnexpectedToken;
-        },
-        .invalid_angle_bracket_left_bang => return ParseError.InvalidAngleBracketLeftBang,
-
-        .comment_start => try handleCommentSkip(tokenizer, MaybeReader, mbr),
-        else => unreachable,
-    };
-
-    while (true) switch (try parse_helper.nextTokenType(tokenizer, .non_markup, MaybeReader, mbr)) {
-        .eof => break,
-        .text_data => switch (try parse_helper.skipWhitespaceTokenSrc(tokenizer, .non_markup, MaybeReader, mbr)) {
-            .all_whitespace => {},
-            .non_whitespace => return ParseError.UnexpectedToken,
-        },
-        .comment_start => try handleCommentSkip(tokenizer, MaybeReader, mbr),
-        else => return ParseError.UnexpectedToken,
-    };
-}
-
-pub fn handleCommentSkip(tokenizer: *Tokenizer, comptime MaybeReader: ?type, mbr: parse_helper.MaybeBufferedReader(MaybeReader)) !void {
-    while (true) switch (try parse_helper.nextTokenType(tokenizer, .comment, MaybeReader, mbr)) {
-        .text_data => try parse_helper.skipTokenStr(tokenizer, .comment, MaybeReader, mbr),
-        .invalid_comment_dash_dash => return ParseError.CommentDashDash,
-        .invalid_comment_end_triple_dash => return ParseError.CommentEndTripleDash,
-        .comment_end => break,
-        else => unreachable,
-    };
+    _ = parse_ctx_impl;
+    _ = tokenizer;
+    _ = mbr;
 }
 
 const LabResult = enum {

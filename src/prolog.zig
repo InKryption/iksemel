@@ -10,24 +10,17 @@ const parse_helper = @import("parse_helper.zig");
 pub const ExternalIdKind = enum { SYSTEM, PUBLIC };
 
 pub const ReferenceKind = enum {
-    /// Represents a General Entity reference ('&foo;').
+    /// Represents a General Entity reference ('&name;').
     general,
-    /// Represents a Parsed Entity reference ('&foo;').
+    /// Represents a Parsed Entity reference ('%name;').
     parsed,
 };
 
-pub const EmptyOrAny = enum {
+pub const ContentSpec = enum {
     EMPTY,
     ANY,
-};
-
-pub const ContentParticleQuantity = enum {
-    /// '?'
-    none_or_one,
-    /// '*'
-    none_or_many,
-    /// '+'
-    one_or_many,
+    Mixed,
+    children,
 };
 
 pub const AttributeType = enum {
@@ -36,8 +29,10 @@ pub const AttributeType = enum {
     ID,
     IDREF,
     IDREFS,
+
     ENTITY,
     ENTITIES,
+
     NMTOKEN,
     NMTOKENS,
 
@@ -51,302 +46,202 @@ pub const DefaultDeclKind = enum {
     FIXED,
 };
 
+pub const ElementChildToken = enum {
+    lparen,
+    rparen,
+    comma,
+    pipe,
+    name,
+    qmark,
+    asterisk,
+    plus,
+};
+
 pub fn ParseCtx(comptime Inner: type) type {
     return struct {
         inner: Inner,
         const Self = @This();
 
-        /// Feeds the data from a PI section.
-        pub fn feedPI(
+        /// Called consecutively to construct the source.
+        /// Terminated by `feedSrcEnd`.
+        pub fn feedSrcSegment(
             ctx: Self,
             /// * `[]const u8`
             /// * `Tokenizer.Range`
-            data: anytype,
+            segment: anytype,
         ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(data));
-            return ctx.inner.feedPI(data);
+            switch (@TypeOf(segment)) {
+                []const u8, Tokenizer.Range => {},
+                else => @compileError(
+                    "" ++
+                        "Expected one of " ++
+                        @typeName([]const u8) ++
+                        " or " ++
+                        @typeName(Tokenizer.Range) ++
+                        ", instead got " ++
+                        @typeName(@TypeOf(segment)),
+                ),
+            }
+            return ctx.inner.feedSrcSegment(segment);
+        }
+        pub fn feedSrcEnd(ctx: Self) !void {
+            return ctx.inner.feedSrcEnd();
         }
 
-        /// Marks the start of the DTD, providing the DTD name.
-        /// Optionally followed by a call to `feedDTDExternalId`,
-        /// and then afterwards, possibly followed by a series
-        /// of interspersed calls to:
-        /// * `feedPI`.
-        /// * `feedDTDEntityStart`, followed by calls described in its docs.
-        /// * `feedDTDElementStart`, followed by calls described in its docs.
-        /// * `feedDTDAttlistStart`, followed by calls described in its docs.
-        /// * `feedDTDNotation`.
-        pub fn feedDTDName(
-            ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            name: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(name));
-            return ctx.inner.feedDTDName(name);
+        /// Followed by `feedSrc*`, in order to construct the reference
+        /// id/name token source, and then by `feedReferenceEnd`.
+        pub fn feedReferenceStart(ctx: Self, kind: ReferenceKind) !void {
+            return ctx.inner.feedReferenceStart(kind);
+        }
+        pub fn feedReferenceEnd(ctx: Self) !void {
+            return ctx.inner.feedReferenceEnd();
         }
 
-        pub fn feedDTDExternalId(
-            ctx: Self,
-            kind: ExternalIdKind,
-            /// * `?[]const u8`
-            /// * `?Tokenizer.Range`
-            pubid_lit: anytype,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            system_lit: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.is_optional, @TypeOf(pubid_lit));
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(system_lit));
-            return ctx.inner.feedDTDExternalId(kind, pubid_lit, system_lit);
+        /// Followed by `feedSrc*`, in order to feed the Processing
+        /// Instructions (parsing of the PI target and data are
+        /// left to the context).
+        pub fn feedPI(ctx: Self) !void {
+            return ctx.inner.feedPI();
         }
 
-        // --- DTD ENTITY ---
+        /// Followed by `feedSrc*`, in order to construct the DTD name.
+        /// Afterwards, may be followed by one of:
+        /// * `feedDTDExternalId`
+        /// * `feedDTDEntityStart`
+        /// * `feedDTDEnd`
+        pub fn feedDTDStart(ctx: Self) !void {
+            return ctx.inner.feedDTDStart();
+        }
 
-        /// Begins an Entity Declaration, providing the kind (parsed or general), and the
-        /// entity name. The next call can be to:
-        /// * `feedDTDEntityValueTextSegment` or `feedDTDEntityValueReference`:
-        ///   if either of these are called, they may be called multiple times afterwards
-        ///   to construct the entity value, terminated by a call to `feedDTDEntityValueEnd`.
+        /// If `kind == .PUBLIC`, this is followed by `feedSrc*` twice,
+        /// first for the pubid literal, then for the system literal.
         ///
-        /// * `feedDTDEntityValueExternalId`:
-        ///   the entity value is constructed by this single method call.
-        pub fn feedDTDEntityStart(
-            ctx: Self,
-            kind: ReferenceKind,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            name: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(name));
-            return ctx.inner.feedDTDEntityStart(kind, name);
+        /// If `kind == .SYSTEM`, this is followed by `feedSrc*` once,
+        /// for the system literal.
+        ///
+        /// After either of the above, this may be followed by one of:
+        /// * `feedDTDEntityStart`
+        /// * `feedDTDEnd`
+        pub fn feedDTDExternalId(ctx: Self, kind: ExternalIdKind) !void {
+            return ctx.inner.feedDTDExternalId(kind);
         }
 
-        /// Called consecutively to construct the text.
-        /// Can be interspersed with calls to `feedDTDEntityValueReference`.
-        /// Terminated by a call to `feedDTDEntityValueEnd`.
-        pub fn feedDTDEntityValueTextSegment(
-            ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            text: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(text));
-            return ctx.inner.feedDTDEntityValueTextSegment(text);
+        /// If `kind == .general`, this may be followed by one of the
+        /// following sequences:
+        /// * `(feedSrc* | feedReference)*`, for a simple entity value.
+        /// * `feedDTDExternalId feedDTDNDataDecl?`
+        ///
+        /// If `kind == .parsed`, this may be followed by one of the
+        /// following sequences:
+        /// * `(feedSrc* | feedReference)*`, for a simple entity value.
+        /// * `feedDTDExternalId`
+        ///
+        /// After either of the above, this will be followed by `feedDTDEntityEnd`.
+        pub fn feedDTDEntityStart(ctx: Self, kind: ReferenceKind) !void {
+            return ctx.inner.feedDTDEntityStart(kind);
+        }
+        pub fn feedDTDEntityEnd(ctx: Self) !void {
+            return ctx.inner.feedDTDEntityEnd();
+        }
+        /// Followed by `feedSrc*`, in order to construct the NDataDecl name.
+        pub fn feedDTDNDataDecl(ctx: Self) !void {
+            return ctx.feedDTDNDataDecl();
         }
 
-        pub fn feedDTDEntityValueReference(
-            ctx: Self,
-            kind: ReferenceKind,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            id: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(id));
-            return ctx.inner.feedDTDEntityValueReference(kind, id);
+        /// Followed by `feedSrc*`, in order to construct the element name.
+        /// Afterwards, it will be followed by a call to `feedDTDElementContentSpec`.
+        pub fn feedDTDElementStart(ctx: Self) !void {
+            return ctx.inner.feedDTDElementStart();
+        }
+        /// If `content_spec == .EMPTY` or `content_spec == .ANY`, this is
+        /// followed by `feedDTDElementEnd`.
+        ///
+        /// If `content_spec == .Mixed`, this is potentially followed by a
+        /// series of calls to `feedSrc*` for each name that appears in the
+        /// listing. Afterwards, it is followed by a call to `feedDTDElementMixedEnd`.
+        pub fn feedDTDElementContentSpec(ctx: Self, content_spec: ContentSpec) !void {
+            return ctx.inner.feedDTDElementContentSpec(content_spec);
         }
 
-        pub fn feedDTDEntityValueEnd(ctx: Self) !void {
-            return ctx.inner.feedDTDEntityValueEnd();
-        }
-
-        pub fn feedDTDEntityValueExternalId(
-            ctx: Self,
-            kind: ExternalIdKind,
-            /// * `?[]const u8`
-            /// * `?Tokenizer.Range`
-            pubid_lit: anytype,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            system_lit: anytype,
-            /// * `?[]const u8`
-            /// * `?Tokenizer.Range`
-            ndata_name: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.is_optional, @TypeOf(pubid_lit));
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(system_lit));
-            comptime parse_helper.checkSrcType(.is_optional, @TypeOf(ndata_name));
-            return ctx.inner.feedDTDEntityValueExternalId(kind, pubid_lit, system_lit, ndata_name);
-        }
-
-        // --- DTD ELEMENT ---
-
-        /// Opens a DTD Element Declaration, providing the name.
-        /// The next call can be to:
-        /// * `feedDTDElementEmptyOrAny`:
-        ///   ends the element declaration immediately as the content specification is simply 'EMPTY' or 'ANY'.
-        /// * `feedDTDElementLParen`:
-        ///   opens a nesting, followed by calls described in its docs.
-        /// * `feedDTDElementMixedStart`:
-        ///   starts a Mixed content list, followed by calls described in its docs.
-        pub fn feedDTDElementStart(
-            ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            name: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(name));
-            return ctx.inner.feedDTDElementStart(name);
-        }
-
-        pub fn feedDTDElementEmptyOrAny(ctx: Self, kind: EmptyOrAny) !void {
-            return ctx.inner.feedDTDElementEmptyOrAny(kind);
-        }
-
-        /// Starts a Mixed content list. Can be optionally followed by
-        /// a series of calls to `feedDTDElementIdentifier` (with `quantity == null`),
-        /// ultimately terminated by a call to `feedDTDElementMixedEnd`.
-        pub fn feedDTDElementMixedStart(ctx: Self) !void {
-            return ctx.inner.feedDTDElementMixedStart();
-        }
-
-        /// Ends the Mixed content list.
-        /// If `zero_or_many`, the Mixed content list is quantified by '*' (zero or many),
-        /// otherwise, it is only comprised by #PCDATA.
+        /// If `zero_or_many`, the listing matches: '(' S? '#PCDATA' (S? '|' S? Name)* S? ')*'.
+        /// If `!zero_or_many`, the listing matches '(' S? '#PCDATA' S? ')'.
+        /// Followed by a call to `feedDTDElementEnd`.
         pub fn feedDTDElementMixedEnd(ctx: Self, zero_or_many: bool) !void {
             return ctx.inner.feedDTDElementMixedEnd(zero_or_many);
         }
 
-        /// Feeds a Content Particle composed by a name.
-        pub fn feedDTDElementIdentifier(
-            ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            name: anytype,
-            quantity: ?ContentParticleQuantity,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(name));
-            return ctx.inner.feedDTDElementIdentifier(name, quantity);
+        /// If `child_tok == .name`, this is followed by `feedSrc*`, and then afterwards
+        /// regardless of `child_tok`, what follows is a call to `feedElementEnd`.
+        pub fn feedDTDElementChildToken(ctx: Self, child_tok: ElementChildToken) !void {
+            return ctx.inner.feedDTDElementChildToken(child_tok);
         }
 
-        /// Feeds a left parentheses, indicating the start of a grouped sequence or choice.
-        /// Can be followed by:
-        /// * `feedDTDElementLParen`, nesting deeper.
-        /// * `feedDTDElementIdentifier`.
-        /// * `feedDTDElementChoiceSep`.
-        /// * `feedDTDElementSequenceSep`.
-        pub fn feedDTDElementLParen(ctx: Self) !void {
-            return ctx.inner.feedDTDElementLParen();
+        pub fn feedDTDElementEnd(ctx: Self) !void {
+            return ctx.inner.feedDTDElementEnd();
         }
 
-        /// Feeds a right parentheses, indicating the end of the current grouped sequence or choice.
-        /// Provides the quantity indicator following it.
-        /// Indicates whether this is the end of the element content specification.
-        pub fn feedDTDElementRParen(ctx: Self, quantity: ?ContentParticleQuantity, end: bool) !void {
-            return ctx.inner.feedDTDElementRParen(quantity, end);
+        /// Followed by `feedSrc*`, in order to construct the attribute list name.
+        /// Afterwards, it will be followed by a series of consecutive calls to
+        /// `feedDTDAttlistDef`, terminated by  a call to `feedDTDAttlistEnd`.
+        pub fn feedDTDAttlistStart(ctx: Self) !void {
+            return ctx.inner.feedDTDAttlistStart();
         }
 
-        /// Feeds the '|' token.
-        pub fn feedDTDElementChoiceSep(ctx: Self) !void {
-            return ctx.inner.feedDTDElementChoiceSep();
+        /// Followed by `feedSrc*`, in order to construct the attribute defintion name.
+        /// Afterwards, it will be followed by a call to `feedDTDAttlistDefType`.
+        pub fn feedDTDAttlistDef(ctx: Self) !void {
+            return ctx.inner.feedDTDAttlistDef();
         }
 
-        /// Feeds the ',' token.
-        pub fn feedDTDElementSequenceSep(ctx: Self) !void {
-            return ctx.inner.feedDTDElementSequenceSep();
+        /// If `attr_type == .NOTATION or attr_type == .enumeration`, this will
+        /// be followed by a series of calls to `feedSrc*`, for the list of
+        /// potential Name/Nmtokens.
+        /// Followed by a call to `feedDTDAttlistDefaultDeclStart`.
+        pub fn feedDTDAttlistDefType(ctx: Self, attr_type: AttributeType) !void {
+            return ctx.inner.feedDTDAttlistDefType(attr_type);
         }
 
-        // --- DTD ATTLIST ---
-
-        /// Opens a DTD Attribute List Declaration, providing the name.
-        /// Can be followed by calls to:
-        /// * `feedDTDAttlistDefStart`
-        /// * `feedDTDAttlistDefaultDeclStart`
-        pub fn feedDTDAttlistStart(
-            ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            name: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(name));
-            return ctx.inner.feedDTDAttlistStart(name);
+        /// If `default_decl_kind == null or default_decl_kind.? == .FIXED`, this
+        /// will be followed by a sequence of interspersed calls to `feedSrc*` and
+        /// `feedReference` for the attribute value. This will be followed
+        /// by a call to `feedDTDAttlistDefaultDeclEnd`.
+        pub fn feedDTDAttlistDefaultDeclStart(ctx: Self, default_decl_kind: ?DefaultDeclKind) !void {
+            return ctx.inner.feedDTDAttlistDefaultDeclStart(default_decl_kind);
         }
 
-        /// Starts an attribute definition, providing the name
-        /// and type.
-        /// If `attr_type == .NOTATION` or `attr_type == .enumeration`,
-        /// this will be followed by a call to `feedDTDAttlistDefNmtoken`,
-        /// otherwise it will be followed by a call to `feedDTDAttlistDefaultDeclStart`.
-        pub fn feedDTDAttlistDefStart(
-            ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            name: anytype,
-            attr_type: AttributeType,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(name));
-            return ctx.inner.feedDTDAttlistDefStart(name, attr_type);
-        }
-
-        /// This may be followed by another call to `feedDTDAttlistDefNmtoken`,
-        /// or terminated by a call to `feedDTDAttlistDefaultDeclStart`.
-        pub fn feedDTDAttlistDefNmtoken(
-            ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            name: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(name));
-            return ctx.inner.feedDTDAttlistDefNmtoken(name);
-        }
-
-        /// Feeds the '#REQUIRED', '#IMPLIED', or '#FIXED' token, or nothing.
-        /// If `kind == .FIXED` or `kind == null`, this will be followed by a series of consecutive interspersed
-        /// calls to `feedDTDAttlistDefaultDeclValueSegment` and to `feedDTDAttlistDefaultDeclValueReference`,
-        /// terminated by a call to `feedDTDAttlistDefaultDeclValueEnd`.
-        pub fn feedDTDAttlistDefaultDeclStart(ctx: Self, kind: ?DefaultDeclKind) !void {
-            return ctx.inner.feedDTDAttlistDefaultDeclStart(kind);
-        }
-
-        pub fn feedDTDAttlistDefaultDeclValueSegment(
-            ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            text: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(text));
-            return ctx.inner.feedDTDAttlistDefaultDeclValueSegment(text);
-        }
-
-        pub fn feedDTDAttlistDefaultDeclValueReference(
-            ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            name: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(name));
-            return ctx.inner.feedDTDAttlistDefaultDeclValueReference(name);
-        }
-
-        /// Followed by a call to `feedDTDAttlistDefStart` or `feedDTDAttlistEnd`.
-        pub fn feedDTDAttlistDefaultDeclValueEnd(ctx: Self) !void {
-            return ctx.inner.feedDTDAttlistDefaultDeclValueEnd();
+        /// This will be followed by a call to `feedDTDAttlistDef` or `feedDTDAttlistEnd`.
+        pub fn feedDTDAttlistDefaultDeclEnd(ctx: Self) !void {
+            return ctx.inner.feedDTDAttlistDefaultDeclEnd();
         }
 
         pub fn feedDTDAttlistEnd(ctx: Self) !void {
             return ctx.inner.feedDTDAttlistEnd();
         }
 
-        // --- DTD NOTATION ---
+        /// Followed by `feedSrc*` in order to  construct the Notation declaration name.
+        /// Afterwards, it will be followed by a call to `feedExternalOrPublicId`.
+        pub fn feedDTDNotationStart(ctx: Self) !void {
+            return ctx.inner.feedDTDNotationStart();
+        }
 
-        /// Opens a DTD Notation declaration.
-        pub fn feedDTDNotation(
-            ctx: Self,
-            /// * `[]const u8`
-            /// * `Tokenizer.Range`
-            name: anytype,
-            ext_id_kind: ExternalIdKind,
-            /// * `?[]const u8`
-            /// * `?Tokenizer.Range`
-            sys_literal: anytype,
-            /// * `?[]const u8`
-            /// * `?Tokenizer.Range`
-            pubid_literal: anytype,
-        ) !void {
-            comptime parse_helper.checkSrcType(.not_optional, @TypeOf(name));
-            comptime parse_helper.checkSrcType(.is_optional, @TypeOf(sys_literal));
-            comptime parse_helper.checkSrcType(.is_optional, @TypeOf(pubid_literal));
-            return ctx.inner.feedDTDNotation(name, ext_id_kind, sys_literal, pubid_literal);
+        /// If `kind == .SYSTEM`, this is followed by `feedSrc*` once,
+        /// for the system literal.
+        ///
+        /// If `kind == .PUBLIC`, this is followed by `feedSrc*` at least once,
+        /// and then optionally a second time.
+        ///
+        /// After either of the above, this will be followed by `feedDTDNotationEnd`.
+        pub fn feedExternalOrPublicId(ctx: Self, kind: ExternalIdKind) !void {
+            return ctx.inner.feedDTDExternalOrPublicId(kind);
+        }
+
+        pub fn feedDTDNotationEnd(ctx: Self) !void {
+            return ctx.inner.feedDTDNotationEnd();
+        }
+
+        /// Ends the DTD Declaration.
+        pub fn feedDTDEnd(ctx: Self) !void {
+            return ctx.inner.feedDTDEnd();
         }
     };
 }
@@ -354,33 +249,35 @@ pub fn ParseCtx(comptime Inner: type) type {
 pub const ParseError = error{
     NonWhitespaceInProlog,
     AngleBracketLeftBang,
-    InvalidReferenceEnd,
-    EmptyReference,
-    ExternalIdMissingSystemLiteral,
+    AngleBracketLeftInAttribute,
 
-    EmptyPI,
     UnclosedPI,
+    EmptyPI,
 
     InvalidCommentStart,
     CommentDashDash,
     CommentEndTripleDash,
 
     InvalidDTDStart,
-    UnclosedDTD,
-    MissingDTDSpacing,
     UnexpectedDTDToken,
+    MissingDTDSpacing,
 
-    AngleBracketLeftInAttributeValue,
-    UnclosedPubidLiteral,
-    InvalidPubidLiteral,
-    UnclosedSystemLiteral,
+    UnclosedDTDPubidLiteral,
+    InvalidDTDPubidLiteral,
+    UnclosedDTDSystemLiteral,
+    InvalidDTDDecl,
+    UnclosedDTDEntityValue,
+    UnclosedAttributeValue,
+    MissingAsteriskForManyPCDATAOptions,
 
+    InvalidReferenceEnd,
+    EmptyReference,
+
+    UnclosedDTD,
     UnclosedDTDEntity,
     UnclosedDTDElement,
     UnclosedDTDAttlist,
     UnclosedDTDNotation,
-
-    ElementMultiMixedWithoutZeroOrMany,
 };
 
 pub inline fn parseSlice(
@@ -389,12 +286,9 @@ pub inline fn parseSlice(
     /// Must satisfy the interface described by `ParseCtx`.
     parse_ctx_impl: anytype,
 ) !Tokenizer.TokenType {
-    return parseUntilAngleBracketLeftReaderOrFull(parse_ctx_impl, tokenizer, null, .{
-        .mbr = .{
-            .reader = {},
-            .read_buffer = {},
-        },
-        .src_buffer = {},
+    return parseUntilLABReaderOrSlice(parse_ctx_impl, tokenizer, null, .{
+        .reader = {},
+        .read_buffer = {},
     });
 }
 
@@ -409,7 +303,7 @@ pub inline fn parseReader(
     parse_ctx_impl: anytype,
 ) !Tokenizer.TokenType {
     var tokenizer = Tokenizer.initStreaming();
-    return parseUntilAngleBracketLeftReaderOrFull(parse_ctx_impl, &tokenizer, @TypeOf(reader), .{
+    return parseUntilLABReaderOrSlice(parse_ctx_impl, &tokenizer, @TypeOf(reader), .{
         .mbr = .{
             .reader = reader,
             .read_buffer = read_buffer,
@@ -418,1123 +312,965 @@ pub inline fn parseReader(
     });
 }
 
-fn parseUntilAngleBracketLeftReaderOrFull(
+fn parseUntilLABReaderOrSlice(
     parse_ctx_impl: anytype,
     tokenizer: *Tokenizer,
     comptime MaybeReader: ?type,
-    mbr_and_src: parse_helper.MBRAndSrcBuf(MaybeReader),
+    mbr: parse_helper.MaybeBufferedReader(MaybeReader),
 ) !Tokenizer.TokenType {
     const Impl = @TypeOf(parse_ctx_impl);
     const parse_ctx: ParseCtx(Impl) = .{ .inner = parse_ctx_impl };
 
-    const mbr = mbr_and_src.mbr;
-    mbr_and_src.clearSrcBuffer();
+    while (true) switch (try parse_helper.nextTokenType(tokenizer, .non_markup, MaybeReader, mbr)) {
+        .eof, .angle_bracket_left => |tag| return tag,
+
+        .pi_start => try handlePi(Impl, parse_ctx, tokenizer, MaybeReader, mbr),
+
+        .dtd_start => {
+            try handleDTD(Impl, parse_ctx, tokenizer, MaybeReader, mbr);
+            try parse_ctx.feedDTDEnd();
+        },
+
+        .comment_start => switch (try parse_helper.handleCommentSkip(tokenizer, MaybeReader, mbr)) {
+            .normal_end => {},
+            .invalid_end_triple_dash => return ParseError.CommentEndTripleDash,
+            .invalid_dash_dash => return ParseError.CommentDashDash,
+        },
+
+        .text_data => switch (try parse_helper.skipWhitespaceTokenSrc(tokenizer, .non_markup, MaybeReader, mbr)) {
+            .all_whitespace => {},
+            .non_whitespace => return ParseError.NonWhitespaceInProlog,
+        },
+
+        .ampersand => return ParseError.NonWhitespaceInProlog,
+        .cdata_start => return ParseError.NonWhitespaceInProlog,
+        .invalid_angle_bracket_left_bang => return ParseError.AngleBracketLeftBang,
+        .invalid_comment_start_single_dash => return ParseError.InvalidCommentStart,
+
+        .invalid_dtd_start => {
+            try parse_helper.skipTokenStr(tokenizer, .non_markup, MaybeReader, mbr);
+            return ParseError.InvalidDTDStart;
+        },
 
-    while (true) {
-        switch (try parse_helper.nextTokenType(tokenizer, .non_markup, MaybeReader, mbr)) {
-            .eof, .angle_bracket_left => |tag| return tag,
-
-            .text_data => switch (try parse_helper.skipWhitespaceTokenSrc(tokenizer, .non_markup, MaybeReader, mbr)) {
-                .all_whitespace => {},
-                .non_whitespace => return ParseError.NonWhitespaceInProlog,
-            },
-            .ampersand => return ParseError.NonWhitespaceInProlog,
-            .cdata_start => return ParseError.NonWhitespaceInProlog,
-            .invalid_angle_bracket_left_bang => return ParseError.AngleBracketLeftBang,
-
-            .invalid_comment_start_single_dash => return ParseError.InvalidCommentStart,
-            .comment_start => try handleCommentSkip(tokenizer, MaybeReader, mbr),
-            .pi_start => try handlePi(Impl, parse_ctx, tokenizer, MaybeReader, mbr_and_src),
-
-            .invalid_dtd_start => {
-                try parse_helper.skipTokenStr(tokenizer, .non_markup, MaybeReader, mbr);
-                return ParseError.InvalidDTDStart;
-            },
-            .dtd_start => {
-                if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                    .tag_whitespace => unreachable,
-                    .eof => return ParseError.UnclosedDTD,
-                    else => return ParseError.MissingDTDSpacing,
-                };
-
-                switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                    else => return ParseError.UnexpectedDTDToken,
-                    .eof => return ParseError.UnclosedDTD,
-                    .tag_whitespace => unreachable,
-                    .tag_token => {},
-                }
-                mbr_and_src.clearSrcBuffer();
-                try parse_ctx.feedDTDName(try parse_helper.nextTokenFullStrOrRange(tokenizer, .dtd, MaybeReader, mbr_and_src));
-
-                const maybe_ending_tt = switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
-                    else => return ParseError.UnexpectedDTDToken,
-                    .eof => return ParseError.UnclosedDTD,
-                    .tag_whitespace => unreachable,
-
-                    // ExternalId
-                    .tag_token => tt: {
-                        mbr_and_src.clearSrcBuffer();
-                        const ext_id_kind, //
-                        const pubid_lit, //
-                        const system_lit, //
-                        const tt_after_str //
-                        = try parseDTDExternalIdParts(tokenizer, MaybeReader, mbr_and_src);
-                        try parse_ctx.feedDTDExternalId(ext_id_kind, pubid_lit, system_lit orelse return ParseError.ExternalIdMissingSystemLiteral);
-                        break :tt tt_after_str;
-                    },
-
-                    .square_bracket_left,
-                    .angle_bracket_right,
-                    => |tag| tag,
-                };
-
-                const ending_tt = switch (maybe_ending_tt) {
-                    else => return ParseError.UnexpectedDTDToken,
-                    .eof => return ParseError.UnclosedDTD,
-
-                    .square_bracket_left => while (true) switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                        else => return ParseError.UnexpectedDTDToken,
-
-                        .square_bracket_right => break try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr),
-
-                        .tag_whitespace => switch (try parse_helper.skipWhitespaceTokenSrc(tokenizer, .dtd, MaybeReader, mbr)) {
-                            .all_whitespace => {},
-                            .non_whitespace => unreachable,
-                        },
-
-                        .comment_start => try handleCommentSkip(tokenizer, MaybeReader, mbr),
-                        .pi_start => try handlePi(Impl, parse_ctx, tokenizer, MaybeReader, mbr_and_src),
-
-                        .dtd_decl => {
-                            const DtdDeclText = enum {
-                                @"<!NOTATION",
-                                @"<!ATTLIST",
-                                @"<!ELEMENT",
-                                @"<!ENTITY",
-                            };
-                            const dtd_type = (try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, DtdDeclText)) orelse
-                                return ParseError.UnexpectedDTDToken;
-
-                            if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                                .tag_whitespace => unreachable,
-                                .eof => return ParseError.UnclosedDTD,
-                                else => return ParseError.MissingDTDSpacing,
-                            };
-
-                            switch (dtd_type) {
-                                .@"<!ENTITY" => {
-                                    const ent_def_kind: ReferenceKind = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                        else => return ParseError.UnexpectedDTDToken,
-                                        .eof => return ParseError.UnclosedDTDEntity,
-                                        .tag_token => .general,
-                                        .percent => pct: {
-                                            if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                                                .tag_whitespace => unreachable,
-                                                .eof => return ParseError.UnclosedDTD,
-                                                else => return ParseError.MissingDTDSpacing,
-                                            };
-                                            switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                else => return ParseError.UnexpectedDTDToken,
-                                                .eof => return ParseError.UnclosedDTDEntity,
-                                                .tag_token => {},
-                                            }
-                                            break :pct .parsed;
-                                        },
-                                    };
-
-                                    mbr_and_src.clearSrcBuffer();
-                                    try parse_ctx.feedDTDEntityStart(ent_def_kind, try parse_helper.nextTokenFullStrOrRange(tokenizer, .dtd, MaybeReader, mbr_and_src));
-
-                                    if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                                        .tag_whitespace => unreachable,
-                                        .eof => return ParseError.UnclosedDTDEntity,
-                                        else => return ParseError.MissingDTDSpacing,
-                                    };
-
-                                    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                        else => return ParseError.UnexpectedDTDToken,
-                                        .eof => return ParseError.UnclosedDTDEntity,
-
-                                        .quote_single,
-                                        .quote_double,
-                                        => |open_quote| {
-                                            const str_ctx: Tokenizer.Context = switch (open_quote) {
-                                                .quote_single => .entity_value_quote_single,
-                                                .quote_double => .entity_value_quote_double,
-                                                else => unreachable,
-                                            };
-
-                                            while (true) switch (try parse_helper.nextTokenType(tokenizer, str_ctx, MaybeReader, mbr)) {
-                                                else => unreachable,
-
-                                                .quote_single,
-                                                .quote_double,
-                                                => |close_quote| {
-                                                    assert(open_quote == close_quote);
-                                                    break;
-                                                },
-                                                .text_data => if (MaybeReader != null) {
-                                                    while (try parse_helper.nextTokenSegment(tokenizer, str_ctx, mbr)) |segment| {
-                                                        try parse_ctx.feedDTDEntityValueTextSegment(segment);
-                                                    }
-                                                } else {
-                                                    const range = tokenizer.nextSrcNoUnderrun(str_ctx);
-                                                    try parse_ctx.feedDTDEntityValueTextSegment(range);
-                                                },
-                                                .ampersand, .percent => |ref_start| {
-                                                    const ref_kind: ReferenceKind = switch (ref_start) {
-                                                        .ampersand => .general,
-                                                        .percent => .parsed,
-                                                        else => unreachable,
-                                                    };
-
-                                                    // TODO: check that `.reference` behaves correctly here
-                                                    switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
-                                                        else => unreachable,
-                                                        .invalid_reference_end => return ParseError.InvalidReferenceEnd,
-                                                        .semicolon => return ParseError.EmptyReference,
-                                                        .tag_token => {
-                                                            mbr_and_src.clearSrcBuffer();
-                                                            const ref_id = try parse_helper.nextTokenFullStrOrRange(tokenizer, .reference, MaybeReader, mbr_and_src);
-                                                            switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
-                                                                .invalid_reference_end => return ParseError.InvalidReferenceEnd,
-                                                                .tag_token => unreachable,
-                                                                .semicolon => {},
-                                                                else => unreachable,
-                                                            }
-                                                            try parse_ctx.feedDTDEntityValueReference(ref_kind, ref_id);
-                                                        },
-                                                    }
-                                                },
-                                            };
-
-                                            try parse_ctx.feedDTDEntityValueEnd();
-
-                                            switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                else => return ParseError.UnexpectedDTDToken,
-                                                .eof => return ParseError.UnclosedDTDEntity,
-                                                .angle_bracket_right => {},
-                                            }
-                                        },
-
-                                        .tag_token => {
-                                            mbr_and_src.clearSrcBuffer();
-
-                                            const ext_id_kind, //
-                                            const pubid_lit, //
-                                            const maybe_system_lit, //
-                                            const tt_after_str //
-                                            = try parseDTDExternalIdParts(tokenizer, MaybeReader, mbr_and_src);
-                                            const system_lit = maybe_system_lit orelse return ParseError.ExternalIdMissingSystemLiteral;
-
-                                            const ndata_name: ?if (MaybeReader != null) []const u8 else Tokenizer.Range = switch (tt_after_str) {
-                                                else => |tag| {
-                                                    std.debug.print("\n{any}\n", .{.{ ext_id_kind, pubid_lit, system_lit, tag }});
-                                                    return ParseError.MissingDTDSpacing;
-                                                },
-                                                .eof => return ParseError.UnclosedDTDEntity,
-                                                .tag_whitespace => blk: {
-                                                    switch (try parse_helper.skipWhitespaceTokenSrc(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                        .all_whitespace => {},
-                                                        .non_whitespace => unreachable,
-                                                    }
-
-                                                    switch (ent_def_kind) {
-                                                        .general => switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                            else => return ParseError.UnexpectedDTDToken,
-                                                            .eof => return ParseError.UnclosedDTDEntity,
-                                                            .tag_whitespace => unreachable,
-                                                            .tag_token => {
-                                                                _ = (try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, enum { NDATA })) orelse
-                                                                    return ParseError.UnexpectedDTDToken;
-
-                                                                if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                                                                    .tag_whitespace => unreachable,
-                                                                    .eof => return ParseError.UnclosedDTDEntity,
-                                                                    else => return ParseError.MissingDTDSpacing,
-                                                                };
-
-                                                                const ndata_name = try parse_helper.nextTokenFullStrOrRange(tokenizer, .dtd, MaybeReader, mbr_and_src);
-
-                                                                switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                                    else => return ParseError.UnexpectedDTDToken,
-                                                                    .eof => return ParseError.UnclosedDTDEntity,
-                                                                    .tag_whitespace => switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                                        else => return ParseError.UnexpectedDTDToken,
-                                                                        .eof => return ParseError.UnclosedDTDEntity,
-                                                                        .tag_whitespace => unreachable,
-                                                                        .angle_bracket_right => {},
-                                                                    },
-                                                                    .angle_bracket_right => {},
-                                                                }
-
-                                                                break :blk ndata_name;
-                                                            },
-                                                            .angle_bracket_right => break :blk null,
-                                                        },
-                                                        .parsed => switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                            else => return ParseError.UnexpectedDTDToken,
-                                                            .eof => return ParseError.UnclosedDTDEntity,
-                                                            .tag_whitespace => unreachable,
-                                                            .angle_bracket_right => break :blk null,
-                                                        },
-                                                    }
-                                                },
-                                                .angle_bracket_right => null,
-                                            };
-
-                                            try parse_ctx.feedDTDEntityValueExternalId(ext_id_kind, pubid_lit, system_lit, ndata_name);
-                                        },
-                                    }
-                                },
-                                .@"<!ELEMENT" => {
-                                    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                        else => return ParseError.UnexpectedDTDToken,
-                                        .eof => return ParseError.UnclosedDTDElement,
-                                        .tag_whitespace => unreachable,
-                                        .tag_token => {},
-                                    }
-                                    mbr_and_src.clearSrcBuffer();
-                                    try parse_ctx.feedDTDElementStart(try parse_helper.nextTokenFullStrOrRange(tokenizer, .dtd, MaybeReader, mbr_and_src));
-
-                                    if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                                        .tag_whitespace => unreachable,
-                                        .eof => return ParseError.UnclosedDTDElement,
-                                        else => return ParseError.MissingDTDSpacing,
-                                    };
-
-                                    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                        else => return ParseError.UnexpectedDTDToken,
-                                        .eof => return ParseError.UnclosedDTDElement,
-                                        .tag_whitespace => unreachable,
-
-                                        .tag_token => {
-                                            mbr_and_src.clearSrcBuffer();
-                                            const tag_tok = try parse_helper.nextTokenFullStrOrRange(tokenizer, .dtd, MaybeReader, mbr_and_src);
-                                            const tag_tok_str: []const u8 = if (MaybeReader != null) tag_tok else tag_tok.toStr(tokenizer.src);
-                                            const tt_after_tok = if (std.meta.stringToEnum(EmptyOrAny, tag_tok_str)) |empty_or_any| blk: {
-                                                try parse_ctx.feedDTDElementEmptyOrAny(empty_or_any);
-                                                break :blk try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr);
-                                            } else blk: {
-                                                const quantity, const tt_after_quantity = try parseDTDElementCpQuantity(tokenizer, MaybeReader, mbr);
-                                                try parse_ctx.feedDTDElementIdentifier(tag_tok, quantity);
-                                                break :blk tt_after_quantity;
-                                            };
-
-                                            switch (tt_after_tok) {
-                                                else => return ParseError.UnexpectedDTDToken,
-                                                .eof => return ParseError.UnclosedDTDElement,
-                                                .tag_whitespace => unreachable,
-                                                .angle_bracket_right => {},
-                                            }
-                                        },
-                                        .lparen => mixed_or_children: {
-                                            const first_cached_tt = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                else => |tt| tt,
-                                                .tag_token => tt: {
-                                                    const tag_token = try parse_helper.nextTokenFullStrOrRange(tokenizer, .dtd, MaybeReader, mbr_and_src);
-                                                    const tag_token_str: []const u8 = if (MaybeReader != null) tag_token else tag_token.toStr(tokenizer.src);
-                                                    if (!std.mem.eql(u8, tag_token_str, "#PCDATA")) {
-                                                        const quantity, const tt_after_quantity = try parseDTDElementCpQuantity(tokenizer, MaybeReader, mbr);
-                                                        try parse_ctx.feedDTDElementIdentifier(tag_token, quantity);
-                                                        break :tt switch (tt_after_quantity) {
-                                                            else => return ParseError.UnexpectedDTDToken,
-                                                            .eof => return ParseError.UnclosedDTDElement,
-                                                            .qmark, .asterisk, .plus => unreachable,
-                                                            .tag_whitespace => unreachable,
-                                                            .angle_bracket_right, .rparen, .comma, .pipe => |tt| tt,
-                                                        };
-                                                    }
-
-                                                    try parse_ctx.feedDTDElementMixedStart();
-
-                                                    var more_than_one_option = false;
-                                                    while (true) : (more_than_one_option = true) {
-                                                        switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                            else => return ParseError.UnexpectedDTDToken,
-                                                            .eof => return ParseError.UnclosedDTDElement,
-                                                            .tag_whitespace => unreachable,
-                                                            .rparen => break,
-                                                            .pipe => {},
-                                                        }
-
-                                                        switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                            else => return ParseError.UnexpectedDTDToken,
-                                                            .eof => return ParseError.UnclosedDTDElement,
-                                                            .tag_whitespace => unreachable,
-                                                            .tag_token => {},
-                                                        }
-
-                                                        mbr_and_src.clearSrcBuffer();
-                                                        const ident = try parse_helper.nextTokenFullStrOrRange(tokenizer, .dtd, MaybeReader, mbr_and_src);
-                                                        try parse_ctx.feedDTDElementIdentifier(ident, null);
-                                                    }
-
-                                                    const zero_or_many = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                        else => return ParseError.UnexpectedDTDToken,
-                                                        .eof => return ParseError.UnclosedDTD,
-                                                        .asterisk => strsk: {
-                                                            switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                                else => return ParseError.UnexpectedDTDToken,
-                                                                .eof => return ParseError.UnclosedDTD,
-                                                                .angle_bracket_right => {},
-                                                            }
-                                                            break :strsk true;
-                                                        },
-                                                        .tag_whitespace => switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                            else => return ParseError.UnexpectedDTDToken,
-                                                            .eof => return ParseError.UnclosedDTD,
-                                                            .angle_bracket_right => false,
-                                                        },
-                                                        .angle_bracket_right => false,
-                                                    };
-                                                    if (more_than_one_option and !zero_or_many) {
-                                                        return ParseError.ElementMultiMixedWithoutZeroOrMany;
-                                                    }
-                                                    try parse_ctx.feedDTDElementMixedEnd(zero_or_many);
-                                                    break :mixed_or_children;
-                                                },
-                                            };
-
-                                            var paren_depth: u64 = 1;
-                                            var cached_tt: ?Tokenizer.TokenType = first_cached_tt;
-
-                                            try parse_ctx.feedDTDElementLParen();
-
-                                            while (true) {
-                                                const non_whitespace_tt = switch (blk: {
-                                                    defer cached_tt = null;
-                                                    break :blk cached_tt orelse try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr);
-                                                }) {
-                                                    .tag_whitespace => tt: {
-                                                        switch (try parse_helper.skipWhitespaceTokenSrc(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                            .all_whitespace => {},
-                                                            .non_whitespace => unreachable,
-                                                        }
-                                                        break :tt try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr);
-                                                    },
-                                                    else => |tt| tt,
-                                                };
-                                                switch (non_whitespace_tt) {
-                                                    else => return ParseError.UnexpectedDTDToken,
-                                                    .eof => return ParseError.UnclosedDTDElement,
-                                                    .tag_whitespace => unreachable,
-
-                                                    .comma => try parse_ctx.feedDTDElementSequenceSep(),
-                                                    .pipe => try parse_ctx.feedDTDElementChoiceSep(),
-
-                                                    .lparen => {
-                                                        paren_depth += 1;
-                                                        try parse_ctx.feedDTDElementLParen();
-                                                    },
-
-                                                    .rparen => {
-                                                        paren_depth -= 1;
-                                                        const quantity, const tt_after_quantity = try parseDTDElementCpQuantity(tokenizer, MaybeReader, mbr);
-                                                        switch (tt_after_quantity) {
-                                                            else => return ParseError.UnexpectedDTDToken,
-                                                            .eof => return ParseError.UnclosedDTDElement,
-                                                            .qmark, .asterisk, .plus => unreachable,
-                                                            .tag_whitespace => unreachable,
-                                                            .angle_bracket_right, .rparen, .comma, .pipe => |tt| cached_tt = tt,
-                                                        }
-                                                        const end = paren_depth == 0;
-                                                        try parse_ctx.feedDTDElementRParen(quantity, end);
-                                                        if (end) break;
-                                                    },
-                                                    .tag_token => {
-                                                        mbr_and_src.clearSrcBuffer();
-                                                        const name = try parse_helper.nextTokenFullStrOrRange(tokenizer, .dtd, MaybeReader, mbr_and_src);
-                                                        const quantity, const tt_after_quantity = try parseDTDElementCpQuantity(tokenizer, MaybeReader, mbr);
-                                                        try parse_ctx.feedDTDElementIdentifier(name, quantity);
-                                                        switch (tt_after_quantity) {
-                                                            else => return ParseError.UnexpectedDTDToken,
-                                                            .eof => return ParseError.UnclosedDTDElement,
-                                                            .qmark, .asterisk, .plus => unreachable,
-                                                            .tag_whitespace => unreachable,
-                                                            .angle_bracket_right, .rparen, .comma, .pipe => |tt| cached_tt = tt,
-                                                        }
-                                                    },
-                                                }
-                                            }
-
-                                            switch (blk: {
-                                                defer cached_tt = null;
-                                                break :blk cached_tt orelse try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr);
-                                            }) {
-                                                else => return ParseError.UnexpectedDTDToken,
-                                                .tag_whitespace => unreachable,
-                                                .angle_bracket_right => {},
-                                            }
-                                        },
-                                    }
-                                },
-                                .@"<!ATTLIST" => {
-                                    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                        else => return ParseError.UnexpectedDTDToken,
-                                        .eof => return ParseError.UnclosedDTDAttlist,
-                                        .tag_whitespace => unreachable,
-                                        .tag_token => {},
-                                    }
-                                    mbr_and_src.clearSrcBuffer();
-                                    try parse_ctx.feedDTDAttlistStart(try parse_helper.nextTokenFullStrOrRange(tokenizer, .dtd, MaybeReader, mbr_and_src));
-
-                                    while (true) {
-                                        switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                            else => return ParseError.MissingDTDSpacing,
-                                            .eof => return ParseError.UnclosedDTDAttlist,
-                                            .angle_bracket_right => break,
-                                            .tag_whitespace => {},
-                                        }
-                                        switch (try parse_helper.skipWhitespaceTokenSrc(tokenizer, .dtd, MaybeReader, mbr)) {
-                                            .all_whitespace => {},
-                                            .non_whitespace => unreachable,
-                                        }
-
-                                        switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                            else => return ParseError.UnexpectedDTDToken,
-                                            .eof => return ParseError.UnclosedDTDAttlist,
-                                            .tag_whitespace => unreachable,
-                                            .angle_bracket_right => break,
-                                            .tag_token => {},
-                                        }
-
-                                        mbr_and_src.clearSrcBuffer();
-                                        var attr_name = try parse_helper.nextTokenFullStrOrRange(tokenizer, .dtd, MaybeReader, mbr_and_src);
-
-                                        if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                                            .tag_whitespace => unreachable,
-                                            .eof => return ParseError.UnclosedDTDAttlist,
-                                            else => return ParseError.MissingDTDSpacing,
-                                        };
-
-                                        const attr_type: AttributeType = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                            else => return ParseError.UnexpectedDTDToken,
-                                            .eof => return ParseError.UnclosedDTDAttlist,
-                                            .tag_whitespace => unreachable,
-
-                                            // StringType | TokenizedType | NotationType
-                                            .tag_token => blk: {
-                                                const AttributeTypeTokenSubset = comptime @Type(.{ .Enum = e: {
-                                                    var info = @typeInfo(AttributeType).Enum;
-                                                    assert(std.mem.eql(u8, info.fields[info.fields.len - 1].name, "enumeration"));
-                                                    info.fields = info.fields[0 .. info.fields.len - 1];
-                                                    info.decls = &.{};
-                                                    break :e info;
-                                                } });
-
-                                                const attr_type = (try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, AttributeTypeTokenSubset)) orelse
-                                                    return ParseError.UnexpectedDTDToken;
-
-                                                switch (attr_type) {
-                                                    .CDATA,
-
-                                                    .ID,
-                                                    .IDREF,
-                                                    .IDREFS,
-                                                    .ENTITY,
-                                                    .ENTITIES,
-                                                    .NMTOKEN,
-                                                    .NMTOKENS,
-                                                    => {},
-
-                                                    .NOTATION => {
-                                                        if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                                                            .tag_whitespace => unreachable,
-                                                            .eof => return ParseError.UnclosedDTDAttlist,
-                                                            else => return ParseError.MissingDTDSpacing,
-                                                        };
-                                                        switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                            else => return ParseError.UnexpectedDTDToken,
-                                                            .eof => return ParseError.UnclosedDTDAttlist,
-                                                            .lparen => {},
-                                                        }
-                                                    },
-                                                }
-
-                                                break :blk switch (attr_type) {
-                                                    inline else => |tag| @field(AttributeType, @tagName(tag)),
-                                                };
-                                            },
-
-                                            // Enumeration
-                                            .lparen => .enumeration,
-                                        };
-
-                                        try parse_ctx.feedDTDAttlistDefStart(attr_name, attr_type);
-                                        attr_name = undefined;
-                                        switch (attr_type) {
-                                            .CDATA,
-
-                                            .ID,
-                                            .IDREF,
-                                            .IDREFS,
-                                            .ENTITY,
-                                            .ENTITIES,
-                                            .NMTOKEN,
-                                            .NMTOKENS,
-                                            => {},
-
-                                            .NOTATION,
-                                            .enumeration,
-                                            => {
-                                                switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                    else => return ParseError.UnexpectedDTDToken,
-                                                    .eof => return ParseError.UnclosedDTDAttlist,
-                                                    .tag_whitespace => unreachable,
-                                                    .tag_token => {},
-                                                }
-                                                mbr_and_src.clearSrcBuffer();
-                                                try parse_ctx.feedDTDAttlistDefNmtoken(try parse_helper.nextTokenFullStrOrRange(tokenizer, .dtd, MaybeReader, mbr_and_src));
-
-                                                while (true) {
-                                                    switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                        else => return ParseError.UnexpectedDTDToken,
-                                                        .eof => return ParseError.UnclosedDTDAttlist,
-                                                        .tag_whitespace => unreachable,
-                                                        .rparen => break,
-                                                        .pipe => {},
-                                                    }
-
-                                                    switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                        else => return ParseError.UnexpectedDTDToken,
-                                                        .eof => return ParseError.UnclosedDTDAttlist,
-                                                        .tag_whitespace => unreachable,
-                                                        .tag_token => {},
-                                                    }
-
-                                                    mbr_and_src.clearSrcBuffer();
-                                                    try parse_ctx.feedDTDAttlistDefNmtoken(try parse_helper.nextTokenFullStrOrRange(tokenizer, .dtd, MaybeReader, mbr_and_src));
-                                                }
-                                            },
-                                        }
-
-                                        if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                                            .tag_whitespace => unreachable,
-                                            .eof => return ParseError.UnclosedDTD,
-                                            else => return ParseError.MissingDTDSpacing,
-                                        };
-
-                                        const dd_kind: ?DefaultDeclKind, //
-                                        const maybe_open_quote: ?Tokenizer.TokenType //
-                                        = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                            else => return ParseError.UnexpectedDTDToken,
-                                            .eof => return ParseError.UnclosedDTDAttlist,
-                                            .tag_whitespace => unreachable,
-                                            .quote_single, .quote_double => |tag| .{ null, tag },
-                                            .tag_token => blk: {
-                                                const KindStr = enum { @"#REQUIRED", @"#IMPLIED", @"#FIXED" };
-                                                const kind_str = (try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, KindStr)) orelse
-                                                    return ParseError.UnexpectedDTDToken;
-                                                const dd_kind: DefaultDeclKind = switch (kind_str) {
-                                                    inline else => |tag| @field(DefaultDeclKind, @tagName(tag)["#".len..]),
-                                                };
-                                                break :blk .{ dd_kind, null };
-                                            },
-                                        };
-
-                                        try parse_ctx.feedDTDAttlistDefaultDeclStart(dd_kind);
-                                        if (dd_kind) |unwrapped| {
-                                            if (unwrapped != .FIXED) continue;
-                                            if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                                                .tag_whitespace => unreachable,
-                                                .eof => return ParseError.UnclosedDTDAttlist,
-                                                else => return ParseError.MissingDTDSpacing,
-                                            };
-                                        }
-                                        const open_quote = maybe_open_quote orelse try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr);
-                                        const str_ctx: Tokenizer.Context = switch (open_quote) {
-                                            .quote_single => .attribute_value_quote_single,
-                                            .quote_double => .attribute_value_quote_double,
-                                            else => return ParseError.UnexpectedDTDToken,
-                                        };
-
-                                        while (true) switch (try parse_helper.nextTokenType(tokenizer, str_ctx, MaybeReader, mbr)) {
-                                            else => unreachable,
-
-                                            .quote_single,
-                                            .quote_double,
-                                            => |close_quote| {
-                                                assert(open_quote == close_quote);
-                                                break;
-                                            },
-
-                                            .angle_bracket_left => return ParseError.AngleBracketLeftInAttributeValue,
-                                            .ampersand => {
-                                                switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
-                                                    .invalid_reference_end => return ParseError.InvalidReferenceEnd,
-                                                    .semicolon => return ParseError.EmptyReference,
-                                                    .tag_token => {},
-                                                    else => unreachable,
-                                                }
-                                                mbr_and_src.clearSrcBuffer();
-                                                const ref_name = try parse_helper.nextTokenFullStrOrRange(tokenizer, .reference, MaybeReader, mbr_and_src);
-                                                try parse_ctx.feedDTDAttlistDefaultDeclValueReference(ref_name);
-                                            },
-                                            .text_data => {
-                                                if (MaybeReader != null) {
-                                                    while (try parse_helper.nextTokenSegment(tokenizer, str_ctx, mbr.reader, mbr.read_buffer)) |segment| {
-                                                        try parse_ctx.feedDTDAttlistDefaultDeclValueSegment(segment);
-                                                    }
-                                                } else {
-                                                    const range = parse_helper.nextTokenFullStrOrRange(tokenizer, str_ctx, MaybeReader, .{
-                                                        .mbr = .{
-                                                            .reader = {},
-                                                            .read_buffer = {},
-                                                        },
-                                                        .src_buffer = {},
-                                                    }) catch |e| switch (e) {};
-                                                    try parse_ctx.feedDTDAttlistDefaultDeclValueSegment(range);
-                                                }
-                                            },
-                                        };
-
-                                        switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                            else => return ParseError.UnexpectedDTDToken,
-                                            .eof => return ParseError.UnclosedDTDAttlist,
-                                            .angle_bracket_right => break,
-                                        }
-                                        try parse_ctx.feedDTDAttlistDefaultDeclValueEnd();
-                                    }
-                                    try parse_ctx.feedDTDAttlistEnd();
-                                },
-                                .@"<!NOTATION" => {
-                                    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                        else => return ParseError.UnexpectedDTDToken,
-                                        .eof => return ParseError.UnclosedDTDAttlist,
-                                        .tag_whitespace => unreachable,
-                                        .tag_token => {},
-                                    }
-                                    mbr_and_src.clearSrcBuffer();
-                                    const name = try parse_helper.nextTokenFullStrOrRange(tokenizer, .dtd, MaybeReader, mbr_and_src);
-
-                                    if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                                        .tag_whitespace => unreachable,
-                                        .eof => return ParseError.UnclosedDTDNotation,
-                                        else => return ParseError.MissingDTDSpacing,
-                                    };
-
-                                    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                                        else => return ParseError.UnexpectedDTDToken,
-                                        .eof => return ParseError.UnclosedDTDAttlist,
-                                        .tag_whitespace => unreachable,
-                                        .tag_token => {},
-                                    }
-
-                                    const ext_id_kind, //
-                                    const pubid_lit, //
-                                    const system_lit, //
-                                    const tt_after_str //
-                                    = try parseDTDExternalIdParts(tokenizer, MaybeReader, mbr_and_src);
-                                    try parse_ctx.feedDTDNotation(name, ext_id_kind, pubid_lit, system_lit);
-
-                                    const non_whitespace_tt = switch (tt_after_str) {
-                                        .tag_whitespace => tt: {
-                                            switch (try parse_helper.skipWhitespaceTokenSrc(tokenizer, .dtd, MaybeReader, mbr)) {
-                                                .all_whitespace => {},
-                                                .non_whitespace => unreachable,
-                                            }
-                                            break :tt try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr);
-                                        },
-                                        else => |tt| tt,
-                                    };
-                                    switch (non_whitespace_tt) {
-                                        else => return ParseError.UnexpectedDTDToken,
-                                        .eof => return ParseError.UnclosedDTDNotation,
-                                        .tag_whitespace => unreachable,
-                                        .angle_bracket_right => {},
-                                    }
-                                },
-                            }
-                        },
-                    },
-
-                    .angle_bracket_right => |tag| tag,
-                };
-
-                switch (ending_tt) {
-                    else => return ParseError.UnexpectedDTDToken,
-                    .eof => return ParseError.UnclosedDTD,
-                    .angle_bracket_right => {},
-                }
-            },
-
-            else => unreachable,
-        }
-    }
-}
-
-pub fn handleCommentSkip(tokenizer: *Tokenizer, comptime MaybeReader: ?type, mbr: parse_helper.MaybeBufferedReader(MaybeReader)) !void {
-    while (true) switch (try parse_helper.nextTokenType(tokenizer, .comment, MaybeReader, mbr)) {
-        .text_data => try parse_helper.skipTokenStr(tokenizer, .comment, MaybeReader, mbr),
-        .invalid_comment_dash_dash => return ParseError.CommentDashDash,
-        .invalid_comment_end_triple_dash => return ParseError.CommentEndTripleDash,
-        .comment_end => break,
         else => unreachable,
     };
 }
 
-pub fn handlePi(comptime Impl: type, parse_ctx: ParseCtx(Impl), tokenizer: *Tokenizer, comptime MaybeReader: ?type, mbr_and_src: parse_helper.MBRAndSrcBuf(MaybeReader)) !void {
-    const mbr = mbr_and_src.mbr;
-    switch (try parse_helper.nextTokenType(tokenizer, .pi, MaybeReader, mbr)) {
-        .text_data => {
-            const pi_data = try parse_helper.nextTokenFullStrOrRange(tokenizer, .pi, MaybeReader, mbr_and_src);
-            try parse_ctx.feedPI(pi_data);
-            switch (try parse_helper.nextTokenType(tokenizer, .pi, MaybeReader, mbr)) {
-                .pi_end => {},
-                .eof => return ParseError.UnclosedPI,
-                else => unreachable,
-            }
-        },
-        .pi_end => return ParseError.EmptyPI,
-        .eof => return ParseError.UnclosedPI,
-        else => unreachable,
+fn feedTokenSrc(
+    comptime Impl: type,
+    parse_ctx: ParseCtx(Impl),
+    tokenizer: *Tokenizer,
+    context: Tokenizer.Context,
+    comptime MaybeReader: ?type,
+    mbr: parse_helper.MaybeBufferedReader(MaybeReader),
+) !void {
+    var iter: parse_helper.TokenSrcIter(MaybeReader) = .{};
+    while (try iter.next(tokenizer, context, mbr)) |segment| {
+        try parse_ctx.feedSrcSegment(segment);
     }
+    try parse_ctx.feedSrcEnd();
 }
 
-fn parseDTDElementCpQuantity(
+fn handlePi(
+    comptime Impl: type,
+    parse_ctx: ParseCtx(Impl),
     tokenizer: *Tokenizer,
     comptime MaybeReader: ?type,
     mbr: parse_helper.MaybeBufferedReader(MaybeReader),
-) !struct { ?ContentParticleQuantity, Tokenizer.TokenType } {
-    return switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-        else => |tag| .{ null, tag },
-        .tag_whitespace => .{ null, try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr) },
-        .qmark, .asterisk, .plus => |symbol| quant: {
-            const quantity: ContentParticleQuantity = switch (symbol) {
-                .qmark => .none_or_one,
-                .asterisk => .none_or_many,
-                .plus => .one_or_many,
-                else => unreachable,
-            };
-            break :quant switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                .tag_whitespace => switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                    .tag_whitespace => unreachable,
-                    else => |tag| .{ quantity, tag },
-                },
-                else => |tag| .{ quantity, tag },
-            };
-        },
-    };
+) !void {
+    switch (try parse_helper.nextTokenType(tokenizer, .pi, MaybeReader, mbr)) {
+        else => unreachable,
+        .eof => return ParseError.UnclosedPI,
+        .pi_end => return ParseError.EmptyPI,
+        .text_data => {},
+    }
+    try parse_ctx.feedPI();
+    try feedTokenSrc(Impl, parse_ctx, tokenizer, .pi, MaybeReader, mbr);
+    switch (try parse_helper.nextTokenType(tokenizer, .pi, MaybeReader, mbr)) {
+        else => unreachable,
+        .eof => return ParseError.UnclosedPI,
+        .text_data => unreachable,
+        .pi_end => {},
+    }
 }
 
-pub fn parseDTDExternalIdParts(
+fn handleDTD(
+    comptime Impl: type,
+    parse_ctx: ParseCtx(Impl),
     tokenizer: *Tokenizer,
     comptime MaybeReader: ?type,
-    mbr_and_src: parse_helper.MBRAndSrcBuf(MaybeReader),
-) ((if (MaybeReader) |Reader| Reader.Error else error{}) || ParseError)!struct {
-    ExternalIdKind,
-    ?if (MaybeReader != null) []const u8 else Tokenizer.Range,
-    ?if (MaybeReader != null) []const u8 else Tokenizer.Range,
-    Tokenizer.TokenType,
-} {
-    const mbr = mbr_and_src.mbr;
+    mbr: parse_helper.MaybeBufferedReader(MaybeReader),
+) !void {
+    if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+        else => return ParseError.MissingDTDSpacing,
+        .eof => return ParseError.UnclosedDTD,
+        .tag_whitespace => unreachable,
+    };
 
-    const ext_id_kind: ExternalIdKind = (try parse_helper.nextTokenSrcAsEnum(
-        tokenizer,
-        .dtd,
-        MaybeReader,
-        mbr,
-        ExternalIdKind,
-    )) orelse return ParseError.UnexpectedDTDToken;
+    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+        else => return ParseError.UnexpectedDTDToken,
+        .tag_whitespace => unreachable,
+        .tag_token => {},
+    }
+    try parse_ctx.feedDTDStart();
+    try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr);
 
-    const pubid_lit: ?if (MaybeReader != null) []const u8 else Tokenizer.Range = switch (ext_id_kind) {
-        .SYSTEM => null,
-        .PUBLIC => lit: {
-            switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                else => return ParseError.MissingDTDSpacing,
-                .eof => return ParseError.UnclosedDTD,
-                .tag_whitespace => {},
-            }
-            switch (try parse_helper.skipWhitespaceTokenSrc(tokenizer, .dtd, MaybeReader, mbr)) {
-                .all_whitespace => {},
-                .non_whitespace => unreachable,
-            }
+    const maybe_internal_subset: bool = switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+        else => return ParseError.UnexpectedDTDToken,
 
-            const open_quote = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                else => return ParseError.UnexpectedDTDToken,
-                .eof => return ParseError.UnclosedDTD,
-                .quote_single,
-                .quote_double,
-                => |open_quote| open_quote,
+        // '<!DOCTYPE' Name S?'>'
+        // This will never be a valid document if the DTD is respected,
+        // but it can be correctly parsed.
+        .angle_bracket_right => return,
+
+        .square_bracket_left => true,
+
+        // ExternalId
+        .tag_token => ext_id: {
+            const maybe_ext_id_kind = try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, ExternalIdKind);
+            const ext_id_kind = maybe_ext_id_kind orelse return ParseError.UnexpectedDTDToken;
+            try parse_ctx.feedDTDExternalId(ext_id_kind);
+            assert((try handleExternalOrPublicId(Impl, parse_ctx, tokenizer, MaybeReader, mbr, ext_id_kind, .require_system_literal)) == null);
+            break :ext_id false;
+        },
+    };
+
+    if (!maybe_internal_subset) switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+        else => return ParseError.UnexpectedDTDToken,
+        .eof => return ParseError.UnclosedDTD,
+        .angle_bracket_right => return,
+        .square_bracket_left => {},
+    };
+
+    while (true) switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+        else => return ParseError.UnexpectedDTDToken,
+        .tag_whitespace => unreachable,
+        .square_bracket_right => break,
+
+        .pi_start => try handlePi(Impl, parse_ctx, tokenizer, MaybeReader, mbr),
+
+        .dtd_decl => {
+            const DeclStr = enum {
+                @"<!ENTITY",
+                @"<!ELEMENT",
+                @"<!ATTLIST",
+                @"<!NOTATION",
             };
+            const maybe_decl_str = try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, DeclStr);
+            const decl_str = maybe_decl_str orelse return ParseError.InvalidDTDDecl;
+
+            if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+                else => return ParseError.MissingDTDSpacing,
+                .eof => return switch (decl_str) {
+                    .@"<!ENTITY" => ParseError.UnclosedDTDEntity,
+                    .@"<!ELEMENT" => ParseError.UnclosedDTDElement,
+                    .@"<!ATTLIST" => ParseError.UnclosedDTDAttlist,
+                    .@"<!NOTATION" => ParseError.UnclosedDTDNotation,
+                },
+                .tag_whitespace => unreachable,
+            };
+
+            switch (decl_str) {
+                .@"<!ENTITY" => {
+                    try handleDTDEntity(Impl, parse_ctx, tokenizer, MaybeReader, mbr);
+                    try parse_ctx.feedDTDEntityEnd();
+                },
+                .@"<!ELEMENT" => {
+                    try handleDTDElement(Impl, parse_ctx, tokenizer, MaybeReader, mbr);
+                    try parse_ctx.feedDTDElementEnd();
+                },
+                .@"<!ATTLIST" => {
+                    try handleDTDAttlist(Impl, parse_ctx, tokenizer, MaybeReader, mbr);
+                    try parse_ctx.feedDTDAttlistEnd();
+                },
+                .@"<!NOTATION" => {
+                    try handleDTDNotation(Impl, parse_ctx, tokenizer, MaybeReader, mbr);
+                    try parse_ctx.feedDTDNotationEnd();
+                },
+            }
+        },
+
+        .comment_start => switch (try parse_helper.handleCommentSkip(tokenizer, MaybeReader, mbr)) {
+            .normal_end => {},
+            .invalid_end_triple_dash => return ParseError.CommentEndTripleDash,
+            .invalid_dash_dash => return ParseError.CommentDashDash,
+        },
+
+        .invalid_comment_start_single_dash => return ParseError.InvalidCommentStart,
+    };
+
+    switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+        else => return ParseError.UnexpectedDTDToken,
+        .eof => return ParseError.UnclosedDTD,
+        .angle_bracket_right => {},
+    }
+}
+
+fn handleDTDEntity(
+    comptime Impl: type,
+    parse_ctx: ParseCtx(Impl),
+    tokenizer: *Tokenizer,
+    comptime MaybeReader: ?type,
+    mbr: parse_helper.MaybeBufferedReader(MaybeReader),
+) !void {
+    const ref_kind: ReferenceKind = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+        else => return ParseError.UnexpectedDTDToken,
+        .eof => return ParseError.UnclosedDTDEntity,
+        .tag_whitespace => unreachable,
+        .tag_token => .general,
+        .percent => rk: {
+            if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+                else => return ParseError.MissingDTDSpacing,
+                .eof => return ParseError.UnclosedDTDEntity,
+                .tag_whitespace => unreachable,
+            };
+            switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                else => return ParseError.UnexpectedDTDToken,
+                .eof => return ParseError.UnclosedDTDEntity,
+                .tag_whitespace => unreachable,
+                .tag_token => {},
+            }
+            break :rk .parsed;
+        },
+    };
+    try parse_ctx.feedDTDEntityStart(ref_kind);
+    try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr); // the declared name
+
+    if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+        else => return ParseError.MissingDTDSpacing,
+        .eof => return ParseError.UnclosedDTDEntity,
+        .tag_whitespace => unreachable,
+    };
+
+    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+        else => return ParseError.UnexpectedDTDToken,
+        .eof => return ParseError.UnclosedDTDEntity,
+        .tag_whitespace => unreachable,
+
+        .quote_single,
+        .quote_double,
+        => |open_quote| {
             const str_ctx: Tokenizer.Context = switch (open_quote) {
-                .quote_single => .system_literal_quote_single,
-                .quote_double => .system_literal_quote_double,
+                .quote_single => .entity_value_quote_single,
+                .quote_double => .entity_value_quote_double,
                 else => unreachable,
             };
 
-            switch (try parse_helper.nextTokenType(tokenizer, str_ctx, MaybeReader, mbr)) {
+            while (true) switch (try parse_helper.nextTokenType(tokenizer, str_ctx, MaybeReader, mbr)) {
+                else => unreachable,
+                .eof => return ParseError.UnclosedDTDEntityValue,
+                .text_data => try feedTokenSrc(Impl, parse_ctx, tokenizer, str_ctx, MaybeReader, mbr),
+                .percent, .ampersand => |tag| {
+                    const ref_val_kind: ReferenceKind = switch (tag) {
+                        .percent => .parsed,
+                        .ampersand => .general,
+                        else => unreachable,
+                    };
+                    try parse_ctx.feedReferenceStart(ref_val_kind);
+
+                    switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
+                        else => unreachable,
+                        .invalid_reference_end => return ParseError.InvalidReferenceEnd,
+                        .semicolon => return ParseError.EmptyReference,
+                        .tag_token => {},
+                    }
+                    try feedTokenSrc(Impl, parse_ctx, tokenizer, .reference, MaybeReader, mbr);
+
+                    switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
+                        else => unreachable,
+                        .invalid_reference_end => return ParseError.InvalidReferenceEnd,
+                        .tag_token => unreachable,
+                        .semicolon => {},
+                    }
+                    try parse_ctx.feedReferenceEnd();
+                },
                 .quote_single,
                 .quote_double,
                 => |close_quote| {
                     assert(open_quote == close_quote);
-                    break :lit if (MaybeReader != null) "" else .{ .start = 0, .end = 0 };
+                    break;
+                },
+            };
+        },
+
+        .tag_token => {
+            const maybe_ext_id_kind = try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, ExternalIdKind);
+            const ext_id_kind = maybe_ext_id_kind orelse return ParseError.UnexpectedDTDToken;
+
+            try parse_ctx.feedDTDExternalId(ext_id_kind);
+            assert((try handleExternalOrPublicId(Impl, parse_ctx, tokenizer, MaybeReader, mbr, ext_id_kind, .require_system_literal)) == null);
+
+            if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+                else => return ParseError.MissingDTDSpacing,
+                .eof => return ParseError.UnclosedDTDEntity,
+                .tag_whitespace => unreachable,
+                .angle_bracket_right => return,
+            };
+
+            switch (ref_kind) {
+                .general => {
+                    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                        else => return ParseError.UnexpectedDTDToken,
+                        .eof => return ParseError.UnclosedDTDEntity,
+                        .tag_whitespace => unreachable,
+                        .angle_bracket_right => return,
+                        .tag_token => {},
+                    }
+                    _ = (try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, enum { NDATA })) orelse {
+                        return ParseError.UnexpectedDTDToken;
+                    };
+                    if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+                        else => return ParseError.MissingDTDSpacing,
+                        .eof => return ParseError.UnclosedDTDEntity,
+                        .tag_whitespace => unreachable,
+                    };
+                    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                        else => return ParseError.UnexpectedDTDToken,
+                        .eof => return ParseError.UnclosedDTDEntity,
+                        .tag_token => {},
+                    }
+
+                    try parse_ctx.feedDTDNDataDecl();
+                    try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr);
+                },
+                .parsed => {},
+            }
+        },
+    }
+
+    switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+        else => return ParseError.UnexpectedDTDToken,
+        .eof => return ParseError.UnclosedDTD,
+        .angle_bracket_right => {},
+    }
+}
+
+fn handleDTDElement(
+    comptime Impl: type,
+    parse_ctx: ParseCtx(Impl),
+    tokenizer: *Tokenizer,
+    comptime MaybeReader: ?type,
+    mbr: parse_helper.MaybeBufferedReader(MaybeReader),
+) !void {
+    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+        else => return ParseError.UnexpectedDTDToken,
+        .eof => return ParseError.UnclosedDTDElement,
+        .tag_token => {},
+    }
+    try parse_ctx.feedDTDElementStart();
+    try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr); // the declared name
+
+    if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+        else => return ParseError.MissingDTDSpacing,
+        .eof => return ParseError.UnclosedDTDElement,
+        .tag_whitespace => unreachable,
+    };
+
+    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+        else => return ParseError.UnexpectedDTDToken,
+        .eof => return ParseError.UnclosedDTDElement,
+
+        .tag_token => {
+            const EmptyOrAny = enum { EMPTY, ANY };
+            const maybe_empty_or_any = try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, EmptyOrAny);
+            const empty_or_any = maybe_empty_or_any orelse return ParseError.UnexpectedDTDToken;
+            try parse_ctx.feedDTDElementContentSpec(switch (empty_or_any) {
+                .EMPTY => .EMPTY,
+                .ANY => .ANY,
+            });
+            switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+                else => return ParseError.UnexpectedDTDToken,
+                .eof => return ParseError.UnclosedDTDElement,
+                .angle_bracket_right => {},
+            }
+        },
+        .lparen => switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+            else => return ParseError.UnexpectedDTDToken,
+            .eof => return ParseError.UnclosedDTDElement,
+            .hashtag => {
+                switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                    else => return ParseError.UnexpectedDTDToken,
+                    .eof => return ParseError.UnclosedDTDElement,
+                    .tag_token => {},
+                }
+                _ = (try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, enum { PCDATA })) orelse {
+                    return ParseError.UnexpectedDTDToken;
+                };
+
+                var many_opts = false;
+                while (true) : (many_opts = true) {
+                    switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+                        else => return ParseError.UnexpectedDTDToken,
+                        .eof => return ParseError.UnclosedDTDElement,
+                        .rparen => break,
+                        .pipe => {},
+                    }
+
+                    switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+                        else => return ParseError.UnexpectedDTDToken,
+                        .eof => return ParseError.UnclosedDTDElement,
+                        .tag_token => {},
+                    }
+
+                    try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr);
+                }
+
+                const many_opts_specifier = if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+                    else => return ParseError.UnexpectedDTDToken,
+                    .tag_whitespace => unreachable,
+                    .asterisk => true,
+                    .angle_bracket_right => false,
+                } else switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+                    else => return ParseError.UnexpectedDTDToken,
+                    .eof => return ParseError.UnclosedDTDElement,
+                    .tag_whitespace => unreachable,
+                    .angle_bracket_right => false,
+                };
+
+                if (many_opts and !many_opts_specifier) {
+                    return ParseError.MissingAsteriskForManyPCDATAOptions;
+                }
+                if (many_opts_specifier) switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+                    else => return ParseError.UnexpectedDTDToken,
+                    .eof => return ParseError.UnclosedDTDElement,
+                    .tag_whitespace => unreachable,
+                    .angle_bracket_right => {},
+                };
+            },
+            .lparen, .tag_token => |first_cached_tt| {
+                var depth: u64 = 1;
+                var prev: enum { lparen, rparen, name, comma, pipe } = .lparen;
+
+                var cached_tt: ?Tokenizer.TokenType = first_cached_tt;
+                while (true) switch (blk: {
+                    defer cached_tt = null;
+                    break :blk cached_tt orelse try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr);
+                }) {
+                    else => return ParseError.UnexpectedDTDToken,
+                    .eof => return ParseError.UnclosedDTDEntity,
+                    .tag_whitespace => unreachable,
+
+                    .comma => {
+                        try parse_ctx.feedDTDElementChildToken(.comma);
+                        switch (prev) {
+                            .lparen, .comma, .pipe => return ParseError.UnexpectedDTDToken,
+                            .rparen, .name => {},
+                        }
+                        prev = .comma;
+                    },
+
+                    .pipe => {
+                        try parse_ctx.feedDTDElementChildToken(.pipe);
+                        switch (prev) {
+                            .lparen, .comma, .pipe => return ParseError.UnexpectedDTDToken,
+                            .rparen, .name => {},
+                        }
+                        prev = .pipe;
+                    },
+
+                    .lparen => {
+                        try parse_ctx.feedDTDElementChildToken(.lparen);
+                        switch (prev) {
+                            .rparen, .name => return ParseError.UnexpectedDTDToken,
+                            .lparen, .comma, .pipe => {},
+                        }
+                        prev = .lparen;
+                        depth += 1;
+                    },
+                    .rparen => {
+                        try parse_ctx.feedDTDElementChildToken(.rparen);
+                        const maybe_cpq: ?ElementChildToken = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                            .qmark => .qmark,
+                            .asterisk => .asterisk,
+                            .plus => .plus,
+                            else => |tag| blk: {
+                                cached_tt = tag;
+                                break :blk null;
+                            },
+                        };
+                        if (maybe_cpq) |cpq| {
+                            try parse_ctx.feedDTDElementChildToken(cpq);
+                        }
+
+                        switch (prev) {
+                            .lparen => return ParseError.UnexpectedDTDToken,
+                            .rparen, .name, .comma, .pipe => {},
+                        }
+                        prev = .rparen;
+                        depth -= 1;
+                        if (depth == 0) break;
+                    },
+
+                    .tag_token => {
+                        try parse_ctx.feedDTDElementChildToken(.name);
+                        try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr);
+
+                        switch (prev) {
+                            .rparen, .name => return ParseError.UnexpectedDTDToken,
+                            .lparen, .comma, .pipe => {},
+                        }
+                        prev = .name;
+                    },
+                };
+
+                const non_whitespace_tt = switch (cached_tt orelse try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                    .tag_whitespace => try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr),
+                    else => |tt| tt,
+                };
+                switch (non_whitespace_tt) {
+                    else => return ParseError.UnexpectedDTDToken,
+                    .eof => return ParseError.UnclosedDTDEntity,
+                    .tag_whitespace => unreachable,
+                    .angle_bracket_right => {},
+                }
+            },
+        },
+    }
+}
+
+fn handleDTDAttlist(
+    comptime Impl: type,
+    parse_ctx: ParseCtx(Impl),
+    tokenizer: *Tokenizer,
+    comptime MaybeReader: ?type,
+    mbr: parse_helper.MaybeBufferedReader(MaybeReader),
+) !void {
+    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+        else => return ParseError.UnexpectedDTDToken,
+        .eof => return ParseError.UnclosedDTDAttlist,
+        .tag_token => {},
+    }
+    try parse_ctx.feedDTDAttlistStart();
+    try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr); // the declared name
+
+    while (true) {
+        if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+            else => return ParseError.MissingDTDSpacing,
+            .eof => return ParseError.UnclosedDTDAttlist,
+            .tag_whitespace => unreachable,
+            .angle_bracket_right => break,
+        };
+
+        switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+            else => return ParseError.UnexpectedDTDToken,
+            .eof => return ParseError.UnclosedDTDAttlist,
+            .angle_bracket_right => break,
+            .tag_token => {},
+        }
+        try parse_ctx.feedDTDAttlistDef();
+        try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr);
+
+        if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+            else => return ParseError.MissingDTDSpacing,
+            .eof => return ParseError.UnclosedDTDAttlist,
+            .tag_whitespace => unreachable,
+        };
+
+        const attr_type: AttributeType = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+            else => return ParseError.UnexpectedDTDToken,
+            .eof => return ParseError.UnclosedDTDAttlist,
+            .lparen => .enumeration,
+            .tag_token => att: {
+                const TypeStr = comptime @Type(.{ .Enum = blk: {
+                    var info = @typeInfo(AttributeType).Enum;
+                    var fields = info.fields;
+                    assert(std.mem.eql(u8, fields[fields.len - 1].name, "enumeration"));
+                    fields.len -= 1;
+                    info.fields = fields;
+                    break :blk info;
+                } });
+                const maybe_attr_type = try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, TypeStr);
+                const attr_type = maybe_attr_type orelse return ParseError.UnexpectedDTDToken;
+
+                switch (attr_type) {
+                    .CDATA => {},
+                    .ID => {},
+                    .IDREF => {},
+                    .IDREFS => {},
+                    .ENTITY => {},
+                    .ENTITIES => {},
+                    .NMTOKEN => {},
+                    .NMTOKENS => {},
+
+                    .NOTATION => {
+                        if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+                            else => return ParseError.MissingDTDSpacing,
+                            .eof => return ParseError.UnclosedDTDAttlist,
+                            .tag_whitespace => unreachable,
+                        };
+                        switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                            else => return ParseError.UnexpectedDTDToken,
+                            .eof => return ParseError.UnclosedDTDAttlist,
+                            .lparen => {},
+                        }
+                    },
+                }
+
+                break :att switch (attr_type) {
+                    inline else => |tag| @field(AttributeType, @tagName(tag)),
+                };
+            },
+        };
+        try parse_ctx.feedDTDAttlistDefType(attr_type);
+
+        switch (attr_type) {
+            .CDATA => {},
+            .ID => {},
+            .IDREF => {},
+            .IDREFS => {},
+            .ENTITY => {},
+            .ENTITIES => {},
+            .NMTOKEN => {},
+            .NMTOKENS => {},
+
+            .NOTATION,
+            .enumeration,
+            => {
+                switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+                    else => return ParseError.UnexpectedDTDToken,
+                    .eof => return ParseError.UnclosedDTDAttlist,
+                    .tag_whitespace => unreachable,
+                    .tag_token => {},
+                }
+                try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr);
+
+                while (true) {
+                    switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+                        else => return ParseError.UnexpectedDTDToken,
+                        .eof => return ParseError.UnclosedDTDAttlist,
+                        .tag_whitespace => unreachable,
+                        .rparen => break,
+                        .pipe => {},
+                    }
+                    switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+                        else => return ParseError.UnexpectedDTDToken,
+                        .eof => return ParseError.UnclosedDTDAttlist,
+                        .tag_whitespace => unreachable,
+                        .tag_token => {},
+                    }
+                    try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr);
+                }
+            },
+        }
+
+        if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+            else => return ParseError.MissingDTDSpacing,
+            .eof => return ParseError.UnclosedDTDAttlist,
+            .tag_whitespace => unreachable,
+        };
+
+        const maybe_open_quote: ?Tokenizer.TokenType, //
+        const dd_kind: ?DefaultDeclKind //
+        = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+            else => return ParseError.UnexpectedDTDToken,
+            .eof => return ParseError.UnclosedDTDAttlist,
+            .tag_whitespace => unreachable,
+            .quote_single,
+            .quote_double,
+            => |oq| .{ oq, null },
+            .hashtag => blk: {
+                switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                    else => return ParseError.UnexpectedDTDToken,
+                    .eof => return ParseError.UnclosedDTDAttlist,
+                    .tag_whitespace => unreachable,
+                    .tag_token => {},
+                }
+                const maybe_dd_kind = try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, DefaultDeclKind);
+                const dd_kind = maybe_dd_kind orelse return ParseError.UnexpectedDTDToken;
+                break :blk .{ null, dd_kind };
+            },
+        };
+
+        try parse_ctx.feedDTDAttlistDefaultDeclStart(dd_kind);
+
+        if (dd_kind == null or dd_kind.? == .FIXED) {
+            const open_quote: Tokenizer.TokenType = maybe_open_quote orelse oq: {
+                if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+                    else => return ParseError.MissingDTDSpacing,
+                    .eof => return ParseError.UnclosedDTDAttlist,
+                    .tag_whitespace => unreachable,
+                };
+                break :oq try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr);
+            };
+            const str_ctx: Tokenizer.Context = switch (open_quote) {
+                else => return ParseError.UnexpectedDTDToken,
+                .eof => return ParseError.UnclosedDTDAttlist,
+                .quote_single => .attribute_value_quote_single,
+                .quote_double => .attribute_value_quote_double,
+            };
+            while (true) switch (try parse_helper.nextTokenType(tokenizer, str_ctx, MaybeReader, mbr)) {
+                .eof => return ParseError.UnclosedAttributeValue,
+                .ampersand => {
+                    try parse_ctx.feedReferenceStart(.general);
+
+                    switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
+                        else => unreachable,
+                        .invalid_reference_end => return ParseError.InvalidReferenceEnd,
+                        .semicolon => return ParseError.EmptyReference,
+                        .tag_token => {},
+                    }
+                    try feedTokenSrc(Impl, parse_ctx, tokenizer, .reference, MaybeReader, mbr);
+
+                    switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
+                        else => unreachable,
+                        .invalid_reference_end => return ParseError.InvalidReferenceEnd,
+                        .tag_token => unreachable,
+                        .semicolon => {},
+                    }
+                    try parse_ctx.feedReferenceEnd();
+                },
+                .text_data => try feedTokenSrc(Impl, parse_ctx, tokenizer, str_ctx, MaybeReader, mbr),
+                .angle_bracket_left => return ParseError.AngleBracketLeftInAttribute,
+                .quote_single,
+                .quote_double,
+                => |close_quote| {
+                    assert(open_quote == close_quote);
+                    break;
+                },
+
+                else => unreachable,
+            };
+        }
+
+        try parse_ctx.feedDTDAttlistDefaultDeclEnd();
+    }
+}
+
+fn handleDTDNotation(
+    comptime Impl: type,
+    parse_ctx: ParseCtx(Impl),
+    tokenizer: *Tokenizer,
+    comptime MaybeReader: ?type,
+    mbr: parse_helper.MaybeBufferedReader(MaybeReader),
+) !void {
+    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+        else => return ParseError.UnexpectedDTDToken,
+        .eof => return ParseError.UnclosedDTDNotation,
+        .tag_token => {},
+    }
+    try parse_ctx.feedDTDNotationStart();
+    try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr); // the declared name
+
+    if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+        else => return ParseError.MissingDTDSpacing,
+        .eof => return ParseError.UnclosedDTDNotation,
+        .tag_whitespace => unreachable,
+    };
+
+    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+        else => return ParseError.UnexpectedDTDToken,
+        .eof => return ParseError.UnclosedDTDNotation,
+        .tag_token => {},
+    }
+    const maybe_ext_id_kind = try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, ExternalIdKind);
+    const ext_id_kind = maybe_ext_id_kind orelse return ParseError.UnexpectedDTDToken;
+
+    const terminating_tt = (try handleExternalOrPublicId(Impl, parse_ctx, tokenizer, MaybeReader, mbr, ext_id_kind, .dont_need_system_literal)) orelse
+        try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr);
+
+    switch (terminating_tt) {
+        else => return ParseError.UnexpectedDTDToken,
+        .eof => return ParseError.UnclosedDTDNotation,
+        .tag_whitespace => unreachable,
+        .angle_bracket_right => {},
+    }
+}
+
+fn handleExternalOrPublicId(
+    comptime Impl: type,
+    parse_ctx: ParseCtx(Impl),
+    tokenizer: *Tokenizer,
+    comptime MaybeReader: ?type,
+    mbr: parse_helper.MaybeBufferedReader(MaybeReader),
+    ext_id_kind: ExternalIdKind,
+    config: enum {
+        require_system_literal,
+        dont_need_system_literal,
+    },
+) !?Tokenizer.TokenType {
+    switch (ext_id_kind) {
+        .SYSTEM => {},
+        .PUBLIC => pubid: {
+            if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+                else => return ParseError.MissingDTDSpacing,
+                .eof => return ParseError.UnclosedDTD,
+                .tag_whitespace => unreachable,
+            };
+
+            const open_quote: Tokenizer.TokenType, //
+            const str_ctx: Tokenizer.Context //
+            = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                else => return ParseError.UnexpectedDTDToken,
+                .eof => return ParseError.UnclosedDTD,
+                .quote_single => |oq| .{ oq, .system_literal_quote_single },
+                .quote_double => |oq| .{ oq, .system_literal_quote_double },
+            };
+
+            switch (try parse_helper.nextTokenType(tokenizer, str_ctx, MaybeReader, mbr)) {
+                else => return ParseError.UnexpectedDTDToken,
+                .eof => return ParseError.UnclosedDTDPubidLiteral,
+                .quote_single,
+                .quote_double,
+                => |close_quote| {
+                    assert(open_quote == close_quote);
+                    try parse_ctx.feedSrcEnd();
+                    break :pubid;
                 },
                 .text_data => {},
-                else => unreachable,
             }
-            const pubid_lit = try parse_helper.nextTokenFullStrOrRange(tokenizer, str_ctx, MaybeReader, mbr_and_src);
+
+            var iter: parse_helper.TokenSrcIter(MaybeReader) = .{};
+            while (try iter.next(tokenizer, str_ctx, mbr)) |segment| {
+                if (anyNonPubidChars(
+                    if (MaybeReader != null) segment else segment.toStr(tokenizer.src),
+                    switch (open_quote) {
+                        .quote_single => .single,
+                        .quote_double => .double,
+                        else => unreachable,
+                    },
+                )) return ParseError.InvalidDTDPubidLiteral;
+                try parse_ctx.feedSrcSegment(segment);
+            }
+            try parse_ctx.feedSrcEnd();
+
             switch (try parse_helper.nextTokenType(tokenizer, str_ctx, MaybeReader, mbr)) {
+                .eof => return ParseError.UnclosedDTDPubidLiteral,
                 .quote_single,
                 .quote_double,
                 => |close_quote| assert(open_quote == close_quote),
-                .eof => return ParseError.UnclosedPubidLiteral,
+                .text_data => unreachable,
                 else => unreachable,
             }
+        },
+    }
 
-            const pubid_lit_str = if (MaybeReader != null) pubid_lit else pubid_lit.toStr(tokenizer.src);
-            for (pubid_lit_str) |pubid_char| switch (pubid_char) {
-                '\u{20}', '\u{D}', '\u{A}', 'a'...'z', 'A'...'Z', '0'...'9', '-' => {},
-                '\'' => assert(open_quote != .quote_single),
-                '(', ')', '+', ',', '.', '/', ':', '=', '?', ';', '!', '*', '#', '@', '$', '_', '%' => {},
-                else => return ParseError.InvalidPubidLiteral,
-            };
+    if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| {
+        switch (config) {
+            .require_system_literal => return ParseError.MissingDTDSpacing,
+            .dont_need_system_literal => {},
+        }
+        return non_ws;
+    }
 
-            break :lit pubid_lit;
+    const open_quote: Tokenizer.TokenType, //
+    const str_ctx: Tokenizer.Context //
+    = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+        .quote_single => |oq| .{ oq, .system_literal_quote_single },
+        .quote_double => |oq| .{ oq, .system_literal_quote_double },
+        .tag_whitespace => unreachable,
+        else => |tt| return switch (ext_id_kind) {
+            .SYSTEM => ParseError.UnexpectedDTDToken,
+            .PUBLIC => switch (config) {
+                .require_system_literal => ParseError.UnexpectedDTDToken,
+                .dont_need_system_literal => tt,
+            },
         },
     };
-    const system_lit: ?if (MaybeReader != null) []const u8 else Tokenizer.Range, //
-    const tt_after_str: Tokenizer.TokenType //
-    = lit: {
-        if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| {
-            break :lit .{ null, non_ws };
-        }
-        const open_quote = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-            else => return ParseError.UnexpectedDTDToken,
-            .eof => return ParseError.UnclosedDTD,
-            .quote_single,
-            .quote_double,
-            => |open_quote| open_quote,
-        };
-        const str_ctx: Tokenizer.Context = switch (open_quote) {
-            .quote_single => .system_literal_quote_single,
-            .quote_double => .system_literal_quote_double,
-            else => unreachable,
-        };
 
-        switch (try parse_helper.nextTokenType(tokenizer, str_ctx, MaybeReader, mbr)) {
-            .quote_single,
-            .quote_double,
-            => |close_quote| {
-                assert(open_quote == close_quote);
-                break :lit .{
-                    if (MaybeReader != null) "" else .{ .start = 0, .end = 0 },
-                    try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr),
-                };
-            },
-            .text_data => {},
-            else => unreachable,
-        }
+    switch (try parse_helper.nextTokenType(tokenizer, str_ctx, MaybeReader, mbr)) {
+        else => return ParseError.UnexpectedDTDToken,
+        .eof => return ParseError.UnclosedDTDPubidLiteral,
+        .quote_single,
+        .quote_double,
+        => |close_quote| {
+            assert(open_quote == close_quote);
+            try parse_ctx.feedSrcEnd();
+        },
+        .text_data => try feedTokenSrc(Impl, parse_ctx, tokenizer, str_ctx, MaybeReader, mbr),
+    }
+    switch (try parse_helper.nextTokenType(tokenizer, str_ctx, MaybeReader, mbr)) {
+        .eof => return ParseError.UnclosedDTDPubidLiteral,
+        .quote_single,
+        .quote_double,
+        => |close_quote| assert(open_quote == close_quote),
+        .text_data => unreachable,
+        else => unreachable,
+    }
+    return null;
+}
 
-        const system_lit = try parse_helper.nextTokenFullStrOrRange(tokenizer, str_ctx, MaybeReader, mbr_and_src);
-        switch (try parse_helper.nextTokenType(tokenizer, str_ctx, MaybeReader, mbr)) {
-            .quote_single,
-            .quote_double,
-            => |close_quote| assert(open_quote == close_quote),
-            .eof => return ParseError.UnclosedSystemLiteral,
-            else => unreachable,
-        }
-
-        break :lit .{ system_lit, try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr) };
-    };
-
-    return .{ ext_id_kind, pubid_lit, system_lit, tt_after_str };
+fn anyNonPubidChars(str: []const u8, quote_type: enum { single, double }) bool {
+    return for (str) |char| switch (char) {
+        '\u{20}', '\u{D}', '\u{A}' => {},
+        'a'...'z', 'A'...'Z', '0'...'9' => {},
+        '-' => {},
+        '\'' => switch (quote_type) {
+            .single => break true,
+            .double => {},
+        },
+        '(', ')', '+', ',', '.', '/', ':', '=', '?', ';', '!', '*', '#', '@', '$', '_', '%' => {},
+        else => break true,
+    } else false;
 }
 
 pub const IgnoreCtx = struct {
-    pub fn feedPI(
-        ctx: @This(),
-        data: anytype,
+    pub fn feedSrcSegment(
+        _: @This(),
+        segment: anytype,
     ) !void {
-        _ = ctx;
-        _ = data;
+        _ = segment;
     }
+    pub fn feedSrcEnd(_: @This()) !void {}
 
-    pub fn feedDTDName(
-        ctx: @This(),
-        name: anytype,
-    ) !void {
-        _ = ctx;
-        _ = name;
-    }
-
-    pub fn feedDTDExternalId(
-        ctx: @This(),
-        kind: ExternalIdKind,
-        pubid_lit: anytype,
-        system_lit: anytype,
-    ) !void {
-        _ = ctx;
+    pub fn feedReferenceStart(_: @This(), kind: ReferenceKind) !void {
         _ = kind;
-        _ = pubid_lit;
-        _ = system_lit;
     }
+    pub fn feedReferenceEnd(_: @This()) !void {}
 
-    pub fn feedDTDEntityStart(
-        ctx: @This(),
-        kind: ReferenceKind,
-        name: anytype,
-    ) !void {
-        _ = ctx;
-        _ = kind;
-        _ = name;
-    }
+    pub fn feedPI(_: @This()) !void {}
 
-    pub fn feedDTDEntityValueTextSegment(
-        ctx: @This(),
-        text: anytype,
-    ) !void {
-        _ = ctx;
-        _ = text;
-    }
+    pub fn feedDTDStart(_: @This()) !void {}
 
-    pub fn feedDTDEntityValueReference(
-        ctx: @This(),
-        kind: ReferenceKind,
-        id: anytype,
-    ) !void {
-        _ = ctx;
-        _ = kind;
-        _ = id;
-    }
-
-    pub fn feedDTDEntityValueEnd(ctx: @This()) !void {
-        _ = ctx;
-    }
-
-    pub fn feedDTDEntityValueExternalId(
-        ctx: @This(),
-        kind: ExternalIdKind,
-        pubid_lit: anytype,
-        system_lit: anytype,
-        ndata_name: anytype,
-    ) !void {
-        _ = ctx;
-        _ = kind;
-        _ = pubid_lit;
-        _ = system_lit;
-        _ = ndata_name;
-    }
-
-    pub fn feedDTDElementStart(
-        ctx: @This(),
-        name: anytype,
-    ) !void {
-        _ = ctx;
-        _ = name;
-    }
-
-    pub fn feedDTDElementEmptyOrAny(ctx: @This(), kind: EmptyOrAny) !void {
-        _ = ctx;
+    pub fn feedDTDExternalId(_: @This(), kind: ExternalIdKind) !void {
         _ = kind;
     }
 
-    pub fn feedDTDElementMixedStart(ctx: @This()) !void {
-        _ = ctx;
+    pub fn feedDTDEntityStart(_: @This(), kind: ReferenceKind) !void {
+        _ = kind;
+    }
+    pub fn feedDTDEntityEnd(_: @This()) !void {}
+    pub fn feedDTDNDataDecl(_: @This()) !void {}
+
+    pub fn feedDTDElementStart(_: @This()) !void {}
+    pub fn feedDTDElementContentSpec(_: @This(), content_spec: ContentSpec) !void {
+        _ = content_spec;
     }
 
-    pub fn feedDTDElementMixedEnd(ctx: @This(), zero_or_many: bool) !void {
-        _ = ctx;
+    pub fn feedDTDElementMixedEnd(_: @This(), zero_or_many: bool) !void {
         _ = zero_or_many;
     }
 
-    pub fn feedDTDElementIdentifier(
-        ctx: @This(),
-        name: anytype,
-        quantity: ?ContentParticleQuantity,
-    ) !void {
-        _ = ctx;
-        _ = name;
-        _ = quantity;
+    pub fn feedDTDElementChildToken(_: @This(), child_tok: ElementChildToken) !void {
+        _ = child_tok;
     }
 
-    pub fn feedDTDElementLParen(ctx: @This()) !void {
-        _ = ctx;
-    }
+    pub fn feedDTDElementEnd(_: @This()) !void {}
 
-    pub fn feedDTDElementRParen(ctx: @This(), quantity: ?ContentParticleQuantity, end: bool) !void {
-        _ = ctx;
-        _ = quantity;
-        _ = end;
-    }
+    pub fn feedDTDAttlistStart(_: @This()) !void {}
 
-    pub fn feedDTDElementChoiceSep(ctx: @This()) !void {
-        _ = ctx;
-    }
+    pub fn feedDTDAttlistDef(_: @This()) !void {}
 
-    pub fn feedDTDElementSequenceSep(ctx: @This()) !void {
-        _ = ctx;
-    }
-
-    pub fn feedDTDAttlistStart(
-        ctx: @This(),
-        name: anytype,
-    ) !void {
-        _ = ctx;
-        _ = name;
-    }
-
-    pub fn feedDTDAttlistDefStart(
-        ctx: @This(),
-        name: anytype,
-        attr_type: AttributeType,
-    ) !void {
-        _ = ctx;
-        _ = name;
+    pub fn feedDTDAttlistDefType(_: @This(), attr_type: AttributeType) !void {
         _ = attr_type;
     }
 
-    pub fn feedDTDAttlistDefNmtoken(
-        ctx: @This(),
-        name: anytype,
-    ) !void {
-        _ = ctx;
-        _ = name;
+    pub fn feedDTDAttlistDefaultDeclStart(_: @This(), default_decl_kind: ?DefaultDeclKind) !void {
+        _ = default_decl_kind;
     }
 
-    pub fn feedDTDAttlistDefaultDeclStart(ctx: @This(), kind: ?DefaultDeclKind) !void {
-        _ = ctx;
+    pub fn feedDTDAttlistDefaultDeclEnd(_: @This()) !void {}
+
+    pub fn feedDTDAttlistEnd(_: @This()) !void {}
+
+    pub fn feedDTDNotationStart(_: @This()) !void {}
+
+    pub fn feedExternalOrPublicId(_: @This(), kind: ExternalIdKind) !void {
         _ = kind;
     }
 
-    pub fn feedDTDAttlistDefaultDeclValueSegment(
-        ctx: @This(),
-        text: anytype,
-    ) !void {
-        _ = ctx;
-        _ = text;
-    }
+    pub fn feedDTDNotationEnd(_: @This()) !void {}
 
-    pub fn feedDTDAttlistDefaultDeclValueReference(
-        ctx: @This(),
-        name: anytype,
-    ) !void {
-        _ = ctx;
-        _ = name;
-    }
-
-    pub fn feedDTDAttlistDefaultDeclValueEnd(ctx: @This()) !void {
-        _ = ctx;
-    }
-
-    pub fn feedDTDAttlistEnd(ctx: @This()) !void {
-        _ = ctx;
-    }
-
-    pub fn feedDTDNotation(
-        ctx: @This(),
-        name: anytype,
-        ext_id_kind: ExternalIdKind,
-        sys_literal: anytype,
-        pubid_literal: anytype,
-    ) !void {
-        _ = ctx;
-        _ = name;
-        _ = ext_id_kind;
-        _ = sys_literal;
-        _ = pubid_literal;
-    }
+    pub fn feedDTDEnd(_: @This()) !void {}
 };
 
 test parseSlice {
