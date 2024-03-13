@@ -138,7 +138,7 @@ pub const ParseMarker = union(enum) {
     /// If `== .general`, this may be followed by one of the
     /// following sequences:
     /// * `(feedSrc* | reference)*`, for a simple entity value.
-    /// * `external_id ndata_decl?`
+    /// * First `external_id`, and then optionally `feedSrc*` for the NDataDecl name.
     ///
     /// If `== .parsed`, this may be followed by one of the
     /// following sequences:
@@ -147,8 +147,6 @@ pub const ParseMarker = union(enum) {
     ///
     /// After either of the above, this will be followed by `entity_end`.
     entity_start: ReferenceKind,
-    /// Followed by `feedSrc*`, in order to construct the NDataDecl name.
-    ndata_decl,
     /// Signifies the end of the entity declaration.
     /// May be followed by:
     /// * `entity_start`
@@ -412,10 +410,10 @@ fn handleDTD(
     comptime MaybeReader: ?type,
     mbr: parse_helper.MaybeBufferedReader(MaybeReader),
 ) !void {
-    if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-        else => return ParseError.MissingDTDSpacing,
-        .eof => return ParseError.UnclosedDTD,
+    if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
         .tag_whitespace => unreachable,
+        .eof => return ParseError.UnclosedDTD,
+        else => return ParseError.MissingDTDSpacing,
     };
 
     switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
@@ -470,15 +468,15 @@ fn handleDTD(
             const maybe_decl_str = try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, DeclStr);
             const decl_str = maybe_decl_str orelse return ParseError.InvalidDTDDecl;
 
-            if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                else => return ParseError.MissingDTDSpacing,
+            if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+                .tag_whitespace => unreachable,
                 .eof => return switch (decl_str) {
                     .@"<!ENTITY" => ParseError.UnclosedDTDEntity,
                     .@"<!ELEMENT" => ParseError.UnclosedDTDElement,
                     .@"<!ATTLIST" => ParseError.UnclosedDTDAttlist,
                     .@"<!NOTATION" => ParseError.UnclosedDTDNotation,
                 },
-                .tag_whitespace => unreachable,
+                else => return ParseError.MissingDTDSpacing,
             };
 
             switch (decl_str) {
@@ -530,10 +528,10 @@ fn handleDTDEntity(
         .tag_whitespace => unreachable,
         .tag_token => .general,
         .percent => rk: {
-            if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                else => return ParseError.MissingDTDSpacing,
-                .eof => return ParseError.UnclosedDTDEntity,
+            if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
                 .tag_whitespace => unreachable,
+                .eof => return ParseError.UnclosedDTDEntity,
+                else => return ParseError.MissingDTDSpacing,
             };
             switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
                 else => return ParseError.UnexpectedDTDToken,
@@ -547,10 +545,10 @@ fn handleDTDEntity(
     try parse_ctx.feedMarker(.{ .entity_start = ref_kind });
     try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr); // the declared name
 
-    if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-        else => return ParseError.MissingDTDSpacing,
-        .eof => return ParseError.UnclosedDTDEntity,
+    if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
         .tag_whitespace => unreachable,
+        .eof => return ParseError.UnclosedDTDEntity,
+        else => return ParseError.MissingDTDSpacing,
     };
 
     switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
@@ -610,12 +608,12 @@ fn handleDTDEntity(
             try parse_ctx.feedMarker(.{ .external_id = ext_id_kind });
             assert((try handleExternalOrPublicId(Impl, parse_ctx, tokenizer, MaybeReader, mbr, ext_id_kind, .require_system_literal)) == null);
 
-            if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                else => return ParseError.MissingDTDSpacing,
+            switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                else => return ParseError.UnexpectedDTDToken,
                 .eof => return ParseError.UnclosedDTDEntity,
-                .tag_whitespace => unreachable,
                 .angle_bracket_right => return,
-            };
+                .tag_whitespace => try parse_helper.skipWhitespaceSrcUnchecked(tokenizer, .dtd, MaybeReader, mbr),
+            }
 
             switch (ref_kind) {
                 .general => {
@@ -629,18 +627,18 @@ fn handleDTDEntity(
                     _ = (try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, enum { NDATA })) orelse {
                         return ParseError.UnexpectedDTDToken;
                     };
-                    if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                        else => return ParseError.MissingDTDSpacing,
-                        .eof => return ParseError.UnclosedDTDEntity,
-                        .tag_whitespace => unreachable,
-                    };
                     switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
                         else => return ParseError.UnexpectedDTDToken,
                         .eof => return ParseError.UnclosedDTDEntity,
+                        .tag_whitespace => try parse_helper.skipWhitespaceSrcUnchecked(tokenizer, .dtd, MaybeReader, mbr),
+                    }
+                    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                        else => return ParseError.UnexpectedDTDToken,
+                        .eof => return ParseError.UnclosedDTDEntity,
+                        .tag_whitespace => unreachable,
                         .tag_token => {},
                     }
 
-                    try parse_ctx.feedMarker(.ndata_decl);
                     try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr);
                 },
                 .parsed => {},
@@ -670,10 +668,10 @@ fn handleDTDElement(
     try parse_ctx.feedMarker(.element_start);
     try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr); // the declared name
 
-    if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-        else => return ParseError.MissingDTDSpacing,
-        .eof => return ParseError.UnclosedDTDElement,
+    if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
         .tag_whitespace => unreachable,
+        .eof => return ParseError.UnclosedDTDElement,
+        else => return ParseError.MissingDTDSpacing,
     };
 
     switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
@@ -727,28 +725,30 @@ fn handleDTDElement(
                     try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr);
                 }
 
-                const many_opts_specifier = if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                    else => return ParseError.UnexpectedDTDToken,
-                    .tag_whitespace => unreachable,
-                    .asterisk => true,
+                const many_opts_specifier = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                    .asterisk => switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+                        .angle_bracket_right => true,
+
+                        .tag_whitespace => unreachable,
+                        .eof => return ParseError.UnclosedDTDElement,
+                        else => return ParseError.UnexpectedDTDToken,
+                    },
+                    .tag_whitespace => switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                        .angle_bracket_right => false,
+
+                        .tag_whitespace => unreachable,
+                        .eof => return ParseError.UnclosedDTDElement,
+                        else => return ParseError.UnexpectedDTDToken,
+                    },
                     .angle_bracket_right => false,
-                } else switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
-                    else => return ParseError.UnexpectedDTDToken,
+
                     .eof => return ParseError.UnclosedDTDElement,
-                    .tag_whitespace => unreachable,
-                    .angle_bracket_right => false,
+                    else => return ParseError.UnexpectedDTDToken,
                 };
 
                 if (many_opts and !many_opts_specifier) {
                     return ParseError.MissingAsteriskForManyPCDATAOptions;
                 }
-
-                if (many_opts_specifier) switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
-                    else => return ParseError.UnexpectedDTDToken,
-                    .eof => return ParseError.UnclosedDTDElement,
-                    .tag_whitespace => unreachable,
-                    .angle_bracket_right => {},
-                };
 
                 return if (many_opts_specifier) .asterisk else null;
             },
@@ -766,10 +766,7 @@ fn handleDTDElement(
                 }) {
                     else => return ParseError.UnexpectedDTDToken,
                     .eof => return ParseError.UnclosedDTDEntity,
-                    .tag_whitespace => switch (try parse_helper.skipWhitespaceTokenSrc(tokenizer, .dtd, MaybeReader, mbr)) {
-                        .all_whitespace => {},
-                        .non_whitespace => unreachable,
-                    },
+                    .tag_whitespace => try parse_helper.skipWhitespaceSrcUnchecked(tokenizer, .dtd, MaybeReader, mbr),
 
                     .qmark, .asterisk, .plus => |tt| {
                         switch (prev) {
@@ -884,26 +881,27 @@ fn handleDTDAttlist(
     try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr); // the declared name
 
     while (true) {
-        if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+        switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
             else => return ParseError.MissingDTDSpacing,
             .eof => return ParseError.UnclosedDTDAttlist,
-            .tag_whitespace => unreachable,
             .angle_bracket_right => break,
-        };
+            .tag_whitespace => try parse_helper.skipWhitespaceSrcUnchecked(tokenizer, .dtd, MaybeReader, mbr),
+        }
 
         switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
             else => return ParseError.UnexpectedDTDToken,
             .eof => return ParseError.UnclosedDTDAttlist,
+            .tag_whitespace => unreachable,
             .angle_bracket_right => break,
             .tag_token => {},
         }
         try parse_ctx.feedMarker(.attlist_def_start);
         try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr);
 
-        if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-            else => return ParseError.MissingDTDSpacing,
-            .eof => return ParseError.UnclosedDTDAttlist,
+        if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
             .tag_whitespace => unreachable,
+            .eof => return ParseError.UnclosedDTDAttlist,
+            else => return ParseError.MissingDTDSpacing,
         };
 
         const attr_type: AttributeType = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
@@ -933,14 +931,15 @@ fn handleDTDAttlist(
                     .NMTOKENS => {},
 
                     .NOTATION => {
-                        if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                            else => return ParseError.MissingDTDSpacing,
-                            .eof => return ParseError.UnclosedDTDAttlist,
+                        if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
                             .tag_whitespace => unreachable,
+                            .eof => return ParseError.UnclosedDTDAttlist,
+                            else => return ParseError.MissingDTDSpacing,
                         };
                         switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
                             else => return ParseError.UnexpectedDTDToken,
                             .eof => return ParseError.UnclosedDTDAttlist,
+                            .tag_whitespace => unreachable,
                             .lparen => {},
                         }
                     },
@@ -993,10 +992,10 @@ fn handleDTDAttlist(
             },
         }
 
-        if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-            else => return ParseError.MissingDTDSpacing,
-            .eof => return ParseError.UnclosedDTDAttlist,
+        if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
             .tag_whitespace => unreachable,
+            .eof => return ParseError.UnclosedDTDAttlist,
+            else => return ParseError.MissingDTDSpacing,
         };
 
         const maybe_open_quote: ?Tokenizer.TokenType, //
@@ -1025,10 +1024,10 @@ fn handleDTDAttlist(
 
         if (dd_kind == null or dd_kind.? == .FIXED) {
             const open_quote: Tokenizer.TokenType = maybe_open_quote orelse oq: {
-                if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                    else => return ParseError.MissingDTDSpacing,
-                    .eof => return ParseError.UnclosedDTDAttlist,
+                if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
                     .tag_whitespace => unreachable,
+                    .eof => return ParseError.UnclosedDTDAttlist,
+                    else => return ParseError.MissingDTDSpacing,
                 };
                 break :oq try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr);
             };
@@ -1090,10 +1089,10 @@ fn handleDTDNotation(
     try parse_ctx.feedMarker(.notation_start);
     try feedTokenSrc(Impl, parse_ctx, tokenizer, .dtd, MaybeReader, mbr); // the declared name
 
-    if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-        else => return ParseError.MissingDTDSpacing,
-        .eof => return ParseError.UnclosedDTDNotation,
+    if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
         .tag_whitespace => unreachable,
+        .eof => return ParseError.UnclosedDTDNotation,
+        else => return ParseError.MissingDTDSpacing,
     };
 
     switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
@@ -1131,10 +1130,10 @@ fn handleExternalOrPublicId(
     switch (ext_id_kind) {
         .SYSTEM => {},
         .PUBLIC => pubid: {
-            if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                else => return ParseError.MissingDTDSpacing,
-                .eof => return ParseError.UnclosedDTD,
+            if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
                 .tag_whitespace => unreachable,
+                .eof => return ParseError.UnclosedDTD,
+                else => return ParseError.MissingDTDSpacing,
             };
 
             const open_quote: Tokenizer.TokenType, //
@@ -1187,12 +1186,12 @@ fn handleExternalOrPublicId(
         },
     }
 
-    if (try parse_helper.expectAndSkipIfTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| {
-        switch (config) {
-            .require_system_literal => return ParseError.MissingDTDSpacing,
-            .dont_need_system_literal => {},
-        }
-        return non_ws;
+    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+        else => |tt| return switch (config) {
+            .require_system_literal => ParseError.MissingDTDSpacing,
+            .dont_need_system_literal => tt,
+        },
+        .tag_whitespace => try parse_helper.skipWhitespaceSrcUnchecked(tokenizer, .dtd, MaybeReader, mbr),
     }
 
     const open_quote: Tokenizer.TokenType, //
@@ -1332,27 +1331,24 @@ const TestParseItem = union(enum) {
         _ = options;
         switch (tpi) {
             .marker => |marker| {
-                // try writer.print("TPI({any})", .{marker});
                 try writer.writeAll("TPI(");
                 switch (marker) {
                     inline else => |payload, tag| {
                         const T = @TypeOf(payload);
-                        if (T == void) {
-                            try writer.print(".{s}", .{@tagName(tag)});
-                        } else if (@typeInfo(T) == .Enum) {
-                            try writer.print(".{s} = .{s}", .{ @tagName(tag), @tagName(payload) });
-                        } else if (@typeInfo(T) == .Optional) {
-                            if (payload) |unwrapped| {
-                                if (@typeInfo(@typeInfo(T).Optional.child) == .Enum) {
-                                    try writer.print(".{s} = .{s}", .{ @tagName(tag), @tagName(unwrapped) });
-                                } else {
-                                    try writer.print(".{s} = {any}", .{ @tagName(tag), unwrapped });
+                        switch (@typeInfo(T)) {
+                            .Void => try writer.print(".{s}", .{@tagName(tag)}),
+                            .Enum => try writer.print(".{s} = .{s}", .{ @tagName(tag), @tagName(payload) }),
+                            .Optional => |optional| opt: {
+                                const unwrapped = payload orelse {
+                                    try writer.print(".{s} = null", .{@tagName(tag)});
+                                    break :opt;
+                                };
+                                switch (@typeInfo(optional.child)) {
+                                    .Enum => try writer.print(".{s} = .{s}", .{ @tagName(tag), @tagName(unwrapped) }),
+                                    else => try writer.print(".{s} = {any}", .{ @tagName(tag), unwrapped }),
                                 }
-                            } else {
-                                try writer.print(".{s} = null", .{@tagName(tag)});
-                            }
-                        } else {
-                            try writer.print(".{s} = {any}", .{ @tagName(tag), payload });
+                            },
+                            else => comptime unreachable,
                         }
                     },
                 }

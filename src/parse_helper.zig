@@ -4,21 +4,6 @@ const assert = std.debug.assert;
 const iksemel = @import("iksemel.zig");
 const Tokenizer = iksemel.Tokenizer;
 
-pub inline fn checkSrcType(comptime optional: enum { is_optional, not_optional }, comptime T: type) void {
-    const ExpectedSlice: type, //
-    const ExpectedRange: type //
-    = switch (optional) {
-        .is_optional => .{ ?[]const u8, ?Tokenizer.Range },
-        .not_optional => .{ []const u8, Tokenizer.Range },
-    };
-    switch (T) {
-        ExpectedSlice => {},
-        ExpectedRange => {},
-        else => @compileError("Expected " ++ @typeName(ExpectedSlice) ++ " or " ++ @typeName(ExpectedRange) ++ ", instead got " ++ @typeName(T)),
-    }
-    comptime return; // this function must be run at `comptime`
-}
-
 pub fn MaybeBufferedReader(comptime MaybeReader: ?type) type {
     return struct {
         reader: (MaybeReader orelse void),
@@ -66,6 +51,12 @@ pub fn nextTokenSegment(
     };
 }
 
+/// Consumes the token source, and attempts to conver the string
+/// into an enum of the given type with a matching name.
+/// Returns null if the source does not match any member
+/// of the enumeration.
+/// If the token source is too long to match any of the enum values,
+/// it will skip the rest of the source.
 pub fn nextTokenSrcAsEnum(
     tokenizer: *Tokenizer,
     context: Tokenizer.Context,
@@ -96,6 +87,9 @@ pub fn nextTokenSrcAsEnum(
     return std.meta.stringToEnum(E, str.constSlice());
 }
 
+/// Simple helper structure which allows iteration over the source
+/// of a tokenizer with a unified API regardless of whether it is
+/// streaming the source from a reader or from a slice.
 pub fn TokenSrcIter(comptime MaybeReader: ?type) type {
     return struct {
         iterated_once: if (MaybeReader == null) bool else void = if (MaybeReader == null) false,
@@ -117,6 +111,7 @@ pub fn TokenSrcIter(comptime MaybeReader: ?type) type {
     };
 }
 
+/// Consumes the token source, returns whether or not it contained non-whitespace.
 pub fn skipWhitespaceTokenSrc(
     tokenizer: *Tokenizer,
     context: Tokenizer.Context,
@@ -128,6 +123,7 @@ pub fn skipWhitespaceTokenSrc(
         while (try nextTokenSegment(tokenizer, context, mbr.reader, mbr.read_buffer)) |str| {
             if (std.mem.indexOfNone(u8, str, Tokenizer.whitespace_set) == null) continue;
             any_non_whitespace = false;
+            // don't break, we need to consume the whole token source
         }
     } else {
         const range = tokenizer.nextSrcNoUnderrun(context);
@@ -136,6 +132,27 @@ pub fn skipWhitespaceTokenSrc(
     return if (any_non_whitespace) .non_whitespace else .all_whitespace;
 }
 
+/// This function reads the source and asserts it's all whitespace
+/// in safe modes, and simply skips it in unsafe modes.
+pub fn skipWhitespaceSrcUnchecked(
+    tokenizer: *Tokenizer,
+    context: Tokenizer.Context,
+    comptime MaybeReader: ?type,
+    mbr: MaybeBufferedReader(MaybeReader),
+) !void {
+    if (std.debug.runtime_safety) {
+        switch (try skipWhitespaceTokenSrc(tokenizer, context, MaybeReader, mbr)) {
+            .all_whitespace => {},
+            .non_whitespace => unreachable,
+        }
+    } else {
+        try skipTokenStr(tokenizer, context, MaybeReader, mbr);
+    }
+}
+
+/// Gets the immediate next token type; if it's `.tag_whitespace`, it skips
+/// the whitespace token source, and then returns the next token type,
+/// asserting it is not of `.tag_whitespace` (two can't be returned consecutively).
 pub fn nextTokenTypeIgnoreTagWhitespace(
     tokenizer: *Tokenizer,
     context: Tokenizer.Context,
@@ -146,10 +163,7 @@ pub fn nextTokenTypeIgnoreTagWhitespace(
         else => |tag| return tag,
         .tag_whitespace => {},
     }
-    switch (try skipWhitespaceTokenSrc(tokenizer, context, MaybeReader, mbr)) {
-        .all_whitespace => {},
-        .non_whitespace => unreachable,
-    }
+    try skipWhitespaceSrcUnchecked(tokenizer, context, MaybeReader, mbr);
     return switch (try nextTokenType(tokenizer, context, MaybeReader, mbr)) {
         else => |tag| tag,
         .tag_whitespace => unreachable,
@@ -159,7 +173,7 @@ pub fn nextTokenTypeIgnoreTagWhitespace(
 /// Expects the next token to be `.tag_whitespace`, and if it is,
 /// it skips the whitespace source, and returnsn ull. Otherwise,
 /// it returns the actual token type.
-pub fn expectAndSkipIfTagWhitespace(
+pub fn skipIfTagWhitespaceOrGetNextTokType(
     tokenizer: *Tokenizer,
     context: Tokenizer.Context,
     comptime MaybeReader: ?type,
