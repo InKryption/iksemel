@@ -1,6 +1,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+const builtin = @import("builtin");
+
 const iksemel = @import("iksemel.zig");
 const Tokenizer = iksemel.Tokenizer;
 
@@ -73,6 +75,8 @@ pub fn ParseCtx(comptime Inner: type) type {
         const Self = @This();
 
         /// Called consecutively to construct the source.
+        /// Segments of a whole string are guaranteed to be
+        /// contiguous in the source.
         /// Terminated when `segment == null`.
         pub fn feedSrc(
             ctx: Self,
@@ -296,7 +300,7 @@ pub inline fn parseSlice(
     /// Must satisfy the interface described by `ParseCtx`.
     parse_ctx_impl: anytype,
 ) !Tokenizer.TokenType {
-    return parseUntilLABReaderOrSlice(parse_ctx_impl, tokenizer, null, .{
+    return parseImpl(parse_ctx_impl, tokenizer, null, .{
         .reader = {},
         .read_buffer = {},
     });
@@ -311,13 +315,13 @@ pub inline fn parseReader(
     parse_ctx_impl: anytype,
 ) !Tokenizer.TokenType {
     var tokenizer = Tokenizer.initStreaming();
-    return parseUntilLABReaderOrSlice(parse_ctx_impl, &tokenizer, @TypeOf(reader), .{
+    return parseImpl(parse_ctx_impl, &tokenizer, @TypeOf(reader), .{
         .reader = reader,
         .read_buffer = read_buffer,
     });
 }
 
-fn parseUntilLABReaderOrSlice(
+fn parseImpl(
     parse_ctx_impl: anytype,
     tokenizer: *Tokenizer,
     comptime MaybeReader: ?type,
@@ -1317,9 +1321,107 @@ test parseReader {
     try std.testing.expectEqual(.eof, parseReader(fbs.reader(), &read_buffer, IgnoreCtx{}));
 }
 
+fn TestCtx(comptime streaming: bool) type {
+    return struct {
+        src: if (streaming) void else []const u8,
+        expected: []const TestParseItem,
+        index: usize = 0,
+        str_index: usize = 0,
+        const Self = @This();
+
+        pub fn feedMarker(ctx: *Self, actual_marker: ParseMarker) !void {
+            defer ctx.index += 1;
+            errdefer std.log.err("Error occurred on item {d}", .{ctx.index});
+
+            switch (ctx.expected[ctx.index]) {
+                .marker => |expected_marker| try std.testing.expectEqual(expected_marker, actual_marker),
+                .str => |expected_str| {
+                    std.log.err("Expected string '{}', got marker {}", .{ std.zig.fmtEscapes(expected_str), actual_marker });
+                    return error.TestExpectedEqual;
+                },
+            }
+            try std.testing.expectEqual(0, ctx.str_index);
+        }
+
+        const Segment = if (streaming) []const u8 else Tokenizer.Range;
+        pub fn feedSrc(ctx: *Self, maybe_actual_segment: ?Segment) !void {
+            errdefer std.log.err("Error occurred on item {d}", .{ctx.index});
+            const expected_str = switch (ctx.expected[ctx.index]) {
+                .str => |str| str,
+                .marker => |actual_marker| {
+                    const maybe_segment_str: ?[]const u8 = if (streaming)
+                        maybe_actual_segment
+                    else if (maybe_actual_segment) |seg|
+                        seg.toStr(ctx.src)
+                    else
+                        null;
+                    std.log.err("Expected marker {}, got segment '{?}'", .{ actual_marker, if (maybe_segment_str) |str| std.zig.fmtEscapes(str) else null });
+                    try std.testing.expectEqual(0, ctx.str_index);
+                    return error.TestExpectedEqual;
+                },
+            };
+            const expected_segment_str: []const u8 = expected_str[ctx.str_index..];
+
+            const actual_segment = maybe_actual_segment orelse {
+                const actual_str = expected_str[0..ctx.str_index];
+                try std.testing.expectEqualStrings(expected_str, actual_str);
+                ctx.str_index = 0;
+                ctx.index += 1;
+                return;
+            };
+            const actual_segment_str: []const u8 = if (streaming) actual_segment else actual_segment.toStr(ctx.src);
+
+            if (!std.mem.startsWith(u8, expected_segment_str, actual_segment_str)) {
+                const actual_str = try std.mem.concat(std.testing.allocator, u8, &.{ expected_str[0..ctx.str_index], actual_segment_str });
+                defer std.testing.allocator.free(actual_str);
+                try std.testing.expectEqualStrings(expected_str, actual_str);
+                @panic("Expected the error to go off, something is quite wrong"); // the error should have been triggered
+            }
+
+            ctx.str_index += actual_segment_str.len;
+        }
+    };
+}
+
+fn testParse(
+    expected_result: ParseError!Tokenizer.TokenType,
+    buffer_sizes: []const usize,
+    src: []const u8,
+    expected_outs: []const TestParseItem,
+) !void {
+    {
+        const full_read_buffer = try std.testing.allocator.alloc(u8, if (buffer_sizes.len != 0) std.mem.max(usize, buffer_sizes) else 0);
+        defer std.testing.allocator.free(full_read_buffer);
+
+        var current_str_buf = std.ArrayList(u8).init(std.testing.allocator);
+        defer current_str_buf.deinit();
+
+        for (buffer_sizes) |buf_size| {
+            var fbs = std.io.fixedBufferStream(src);
+
+            var ctx: TestCtx(true) = .{
+                .src = {},
+                .expected = expected_outs,
+            };
+            try std.testing.expectEqual(expected_result, parseReader(fbs.reader(), full_read_buffer[0..buf_size], &ctx));
+        }
+    }
+
+    var ctx: TestCtx(false) = .{
+        .src = src,
+        .expected = expected_outs,
+    };
+    var tokenizer = Tokenizer.initComplete(src);
+    try std.testing.expectEqual(expected_result, parseSlice(&tokenizer, &ctx));
+}
+
 const TestParseItem = union(enum) {
     marker: ParseMarker,
     str: []const u8,
+
+    comptime {
+        assert(builtin.is_test);
+    }
 
     pub fn format(
         tpi: TestParseItem,
@@ -1358,101 +1460,6 @@ const TestParseItem = union(enum) {
         }
     }
 };
-
-fn testParse(
-    expected_result: (ParseError || std.mem.Allocator.Error)!Tokenizer.TokenType,
-    buffer_sizes: []const usize,
-    src: []const u8,
-    expected_outs: []const TestParseItem,
-) !void {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var actual_outs_buffer = std.ArrayList(TestParseItem).init(allocator);
-    defer actual_outs_buffer.deinit();
-
-    {
-        const full_read_buffer = try std.testing.allocator.alloc(u8, if (buffer_sizes.len != 0) std.mem.max(usize, buffer_sizes) else 0);
-        defer std.testing.allocator.free(full_read_buffer);
-
-        var current_str_buf = std.ArrayList(u8).init(std.testing.allocator);
-        defer current_str_buf.deinit();
-
-        for (buffer_sizes) |buf_size| {
-            var fbs = std.io.fixedBufferStream(src);
-            const ctx: struct {
-                allocator: std.mem.Allocator,
-                actual: *@TypeOf(actual_outs_buffer),
-                current_str: *std.ArrayList(u8),
-
-                pub fn feedSrc(ctx: @This(), segment: ?[]const u8) !void {
-                    try ctx.current_str.appendSlice(segment orelse {
-                        try ctx.actual.append(.{ .str = try ctx.allocator.dupe(u8, ctx.current_str.items) });
-                        ctx.current_str.clearRetainingCapacity();
-                        return;
-                    });
-                }
-
-                pub fn feedMarker(ctx: @This(), marker: ParseMarker) !void {
-                    try ctx.actual.append(.{ .marker = marker });
-                }
-            } = .{
-                .allocator = allocator,
-                .actual = &actual_outs_buffer,
-                .current_str = &current_str_buf,
-            };
-
-            const actual_result = parseReader(fbs.reader(), full_read_buffer[0..buf_size], ctx);
-            if (expected_result) |expected_result_value| {
-                try std.testing.expectEqualDeep(expected_result_value, actual_result);
-            } else |expected_result_err| {
-                try std.testing.expectError(expected_result_err, actual_result);
-            }
-            errdefer std.log.err("\nExpected: {any}\n\nGot:      {any}", .{ expected_outs, actual_outs_buffer.items });
-            try std.testing.expectEqualDeep(expected_outs, actual_outs_buffer.items);
-            actual_outs_buffer.clearRetainingCapacity();
-        }
-    }
-
-    var tokenizer = Tokenizer.initComplete(src);
-    var ctx: struct {
-        src: []const u8,
-        actual: *@TypeOf(actual_outs_buffer),
-        /// Parsing a slice guarantees that segments are always whole, despite
-        /// passing through the same iterative API as when parsing a reader.
-        /// This flag indicates whether or not a range has been fed.
-        range_end_pending: bool = false,
-
-        pub fn feedSrc(ctx: *@This(), maybe_range: ?Tokenizer.Range) !void {
-            const range = maybe_range orelse {
-                try std.testing.expect(ctx.range_end_pending);
-                ctx.range_end_pending = false;
-                return;
-            };
-            try std.testing.expect(!ctx.range_end_pending);
-            ctx.range_end_pending = true;
-            try ctx.actual.append(.{ .str = range.toStr(ctx.src) });
-        }
-
-        pub fn feedMarker(ctx: @This(), marker: ParseMarker) !void {
-            try std.testing.expect(!ctx.range_end_pending);
-            try ctx.actual.append(.{ .marker = marker });
-        }
-    } = .{
-        .src = src,
-        .actual = &actual_outs_buffer,
-    };
-    const actual_result = parseSlice(&tokenizer, &ctx);
-    if (expected_result) |expected_result_value| {
-        try std.testing.expectEqualDeep(expected_result_value, actual_result);
-    } else |expected_result_err| {
-        try std.testing.expectError(expected_result_err, actual_result);
-    }
-    errdefer std.log.err("\nExpected: {any}\nGot: {any}", .{ expected_outs, actual_outs_buffer.items });
-    try std.testing.expectEqualDeep(expected_outs, actual_outs_buffer.items);
-    actual_outs_buffer.clearRetainingCapacity();
-}
 
 test "1" {
     try testParse(
