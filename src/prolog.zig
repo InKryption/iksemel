@@ -8,70 +8,71 @@ const Tokenizer = iksemel.Tokenizer;
 
 const parse_helper = @import("parse_helper.zig");
 
-pub const ExternalIdKind = enum { SYSTEM, PUBLIC };
+pub const ParseError = error{
+    MoreThanOneDTD,
+    NonWhitespaceInProlog,
+    AngleBracketLeftBang,
+    AngleBracketLeftInAttribute,
 
-pub const ReferenceKind = enum {
-    /// Represents a General Entity reference ('&name;').
-    general,
-    /// Represents a Parsed Entity reference ('%name;').
-    parsed,
+    UnclosedPI,
+    EmptyPI,
+
+    InvalidCommentStart,
+    CommentDashDash,
+    CommentEndTripleDash,
+
+    InvalidDTDStart,
+    UnexpectedDTDToken,
+    MissingDTDSpacing,
+
+    UnclosedDTDPubidLiteral,
+    InvalidDTDPubidLiteral,
+    UnclosedDTDSystemLiteral,
+    InvalidDTDDecl,
+    UnclosedDTDEntityValue,
+    UnclosedAttributeValue,
+    MissingAsteriskForManyPCDATAOptions,
+
+    InvalidReferenceEnd,
+    EmptyReference,
+
+    UnclosedDTD,
+    UnclosedDTDEntity,
+    UnclosedDTDElement,
+    UnclosedDTDAttlist,
+    UnclosedDTDNotation,
 };
 
-pub const ContentSpec = enum {
-    EMPTY,
-    ANY,
-    Mixed,
-    children,
-};
+pub inline fn parseSlice(
+    /// Must be a non-streaming tokenizer.
+    tokenizer: *Tokenizer,
+    /// Must satisfy the interface described by `ParseCtx`.
+    parse_ctx_impl: anytype,
+) !Tokenizer.TokenType {
+    return parseImpl(parse_ctx_impl, tokenizer, null, .{
+        .reader = {},
+        .read_buffer = {},
+    });
+}
 
-pub const AttributeType = enum {
-    CDATA,
+pub inline fn parseReader(
+    /// `std.io.Reader(...)`
+    reader: anytype,
+    /// Used as a temporary buffer for certain reads.
+    read_buffer: []u8,
+    /// Must satisfy the interface described by `ParseCtx`.
+    parse_ctx_impl: anytype,
+) !Tokenizer.TokenType {
+    var tokenizer = Tokenizer.initStreaming();
+    return parseImpl(parse_ctx_impl, &tokenizer, @TypeOf(reader), .{
+        .reader = reader,
+        .read_buffer = read_buffer,
+    });
+}
 
-    ID,
-    IDREF,
-    IDREFS,
-
-    ENTITY,
-    ENTITIES,
-
-    NMTOKEN,
-    NMTOKENS,
-
-    NOTATION,
-    enumeration,
-};
-
-pub const DefaultDeclKind = enum {
-    REQUIRED,
-    IMPLIED,
-    FIXED,
-};
-
-pub const ContentSpecToken = enum {
-    lparen,
-    rparen,
-    name,
-
-    qmark,
-    asterisk,
-    plus,
-
-    comma,
-    pipe,
-};
-
-pub const ContentParticleQuantifier = enum {
-    /// zero or one
-    qmark,
-    /// zero or many
-    asterisk,
-    /// one or many
-    plus,
-};
-
-pub fn ParseCtx(comptime Inner: type) type {
+pub fn ParseCtx(comptime Impl: type) type {
     return struct {
-        inner: Inner,
+        inner: Impl,
         const Self = @This();
 
         /// Called consecutively to construct the source.
@@ -259,67 +260,69 @@ pub const ParseMarker = union(enum) {
     dtd_end,
 };
 
-pub const ParseError = error{
-    MoreThanOneDTD,
-    NonWhitespaceInProlog,
-    AngleBracketLeftBang,
-    AngleBracketLeftInAttribute,
-
-    UnclosedPI,
-    EmptyPI,
-
-    InvalidCommentStart,
-    CommentDashDash,
-    CommentEndTripleDash,
-
-    InvalidDTDStart,
-    UnexpectedDTDToken,
-    MissingDTDSpacing,
-
-    UnclosedDTDPubidLiteral,
-    InvalidDTDPubidLiteral,
-    UnclosedDTDSystemLiteral,
-    InvalidDTDDecl,
-    UnclosedDTDEntityValue,
-    UnclosedAttributeValue,
-    MissingAsteriskForManyPCDATAOptions,
-
-    InvalidReferenceEnd,
-    EmptyReference,
-
-    UnclosedDTD,
-    UnclosedDTDEntity,
-    UnclosedDTDElement,
-    UnclosedDTDAttlist,
-    UnclosedDTDNotation,
+pub const ExternalIdKind = enum {
+    SYSTEM,
+    PUBLIC,
 };
 
-pub inline fn parseSlice(
-    /// Must be a non-streaming tokenizer.
-    tokenizer: *Tokenizer,
-    /// Must satisfy the interface described by `ParseCtx`.
-    parse_ctx_impl: anytype,
-) !Tokenizer.TokenType {
-    return parseImpl(parse_ctx_impl, tokenizer, null, .{
-        .reader = {},
-        .read_buffer = {},
-    });
-}
+pub const ReferenceKind = enum {
+    /// Represents a General Entity reference ('&name;').
+    general,
+    /// Represents a Parsed Entity reference ('%name;').
+    parsed,
+};
 
-pub inline fn parseReader(
-    /// `std.io.Reader(...)`
-    reader: anytype,
-    /// Used as a temporary buffer for certain reads.
-    read_buffer: []u8,
-    /// Must satisfy the interface described by `ParseCtx`.
-    parse_ctx_impl: anytype,
-) !Tokenizer.TokenType {
-    var tokenizer = Tokenizer.initStreaming();
-    return parseImpl(parse_ctx_impl, &tokenizer, @TypeOf(reader), .{
-        .reader = reader,
-        .read_buffer = read_buffer,
-    });
-}
+pub const ContentSpec = enum {
+    EMPTY,
+    ANY,
+    Mixed,
+    children,
+};
+
+pub const AttributeType = enum {
+    CDATA,
+
+    ID,
+    IDREF,
+    IDREFS,
+
+    ENTITY,
+    ENTITIES,
+
+    NMTOKEN,
+    NMTOKENS,
+
+    NOTATION,
+    enumeration,
+};
+
+pub const DefaultDeclKind = enum {
+    REQUIRED,
+    IMPLIED,
+    FIXED,
+};
+
+pub const ContentSpecToken = enum {
+    lparen,
+    rparen,
+    name,
+
+    qmark,
+    asterisk,
+    plus,
+
+    comma,
+    pipe,
+};
+
+pub const ContentParticleQuantifier = enum {
+    /// zero or one
+    qmark,
+    /// zero or many
+    asterisk,
+    /// one or many
+    plus,
+};
 
 fn parseImpl(
     parse_ctx_impl: anytype,
