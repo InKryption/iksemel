@@ -58,6 +58,10 @@ pub fn ParseCtx(comptime Impl: type) type {
         inner: Impl,
         const Self = @This();
 
+        pub fn feedMarker(ctx: Self, marker: ParseMarker) !void {
+            return ctx.inner.feedMarker(marker);
+        }
+
         /// Called consecutively to construct the source.
         /// If the source represents text outside of markup tags,
         /// the segments of the whole string are not guaranteed
@@ -87,10 +91,6 @@ pub fn ParseCtx(comptime Impl: type) type {
                 ),
             }
             return ctx.inner.feedSrc(segment);
-        }
-
-        pub fn feedMarker(ctx: Self, marker: ParseMarker) !void {
-            return ctx.inner.feedMarker(marker);
         }
     };
 }

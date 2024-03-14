@@ -43,12 +43,20 @@ pub const ParseError = error{
     UnclosedDTDNotation,
 };
 
+pub const ParseResult = enum {
+    /// The prolog was terminated by `.eof`.
+    eof,
+    /// The prolog was terminated by `.angle_bracket_left`,
+    /// indicating the start of an element tag.
+    angle_bracket_left,
+};
+
 pub inline fn parseSlice(
     /// Must be a non-streaming tokenizer.
     tokenizer: *Tokenizer,
     /// Must satisfy the interface described by `ParseCtx`.
     parse_ctx_impl: anytype,
-) !Tokenizer.TokenType {
+) !ParseResult {
     return parseImpl(parse_ctx_impl, tokenizer, null, .{
         .reader = {},
         .read_buffer = {},
@@ -62,7 +70,7 @@ pub inline fn parseReader(
     read_buffer: []u8,
     /// Must satisfy the interface described by `ParseCtx`.
     parse_ctx_impl: anytype,
-) !Tokenizer.TokenType {
+) !ParseResult {
     var tokenizer = Tokenizer.initStreaming();
     return parseImpl(parse_ctx_impl, &tokenizer, @TypeOf(reader), .{
         .reader = reader,
@@ -74,6 +82,10 @@ pub fn ParseCtx(comptime Impl: type) type {
     return struct {
         inner: Impl,
         const Self = @This();
+
+        pub fn feedMarker(ctx: Self, marker: ParseMarker) !void {
+            return ctx.inner.feedMarker(marker);
+        }
 
         /// Called consecutively to construct the source.
         /// Segments of a whole string are guaranteed to be
@@ -98,10 +110,6 @@ pub fn ParseCtx(comptime Impl: type) type {
                 ),
             }
             return ctx.inner.feedSrc(segment);
-        }
-
-        pub fn feedMarker(ctx: Self, marker: ParseMarker) !void {
-            return ctx.inner.feedMarker(marker);
         }
     };
 }
@@ -329,13 +337,14 @@ fn parseImpl(
     tokenizer: *Tokenizer,
     comptime MaybeReader: ?type,
     mbr: parse_helper.MaybeBufferedReader(MaybeReader),
-) !Tokenizer.TokenType {
+) !ParseResult {
     const Impl = @TypeOf(parse_ctx_impl);
     const parse_ctx: ParseCtx(Impl) = .{ .inner = parse_ctx_impl };
 
     var dtd_already_parsed = false;
     while (true) switch (try parse_helper.nextTokenType(tokenizer, .non_markup, MaybeReader, mbr)) {
-        .eof, .angle_bracket_left => |tag| return tag,
+        .eof => return .eof,
+        .angle_bracket_left => return .angle_bracket_left,
 
         .pi_start => try handlePi(Impl, parse_ctx, tokenizer, MaybeReader, mbr),
 
@@ -1387,7 +1396,7 @@ fn TestCtx(comptime streaming: bool) type {
 }
 
 fn testParse(
-    expected_result: ParseError!Tokenizer.TokenType,
+    expected_result: ParseError!ParseResult,
     buffer_sizes: []const usize,
     src: []const u8,
     expected_outs: []const TestParseItem,
