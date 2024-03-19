@@ -27,11 +27,6 @@
 //! however the tokenizer is error-tolerant, and defines specially recognized
 //! invalid cases which should be treated as failures at some point, if not
 //! at the point of tokenization.
-
-const std = @import("std");
-const assert = std.debug.assert;
-const builtin = @import("builtin");
-
 const Tokenizer = @This();
 src: []const u8,
 index: usize,
@@ -133,7 +128,6 @@ pub const Context = enum {
     /// Possible token types are:
     /// * `.eof`
     /// * `.text_data`
-    /// * `.invalid_comment_start_single_dash`
     /// * `.invalid_comment_dash_dash`
     /// * `.invalid_comment_end_triple_dash`
     /// * `.comment_end`
@@ -195,6 +189,7 @@ pub const Context = enum {
     entity_value_quote_double,
 
     /// Possible token types are:
+    /// * `.hashtag`
     /// * `.tag_token`
     /// * `.invalid_reference_end`
     /// * `.semicolon`
@@ -245,21 +240,14 @@ pub fn nextSrcNoUnderrun(tokenizer: *Tokenizer, context: Context) Range {
 }
 
 pub const TokenType = enum(u8) {
-    /// A run of any non-markup characters. Its meaning is dependent on
-    /// the context in which it's being scanned.
-    ///
-    /// Whatever context it is in, it does not contain any data which
-    /// would result in a tokenization error or ambiguity.
-    ///
-    /// Outside of any markup, this is simply part of the data of the
-    /// parent element, or whitespace/unexpected character data before/after
-    /// the root element.
+    /// A run of any non-markup characters, including whitespace.
+    /// This will never be returned consecutively.
     text_data,
-    /// A run of one or more whitespace characters inside a markup tag.
+    /// A run of one or more whitespace characters inside markup.
+    /// This will never be returned consecutively.
     tag_whitespace,
     /// A run of one or more non-whitespace characters inside a markup tag.
-    /// The way in which it is delimited from other data and its meaning are
-    /// dependent on the context in which it's being scanned.
+    /// This will never be returned consecutively.
     tag_token,
 
     /// The end of the XML source.
@@ -396,6 +384,7 @@ pub const TokenType = enum(u8) {
 
             .pipe => "|",
             .comma => ",",
+            .hashtag => "#",
             .qmark => "?",
             .asterisk => "*",
             .plus => "+",
@@ -1304,8 +1293,11 @@ fn nextTypeOrSrcImpl(
                             tokenizer.state = .eof;
                             break .invalid_reference_end;
                         }
+                        if (src[tokenizer.index] == '#') {
+                            tokenizer.index += 1;
+                            break .hashtag;
+                        }
                         if (src[tokenizer.index] == ';') {
-                            tokenizer.state = .blank;
                             tokenizer.index += 1;
                             break .semicolon;
                         }
@@ -1973,3 +1965,7 @@ test "General Test" {
         },
     );
 }
+
+const std = @import("std");
+const assert = std.debug.assert;
+const builtin = @import("builtin");

@@ -1,13 +1,11 @@
-const std = @import("std");
-
 pub const Tokenizer = @import("Tokenizer.zig");
 
-pub const prolog = @import("prolog.zig");
-pub const doc_elem = @import("doc_elem.zig");
+pub const dtd = @import("dtd.zig");
+pub const elem = @import("elem.zig");
 
 comptime {
     _ = Tokenizer;
-    _ = prolog;
-    _ = doc_elem;
+    _ = dtd;
+    _ = elem;
     _ = @import("parse_helper.zig");
 }

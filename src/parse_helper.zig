@@ -207,17 +207,29 @@ pub const CommentSkipResult = enum {
     normal_end,
     invalid_end_triple_dash,
     invalid_dash_dash,
+    eof,
 };
 pub fn handleCommentSkip(
     tokenizer: *Tokenizer,
     comptime MaybeReader: ?type,
     mbr: MaybeBufferedReader(MaybeReader),
 ) (if (MaybeReader) |Reader| Reader.Error else error{})!CommentSkipResult {
-    return while (true) switch (try nextTokenType(tokenizer, .comment, MaybeReader, mbr)) {
-        .text_data => try skipTokenStr(tokenizer, .comment, MaybeReader, mbr),
-        .invalid_comment_dash_dash => break .invalid_dash_dash,
-        .invalid_comment_end_triple_dash => break .invalid_end_triple_dash,
-        .comment_end => break .normal_end,
+    return switch (try nextTokenType(tokenizer, .comment, MaybeReader, mbr)) {
+        .text_data => blk: {
+            try skipTokenStr(tokenizer, .comment, MaybeReader, mbr);
+            break :blk switch (try nextTokenType(tokenizer, .comment, MaybeReader, mbr)) {
+                .text_data => unreachable,
+                .invalid_comment_dash_dash => .invalid_dash_dash,
+                .invalid_comment_end_triple_dash => .invalid_end_triple_dash,
+                .comment_end => .normal_end,
+                .eof => .eof,
+                else => unreachable,
+            };
+        },
+        .invalid_comment_dash_dash => .invalid_dash_dash,
+        .invalid_comment_end_triple_dash => .invalid_end_triple_dash,
+        .comment_end => .normal_end,
+        .eof => .eof,
         else => unreachable,
     };
 }
