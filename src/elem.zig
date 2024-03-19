@@ -557,7 +557,6 @@ fn testScanner(
             const read_buffer = max_buffer[0..buffer_size];
             var fbs = std.io.fixedBufferStream(src);
             var tokenizer = Tokenizer.initStreaming();
-            assert(iksemel.prolog.parseReader(&tokenizer, fbs.reader(), read_buffer, iksemel.prolog.IgnoreCtx{}) catch unreachable == .angle_bracket_left);
 
             var scanner = readerScanner(&tokenizer, fbs.reader(), read_buffer);
             for (expected_items, 0..) |expected_item, i| {
@@ -578,7 +577,6 @@ fn testScanner(
     }
 
     var tokenizer = Tokenizer.initComplete(src);
-    assert(iksemel.prolog.parseSlice(&tokenizer, iksemel.prolog.IgnoreCtx{}) catch unreachable == .angle_bracket_left);
 
     var scanner = sliceScanner(&tokenizer);
     for (expected_items, 0..) |expected_item, i| {
@@ -603,7 +601,7 @@ test "1" {
             1,  2,  3,  4,  5,  6,  7,  8,  10,  12,  14,  16,  20,  24,
             28, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256,
         },
-        \\<foo>
+        \\foo>
         \\  <fizz buzz="fizzbuzz" e="&#x4123;"/>
         \\  &lt;not markup&gt;
         \\  <?custom stuff?>
