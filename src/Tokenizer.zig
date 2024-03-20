@@ -32,7 +32,6 @@ src: []const u8,
 index: usize,
 state: State,
 eof_specified: bool,
-
 debug: Debug,
 
 /// Initializes the `Tokenizer` with the full input.
@@ -189,6 +188,7 @@ pub const Context = enum {
     entity_value_quote_double,
 
     /// Possible token types are:
+    /// * `.eof`
     /// * `.hashtag`
     /// * `.tag_token`
     /// * `.invalid_reference_end`
@@ -280,9 +280,6 @@ pub const TokenType = enum(u8) {
     /// The '/' token.
     slash,
 
-    /// The '%' token.
-    percent,
-
     /// The "'" token.
     quote_single,
     /// The '"' token.
@@ -298,11 +295,13 @@ pub const TokenType = enum(u8) {
     /// The ']' token.
     square_bracket_right,
 
+    /// The '%' token.
+    percent,
     /// The '&' token.
     ampersand,
     /// The ';' token.
     semicolon,
-    /// Encountered a terminating character (or EOF) other than the ';' token after the ampersand.
+    /// Encountered a terminating character other than the ';' token after the ampersand.
     /// This token simply represents the absence of the ';' token.
     /// Ends the token sequence.
     invalid_reference_end,
@@ -443,7 +442,21 @@ pub const Range = struct {
     }
 };
 
-pub const Literal = enum {
+/// The set of codepoints defined as whitespace. They are all
+/// exactly one byte in size.
+pub const whitespace_set: []const u8 = &[_]u8{
+    '\u{20}',
+    '\u{09}',
+    '\u{0D}',
+    '\u{0A}',
+};
+
+const TokenSrc = union(enum) {
+    range: Range,
+    literal: Literal,
+};
+
+const Literal = enum {
     @"]",
     @"]]",
     @"/",
@@ -485,20 +498,6 @@ pub const Literal = enum {
     inline fn toStr(literal_tok: Literal) []const u8 {
         return @tagName(literal_tok);
     }
-};
-
-const TokenSrc = union(enum) {
-    range: Range,
-    literal: Literal,
-};
-
-/// The set of codepoints defined as whitespace. They are all
-/// exactly one byte in size.
-pub const whitespace_set: []const u8 = &[_]u8{
-    '\u{20}',
-    '\u{09}',
-    '\u{0D}',
-    '\u{0A}',
 };
 
 fn nextTypeOrSrcImpl(
@@ -1287,11 +1286,12 @@ fn nextTypeOrSrcImpl(
         .reference => {
             const terminal_chars = whitespace_set ++ next_helper.dtd_terminal_characters ++ &[_]u8{'&'};
             switch (tokenizer.state) {
+                .eof => break eof_result,
                 .blank => switch (ret_kind) {
                     .type => {
                         if (tokenizer.index == src.len) {
                             tokenizer.state = .eof;
-                            break .invalid_reference_end;
+                            break .eof;
                         }
                         if (src[tokenizer.index] == '#') {
                             tokenizer.index += 1;
@@ -1710,7 +1710,7 @@ test "References" {
     try testTokenizer(.{}, " ", &.{ .{ .reference, .invalid_reference_end, null }, .{ .non_markup, .text_data, " " } });
     try testTokenizer(.{}, " ", &.{ .{ .reference, .invalid_reference_end, null }, .{ .attribute_value_quote_single, .text_data, " " } });
     try testTokenizer(.{}, " ", &.{ .{ .reference, .invalid_reference_end, null }, .{ .dtd, .tag_whitespace, " " } });
-    try testTokenizer(.{}, "lt", &.{ .{ .reference, .tag_token, "lt" }, .{ .reference, .invalid_reference_end, null }, .{ .dtd, .eof, null } });
+    try testTokenizer(.{}, "lt", &.{ .{ .reference, .tag_token, "lt" }, .{ .reference, .eof, null } });
     try testTokenizer(.{}, "lt;", &.{ .{ .reference, .tag_token, "lt" }, .{ .reference, .semicolon, null }, .{ .dtd, .eof, null } });
     // TODO: more exhaustive testing of invariants
 }
