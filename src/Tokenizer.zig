@@ -1252,15 +1252,15 @@ fn nextTypeOrSrcImpl(
                     switch (tag) {
                         .attribute_value_quote_single,
                         .attribute_value_quote_double,
-                        => if (src[tokenizer.index] == '%') {
-                            tokenizer.index += 1;
-                            break .percent;
-                        },
-                        .entity_value_quote_single,
-                        .entity_value_quote_double,
                         => if (src[tokenizer.index] == '<') {
                             tokenizer.index += 1;
                             break .angle_bracket_left;
+                        },
+                        .entity_value_quote_single,
+                        .entity_value_quote_double,
+                        => if (src[tokenizer.index] == '%') {
+                            tokenizer.index += 1;
+                            break .percent;
                         },
                         else => unreachable,
                     }
@@ -1274,7 +1274,7 @@ fn nextTypeOrSrcImpl(
                         else => unreachable,
                     };
                     const str_start = tokenizer.index;
-                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, &[_]u8{ matching_quote_char, '&', '<' }) orelse src.len;
+                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, &[_]u8{ matching_quote_char, '&', '%', '<' }) orelse src.len;
                     tokenizer.index = str_end;
                     if (str_start == str_end) break null;
                     break next_helper.rangeInit(str_start, str_end);
