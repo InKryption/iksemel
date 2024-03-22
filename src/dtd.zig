@@ -1,5 +1,5 @@
-pub const int_subset = @import("dtd/internal_subset.zig");
+pub const InternalSubsetScanner = @import("dtd/InternalSubsetScanner.zig");
 
 comptime {
-    _ = int_subset;
+    _ = InternalSubsetScanner;
 }

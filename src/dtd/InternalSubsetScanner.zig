@@ -1,66 +1,70 @@
-//! Provides the means to scan through the Internal Subset of a DTD Declaration,
-//! starting after the '[' token, and ending with the ']' token.
-//! This isn't made to scan the contents of a DTD file.
+//! Scanner which provides the means to scan through the Internal Subset
+//! of a DTD Declaration, starting after the '[' token, and ending with
+//! the ']' token.
+//! Is default initialised, with behaviour based upon the utilized `Tokenizer`,
+/// and stream source.
 
-/// Expects that the last value returned by `tokenizer.nextType(.dtd)`
-/// to have been `.square_bracket_left`.
-pub inline fn sliceScanner(tokenizer: *Tokenizer) Scanner(null) {
-    return .{
-        .tokenizer = tokenizer,
-        .mbr = .{
-            .reader = {},
-            .read_buffer = {},
-        },
-    };
+const Scanner = @This();
+state: State = .blank,
+
+pub fn nextMarkerFull(
+    scanner: *Scanner,
+    /// Full source tokenizer.
+    tokenizer: *Tokenizer,
+) ScanError!ScanMarker {
+    return nextMarkerOrSrcImpl(
+        scanner,
+        tokenizer,
+        null,
+        .{ .reader = {}, .read_buffer = {} },
+        .marker,
+    );
 }
 
-/// Expects that the last value returned by `tokenizer.nextType(.dtd)`
-/// to have been `.square_bracket_left`. `reader` and `read_buf` will be used
-/// as the source to feed the tokenizer.
-pub inline fn readerScanner(
+pub fn nextSrcFull(
+    scanner: *Scanner,
+    /// Full source tokenizer.
+    tokenizer: *Tokenizer,
+) ScanError!?Tokenizer.Range {
+    return nextMarkerOrSrcImpl(
+        scanner,
+        tokenizer,
+        null,
+        .{ .reader = {}, .read_buffer = {} },
+        .src,
+    );
+}
+
+pub fn nextMarkerStream(
+    scanner: *Scanner,
+    /// Streaming source tokenizer.
     tokenizer: *Tokenizer,
     reader: anytype,
-    read_buf: []u8,
-) Scanner(@TypeOf(reader)) {
-    return .{
-        .tokenizer = tokenizer,
-        .mbr = .{
-            .reader = reader,
-            .read_buffer = read_buf,
-        },
-    };
+    read_buffer: []u8,
+) (@TypeOf(reader).Error || ScanError)!ScanMarker {
+    return nextMarkerOrSrcImpl(
+        scanner,
+        tokenizer,
+        @TypeOf(reader),
+        .{ .reader = reader, .read_buffer = read_buffer },
+        .marker,
+    );
 }
 
-pub fn Scanner(comptime MaybeReader: ?type) type {
-    return struct {
-        tokenizer: *Tokenizer,
-        mbr: parse_helper.MaybeBufferedReader(MaybeReader),
-        state: State = .blank,
-        const Self = @This();
-
-        pub const Src = if (MaybeReader != null)
-            []const u8
-        else
-            Tokenizer.Range;
-
-        pub inline fn nextMarker(scanner: *Self) !ScanMarker {
-            return nextMarkerOrSrcImpl(MaybeReader, scanner, .marker);
-        }
-
-        /// Returns segments of a string, either as a slice or a range,
-        /// based upon whether this is backed by a streaming or
-        /// non-streaming Tokenizer. A full string is terminated by
-        /// a null sentinel value.
-        ///
-        /// All segments are guaranteed to be consecutive in the source.
-        ///
-        /// An empty string is comprised of at least one non-null segment
-        /// representing an empty range/slice, followed by the null sentinel;
-        /// an absent string is simply a standalone null sentinel.
-        pub fn nextSrc(scanner: *Self) !?Src {
-            return nextMarkerOrSrcImpl(MaybeReader, scanner, .src);
-        }
-    };
+pub fn nextSrcStream(
+    scanner: *Scanner,
+    /// Streaming source tokenizer.
+    tokenizer: *Tokenizer,
+    reader: anytype,
+    read_buffer: []u8,
+) (@TypeOf(reader).Error || ScanError)!?[]const u8 {
+    return nextMarkerOrSrcImpl(
+        scanner,
+        tokenizer,
+        @TypeOf(reader),
+        .{ .reader = reader, .read_buffer = read_buffer },
+        .src,
+    );
 }
 
 pub const ScanError = error{
@@ -310,15 +314,15 @@ const State = union(enum) {
 };
 
 fn nextMarkerOrSrcImpl(
+    scanner: *Scanner,
+    tokenizer: *Tokenizer,
     comptime MaybeReader: ?type,
-    scanner: *Scanner(MaybeReader),
+    mbr: parse_helper.MaybeBufferedReader(MaybeReader),
     comptime ret_type: enum { marker, src },
 ) !switch (ret_type) {
     .marker => ScanMarker,
-    .src => ?Scanner(MaybeReader).Src,
+    .src => ?if (MaybeReader != null) []const u8 else Tokenizer.Range,
 } {
-    const tokenizer: *Tokenizer = scanner.tokenizer;
-    const mbr = scanner.mbr;
     return while (true) break switch (scanner.state) {
         .end => switch (ret_type) {
             .marker => break .end,
@@ -987,15 +991,16 @@ fn testScanner(
                 .read_buffer = read_buffer,
             }) catch unreachable == .square_bracket_left);
 
-            var scanner = readerScanner(&tokenizer, fbs.reader(), read_buffer);
+            // var scanner = readerScanner(&tokenizer, fbs.reader(), read_buffer);
+            var scanner: Scanner = .{};
             for (expected_items, 0..) |expected_item, i| {
                 errdefer std.log.err("Error occurred on item {d}", .{i});
                 switch (expected_item) {
-                    .marker => |marker| try std.testing.expectEqual(marker, scanner.nextMarker()),
+                    .marker => |marker| try std.testing.expectEqual(marker, scanner.nextMarkerStream(&tokenizer, fbs.reader(), read_buffer)),
                     .str => |expected_str| {
                         const actual_str: ?[]const u8 = blk: {
-                            try str_buffer.appendSlice((try scanner.nextSrc()) orelse break :blk null);
-                            while (try scanner.nextSrc()) |segment| {
+                            try str_buffer.appendSlice((try scanner.nextSrcStream(&tokenizer, fbs.reader(), read_buffer)) orelse break :blk null);
+                            while (try scanner.nextSrcStream(&tokenizer, fbs.reader(), read_buffer)) |segment| {
                                 try str_buffer.appendSlice(segment);
                             }
                             break :blk str_buffer.items;
@@ -1015,22 +1020,22 @@ fn testScanner(
                     },
                 }
             }
-            try std.testing.expectEqual(.end, scanner.nextMarker());
+            try std.testing.expectEqual(.end, scanner.nextMarkerStream(&tokenizer, fbs.reader(), read_buffer));
         }
     }
 
     var tokenizer = Tokenizer.initComplete(src);
     assert(tokenizer.nextTypeNoUnderrun(.dtd) == .square_bracket_left);
 
-    var scanner = sliceScanner(&tokenizer);
+    var scanner: Scanner = .{};
     for (expected_items, 0..) |expected_item, i| {
         errdefer std.log.err("Error occurred on item {d}", .{i});
         switch (expected_item) {
-            .marker => |marker| try std.testing.expectEqual(marker, scanner.nextMarker()),
+            .marker => |marker| try std.testing.expectEqual(marker, scanner.nextMarkerFull(&tokenizer)),
             .str => |expected_str| {
                 const actual_str: ?[]const u8 = blk: {
-                    try str_buffer.appendSlice(((try scanner.nextSrc()) orelse break :blk null).toStr(tokenizer.src));
-                    while (try scanner.nextSrc()) |segment| {
+                    try str_buffer.appendSlice(((try scanner.nextSrcFull(&tokenizer)) orelse break :blk null).toStr(tokenizer.src));
+                    while (try scanner.nextSrcFull(&tokenizer)) |segment| {
                         try str_buffer.appendSlice(segment.toStr(tokenizer.src));
                     }
                     break :blk str_buffer.items;
@@ -1050,7 +1055,7 @@ fn testScanner(
             },
         }
     }
-    try std.testing.expectEqual(.end, scanner.nextMarker());
+    try std.testing.expectEqual(.end, scanner.nextMarkerFull(&tokenizer));
 }
 
 test "ENTITY" {
