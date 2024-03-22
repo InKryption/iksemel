@@ -451,6 +451,82 @@ pub const whitespace_set: []const u8 = &[_]u8{
     '\u{0A}',
 };
 
+pub const QuoteType = enum {
+    single,
+    double,
+
+    pub const Char = std.math.IntFittingRange(
+        @min('\'', '\"'),
+        @max('\'', '\"'),
+    );
+    pub inline fn toChar(qt: QuoteType) Char {
+        return switch (qt) {
+            .single => '\'',
+            .double => '\"',
+        };
+    }
+    pub inline fn fromChar(char: Char) ?QuoteType {
+        return switch (char) {
+            '\'' => .single,
+            '\"' => .double,
+            else => null,
+        };
+    }
+
+    pub inline fn toTokenType(qt: QuoteType) Tokenizer.TokenType {
+        return switch (qt) {
+            .single => .quote_single,
+            .double => .quote_double,
+        };
+    }
+    pub inline fn fromTokenType(tt: Tokenizer.TokenType) ?QuoteType {
+        return switch (tt) {
+            .quote_single => .single,
+            .quote_double => .double,
+            else => null,
+        };
+    }
+
+    /// Returns `.system_literal_quote_<qt>`.
+    pub inline fn systemLiteralCtx(qt: QuoteType) Tokenizer.Context {
+        return switch (qt) {
+            .single => .system_literal_quote_single,
+            .double => .system_literal_quote_double,
+        };
+    }
+
+    /// Returns `.attribute_value_quote_<qt>`.
+    pub inline fn attributeValueCtx(qt: QuoteType) Tokenizer.Context {
+        return switch (qt) {
+            .single => .attribute_value_quote_single,
+            .double => .attribute_value_quote_double,
+        };
+    }
+
+    /// Returns `.entity_value_quote_<qt>`.
+    pub inline fn entityValueCtx(qt: QuoteType) Tokenizer.Context {
+        return switch (qt) {
+            .single => .entity_value_quote_single,
+            .double => .entity_value_quote_double,
+        };
+    }
+
+    pub inline fn fromCtx(ctx: Tokenizer.Context) ?QuoteType {
+        return switch (ctx) {
+            .system_literal_quote_single => .single,
+            .system_literal_quote_double => .double,
+
+            .attribute_value_quote_single => .single,
+            .attribute_value_quote_double => .double,
+
+            .entity_value_quote_single => .single,
+            .entity_value_quote_double => .double,
+
+            else => null,
+        };
+    }
+};
+
 const TokenSrc = union(enum) {
     range: Range,
     literal: Literal,
