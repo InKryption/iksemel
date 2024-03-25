@@ -368,12 +368,7 @@ const State = union(enum) {
 
         const Data = union {
             none: void,
-            depth_and_prev: DepthAndPrev,
-
-            const DepthAndPrev = struct {
-                depth: u32,
-                prev: Prev,
-            };
+            prev: Prev,
 
             const Prev = enum { name, lparen, rparen, quant, sep };
         };
@@ -1223,19 +1218,19 @@ fn handleElement(
         },
         .children_lparen_name => {
             if (ret_type != .marker) unreachable;
-            element.data = .{ .depth_and_prev = .{ .depth = 1, .prev = .lparen } };
+            element.data = .{ .prev = .lparen };
             element.state = .children_name;
             break .{ .children_tok = .lparen };
         },
         .children_lparen => {
             if (ret_type != .marker) unreachable;
-            element.data = .{ .depth_and_prev = .{ .depth = 2, .prev = .lparen } };
+            element.data = .{ .prev = .lparen };
             element.state = .children;
             break .{ .children_tok = .lparen };
         },
 
         .children => {
-            const depth_and_prev = &element.data.depth_and_prev;
+            const prev = &element.data.prev;
             switch (ret_type) {
                 .marker => {
                     const children_tok: ScanMarker.ChildrenToken = switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
@@ -1244,7 +1239,10 @@ fn handleElement(
                         .tag_whitespace => unreachable,
 
                         .angle_bracket_right => {
-                            if (depth_and_prev.depth != 0) return ScanError.UnexpectedToken;
+                            switch (prev.*) {
+                                else => return ScanError.UnexpectedToken,
+                                .rparen, .quant => {},
+                            }
                             scanner.state = .blank;
                             break .{ .children_tok = null };
                         },
@@ -1269,12 +1267,11 @@ fn handleElement(
                         const Kind = State.Element.Data.Prev;
                         const Bits = packed struct { prev: Kind, curr: Kind };
                         const BitsInt = std.meta.Int(.unsigned, @bitSizeOf(Bits));
-                        inline fn transition(prev: Kind, curr: Kind) BitsInt {
-                            return @bitCast(Bits{ .prev = prev, .curr = curr });
+                        inline fn transition(prv: Kind, curr: Kind) BitsInt {
+                            return @bitCast(Bits{ .prev = prv, .curr = curr });
                         }
                     }.transition;
 
-                    const prev = depth_and_prev.prev;
                     const curr: State.Element.Data.Prev = switch (children_tok) {
                         .name => .name,
                         .lparen => .lparen,
@@ -1282,24 +1279,15 @@ fn handleElement(
                         .qmark, .asterisk, .plus => .quant,
                         .comma, .pipe => .sep,
                     };
-                    depth_and_prev.prev = curr;
 
-                    if (depth_and_prev.depth == 0 and
-                        prev == .quant //
-                    ) return ScanError.UnexpectedToken;
-                    if (depth_and_prev.depth == 0) assert(prev == .rparen);
-
-                    switch (transition(prev, curr)) {
+                    switch (transition(prev.*, curr)) {
                         transition(.name, .name),
                         transition(.rparen, .name),
                         transition(.quant, .name),
                         => return ScanError.UnexpectedToken,
                         transition(.lparen, .name),
                         transition(.sep, .name),
-                        => {
-                            assert(depth_and_prev.depth != 0);
-                            element.state = .children_name;
-                        },
+                        => element.state = .children_name,
 
                         transition(.name, .lparen),
                         transition(.rparen, .lparen),
@@ -1307,43 +1295,36 @@ fn handleElement(
                         => return ScanError.UnexpectedToken,
                         transition(.lparen, .lparen),
                         transition(.sep, .lparen),
-                        => {
-                            assert(depth_and_prev.depth != 0);
-                            depth_and_prev.depth += 1;
-                        },
+                        => {},
 
                         transition(.lparen, .rparen),
                         transition(.sep, .rparen),
                         => return ScanError.UnexpectedToken,
                         transition(.rparen, .rparen),
-                        => if (depth_and_prev.depth == 0) return ScanError.UnexpectedToken,
+                        => {},
                         transition(.name, .rparen),
                         transition(.quant, .rparen),
-                        => {
-                            assert(depth_and_prev.depth != 0);
-                            depth_and_prev.depth -= 1;
-                        },
+                        => {},
 
                         transition(.lparen, .quant),
                         transition(.quant, .quant),
                         transition(.sep, .quant),
                         => return ScanError.UnexpectedToken,
                         transition(.name, .quant),
-                        => assert(depth_and_prev.depth != 0),
                         transition(.rparen, .quant),
                         => {},
 
                         transition(.lparen, .sep),
                         transition(.sep, .sep),
                         => return ScanError.UnexpectedToken,
-                        transition(.rparen, .sep),
-                        => if (depth_and_prev.depth == 0) return ScanError.UnexpectedToken,
                         transition(.name, .sep),
+                        transition(.rparen, .sep),
                         transition(.quant, .sep),
-                        => assert(depth_and_prev.depth != 0),
+                        => {},
 
                         else => unreachable,
                     }
+                    prev.* = curr;
 
                     break .{ .children_tok = children_tok };
                 },
@@ -1351,17 +1332,17 @@ fn handleElement(
             }
         },
         .children_name => {
-            const depth_and_prev = &element.data.depth_and_prev;
+            const prev = &element.data.prev;
             switch (ret_type) {
                 .marker => break .{ .children_tok = .name },
                 .src => {
                     if (MaybeReader != null) {
                         if (try parse_helper.nextTokenSegment(tokenizer, .dtd, mbr.reader, mbr.read_buffer)) |segment| break segment;
-                        depth_and_prev.prev = .name;
+                        prev.* = .name;
                         element.state = .children;
                         continue;
                     } else {
-                        depth_and_prev.prev = .name;
+                        prev.* = .name;
                         element.state = .children;
                         break tokenizer.full.nextSrc(.dtd);
                     }
@@ -2427,6 +2408,10 @@ test "ELEMENT" {
         \\  <!ELEMENT i (front, body, back?)+>
         \\  <!ELEMENT j (head, (p | list | note)*, div2*)>
         \\  <!ELEMENT k (div_mix | dict_mix)*>
+        \\
+        \\  <!-- ELEMENT invalid children -->
+        \\  <!ELEMENT l (a))>
+        \\  <!ELEMENT m ((a)*>
         \\]
     ,
         &[_]ScannerTestItem{
@@ -2524,6 +2509,27 @@ test "ELEMENT" {
             .{ .marker = .{ .children_tok = .pipe } },
             .{ .marker = .{ .children_tok = .name } },
             .{ .str = "dict_mix" },
+            .{ .marker = .{ .children_tok = .rparen } },
+            .{ .marker = .{ .children_tok = .asterisk } },
+            .{ .marker = .{ .children_tok = null } },
+
+            .{ .marker = .element_decl },
+            .{ .str = "l" },
+            .{ .marker = .{ .content_spec = .children } },
+            .{ .marker = .{ .children_tok = .lparen } },
+            .{ .marker = .{ .children_tok = .name } },
+            .{ .str = "a" },
+            .{ .marker = .{ .children_tok = .rparen } },
+            .{ .marker = .{ .children_tok = .rparen } },
+            .{ .marker = .{ .children_tok = null } },
+
+            .{ .marker = .element_decl },
+            .{ .str = "m" },
+            .{ .marker = .{ .content_spec = .children } },
+            .{ .marker = .{ .children_tok = .lparen } },
+            .{ .marker = .{ .children_tok = .lparen } },
+            .{ .marker = .{ .children_tok = .name } },
+            .{ .str = "a" },
             .{ .marker = .{ .children_tok = .rparen } },
             .{ .marker = .{ .children_tok = .asterisk } },
             .{ .marker = .{ .children_tok = null } },
