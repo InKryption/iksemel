@@ -21,16 +21,16 @@ pub fn nextTokenType(
     const read_buffer = mbr.read_buffer;
 
     if (MaybeReader == null) {
-        return tokenizer.nextTypeNoUnderrun(context);
+        return tokenizer.full.nextType(context);
     }
-    return tokenizer.nextTypeStream(context) catch while (true) {
+    return tokenizer.stream.nextType(context) catch while (true) {
         const bytes_read = try reader.read(read_buffer);
         if (bytes_read != 0) {
-            tokenizer.feedInput(read_buffer[0..bytes_read]);
+            tokenizer.stream.feedInput(read_buffer[0..bytes_read]);
         } else {
-            tokenizer.feedEof();
+            tokenizer.stream.feedEof();
         }
-        break tokenizer.nextTypeStream(context) catch continue;
+        break tokenizer.stream.nextType(context) catch continue;
     };
 }
 
@@ -40,14 +40,14 @@ pub fn nextTokenSegment(
     reader: anytype,
     read_buffer: []u8,
 ) !?[]const u8 {
-    return tokenizer.nextSrcStream(context) catch while (true) {
+    return tokenizer.stream.nextSrc(context) catch while (true) {
         const bytes_read = try reader.read(read_buffer);
         if (bytes_read != 0) {
-            tokenizer.feedInput(read_buffer[0..bytes_read]);
+            tokenizer.stream.feedInput(read_buffer[0..bytes_read]);
         } else {
-            tokenizer.feedEof();
+            tokenizer.stream.feedEof();
         }
-        break tokenizer.nextSrcStream(context) catch continue;
+        break tokenizer.stream.nextSrc(context) catch continue;
     };
 }
 
@@ -80,7 +80,7 @@ pub fn nextTokenSrcAsEnum(
             };
         }
     } else {
-        const range = tokenizer.nextSrcNoUnderrun(context);
+        const range = tokenizer.full.nextSrc(context);
         str.appendSlice(range.toStr(tokenizer.src)) catch return null;
     }
 
@@ -105,7 +105,7 @@ pub fn TokenSrcIter(comptime MaybeReader: ?type) type {
                 return nextTokenSegment(tokenizer, context, mbr.reader, mbr.read_buffer);
             } else {
                 defer iter.iterated_once = true;
-                return if (iter.iterated_once) null else tokenizer.nextSrcNoUnderrun(context);
+                return if (iter.iterated_once) null else tokenizer.full.nextSrc(context);
             }
         }
     };
@@ -126,7 +126,7 @@ pub fn skipWhitespaceTokenSrc(
             // don't break, we need to consume the whole token source
         }
     } else {
-        const range = tokenizer.nextSrcNoUnderrun(context);
+        const range = tokenizer.full.nextSrc(context);
         any_non_whitespace = std.mem.indexOfNone(u8, range.toStr(tokenizer.src), Tokenizer.whitespace_set) != null;
     }
     return if (any_non_whitespace) .non_whitespace else .all_whitespace;
@@ -197,7 +197,7 @@ pub fn skipTokenStr(
     mbr: MaybeBufferedReader(MaybeReader),
 ) (if (MaybeReader) |Reader| Reader.Error else error{})!void {
     if (MaybeReader == null) {
-        _ = tokenizer.nextSrcNoUnderrun(context);
+        _ = tokenizer.full.nextSrc(context);
         return;
     }
     while (try nextTokenSegment(tokenizer, context, mbr.reader, mbr.read_buffer)) |_| {}

@@ -163,8 +163,9 @@ pub const ScanMarker = union(enum) {
     attlist_end,
 
     /// First `nextSrc` will return the declared notation's name.
+    /// Then `nextMarker` will return `.notation_def`.
     notation_decl,
-    notation_end,
+    notation_def: ExternalOrPublicId,
 
     pub const EntityKind = enum {
         /// '<!ENTITY Name'
@@ -176,6 +177,16 @@ pub const ScanMarker = union(enum) {
         /// `'PUBLIC' S PubidLiteral S SystemLiteral`
         /// First `nextSrc` will return the pubid literal.
         /// Second, `nextSrc` will return the system literal.
+        public,
+        /// `'SYSTEM' S SystemLiteral`
+        /// `nextSrc` will return the system literal.
+        system,
+    };
+    pub const ExternalOrPublicId = enum {
+        /// `('PUBLIC' S PubidLiteral S SystemLiteral) | ('PUBLIC' S PubidLiteral)`
+        /// First `nextSrc` will return the pubid literal.
+        /// Second, `nextSrc` will return the system literal, or null to indicate its absence. In the
+        /// former case, it is an External ID marked public, and in the latter case, it is a Public ID.
         public,
         /// `'SYSTEM' S SystemLiteral`
         /// `nextSrc` will return the system literal.
@@ -403,10 +414,24 @@ const State = union(enum) {
     const Notation = struct {
         data: union {
             none: void,
+            literal: QuoteType,
         },
         state: enum {
             name_start,
             name_end,
+
+            detect_id,
+
+            pub_literal_empty_start,
+            pub_literal_empty_end,
+            pub_literal_start,
+            pub_literal_end,
+            pub_literal_no_sys,
+
+            sys_literal_empty_start,
+            sys_literal_empty_end,
+            sys_literal_start,
+            sys_literal_end,
         },
     };
 };
@@ -552,7 +577,7 @@ fn nextMarkerOrSrcImpl(
                     continue;
                 } else {
                     state.* = .done;
-                    break tokenizer.nextSrcNoUnderrun(.pi);
+                    break tokenizer.full.nextSrc(.pi);
                 }
             },
             .done => {
@@ -576,7 +601,7 @@ fn nextMarkerOrSrcImpl(
                     continue;
                 } else {
                     state.* = .end;
-                    break tokenizer.nextSrcNoUnderrun(.reference);
+                    break tokenizer.full.nextSrc(.reference);
                 }
             },
             .end => {
@@ -619,7 +644,7 @@ fn handleEntity(
                 continue;
             } else {
                 entity.state = .name_end;
-                break tokenizer.nextSrcNoUnderrun(.dtd);
+                break tokenizer.full.nextSrc(.dtd);
             }
         },
         .name_end => {
@@ -770,7 +795,7 @@ fn handleEntity(
                 continue;
             } else {
                 entity.state = .def_value_text_end;
-                break tokenizer.nextSrcNoUnderrun(str_ctx);
+                break tokenizer.full.nextSrc(str_ctx);
             }
         },
         .def_value_text_end => {
@@ -791,7 +816,7 @@ fn handleEntity(
                 continue;
             } else {
                 entity.state = .def_value_ref_end;
-                break tokenizer.nextSrcNoUnderrun(.reference);
+                break tokenizer.full.nextSrc(.reference);
             }
         },
         .def_value_ref_end => {
@@ -845,7 +870,7 @@ fn handleEntity(
                 entity.state = .def_extid_pub_literal_end;
                 continue;
             } else {
-                const range = tokenizer.nextSrcNoUnderrun(quote_type.systemLiteralCtx());
+                const range = tokenizer.full.nextSrc(quote_type.systemLiteralCtx());
                 if (!validPubidLiteralSegment(range.toStr(tokenizer.src), quote_type)) return ScanError.InvalidPubidLiteral;
                 entity.state = .def_extid_pub_literal_end;
                 break range;
@@ -893,7 +918,7 @@ fn handleEntity(
                 continue;
             } else {
                 entity.state = .def_extid_sys_literal_end;
-                break tokenizer.nextSrcNoUnderrun(quote_type.systemLiteralCtx());
+                break tokenizer.full.nextSrc(quote_type.systemLiteralCtx());
             }
         },
         .def_extid_sys_literal_end => switch (ret_type) {
@@ -971,7 +996,7 @@ fn handleEntity(
                 continue;
             } else {
                 entity.state = .def_ndata_decl_end;
-                break tokenizer.nextSrcNoUnderrun(.dtd);
+                break tokenizer.full.nextSrc(.dtd);
             }
         },
         .def_ndata_decl_end => {
@@ -1011,7 +1036,7 @@ fn handleElement(
                 continue;
             } else {
                 element.state = .name_end;
-                break tokenizer.nextSrcNoUnderrun(.dtd);
+                break tokenizer.full.nextSrc(.dtd);
             }
         },
         .name_end => {
@@ -1146,7 +1171,7 @@ fn handleElement(
                 continue;
             } else {
                 element.state = .mixed_name_end;
-                break tokenizer.nextSrcNoUnderrun(.dtd);
+                break tokenizer.full.nextSrc(.dtd);
             }
         },
         .mixed_name_end => {
@@ -1338,7 +1363,7 @@ fn handleElement(
                     } else {
                         depth_and_prev.prev = .name;
                         element.state = .children;
-                        break tokenizer.nextSrcNoUnderrun(.dtd);
+                        break tokenizer.full.nextSrc(.dtd);
                     }
                 },
             }
@@ -1364,7 +1389,7 @@ fn handleAttlist(
                 continue;
             } else {
                 attlist.state = .name_end;
-                break tokenizer.nextSrcNoUnderrun(.dtd);
+                break tokenizer.full.nextSrc(.dtd);
             }
         },
         .name_end => {
@@ -1415,7 +1440,7 @@ fn handleAttlist(
                 continue;
             } else {
                 attlist.state = .att_def_name_end;
-                break tokenizer.nextSrcNoUnderrun(.dtd);
+                break tokenizer.full.nextSrc(.dtd);
             }
         },
         .att_def_name_end => {
@@ -1504,7 +1529,7 @@ fn handleAttlist(
                 continue;
             } else {
                 attlist.state = .att_def_type_enumerated_name_end;
-                break tokenizer.nextSrcNoUnderrun(.dtd);
+                break tokenizer.full.nextSrc(.dtd);
             }
         },
         .att_def_type_enumerated_name_end => {
@@ -1648,7 +1673,7 @@ fn handleAttlist(
                         continue;
                     } else {
                         attlist.state = .default_decl_value_ref_end;
-                        break tokenizer.nextSrcNoUnderrun(.reference);
+                        break tokenizer.full.nextSrc(.reference);
                     }
                 },
             }
@@ -1678,7 +1703,7 @@ fn handleAttlist(
                         continue;
                     } else {
                         attlist.state = .default_decl_value_start;
-                        break tokenizer.nextSrcNoUnderrun(quote_type.attributeValueCtx());
+                        break tokenizer.full.nextSrc(quote_type.attributeValueCtx());
                     }
                 },
             }
@@ -1803,7 +1828,7 @@ fn testScanner(
         for (buffer_sizes) |buffer_size| {
             const read_buffer = max_buffer[0..buffer_size];
             var fbs = std.io.fixedBufferStream(src);
-            var tokenizer = Tokenizer.initStreaming();
+            var tokenizer = Tokenizer.initStream();
             assert(parse_helper.nextTokenType(&tokenizer, .dtd, @TypeOf(fbs.reader()), .{
                 .reader = fbs.reader(),
                 .read_buffer = read_buffer,
@@ -1840,8 +1865,8 @@ fn testScanner(
         }
     }
 
-    var tokenizer = Tokenizer.initComplete(src);
-    assert(tokenizer.nextTypeNoUnderrun(.dtd) == .square_bracket_left);
+    var tokenizer = Tokenizer.initFull(src);
+    assert(tokenizer.full.nextType(.dtd) == .square_bracket_left);
 
     var scanner: Scanner = .{};
     for (expected_items, 0..) |expected_item, i| {
@@ -2513,6 +2538,100 @@ test "ATTLIST" {
             .{ .marker = .attlist_end },
         },
     );
+}
+
+test "NOTATION" {
+    if (true) return error.SkipZigTest;
+    const buf_sizes = [_]usize{
+        1,  2,  3,  4,  5,  6,  7,  8,  10,  12,  14,  16,  20,  24,
+        28, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256,
+    };
+    for ([_][]const u8{
+        "[ <!NOTATION foo SYSTEM \'\'> ]",
+        "[ <!NOTATION foo SYSTEM \"\"> ]",
+    }) |src| try testScanner(&buf_sizes, src, &[_]ScannerTestItem{
+        .{ .marker = .notation_decl },
+        .{ .str = "foo" },
+        .{ .marker = .{ .notation_def = .system } },
+        .{ .str = "" },
+    });
+    for ([_][]const u8{
+        "[ <!NOTATION foo SYSTEM \'bar\'> ]",
+        "[ <!NOTATION foo SYSTEM \"bar\"> ]",
+    }) |src| try testScanner(&buf_sizes, src, &[_]ScannerTestItem{
+        .{ .marker = .notation_decl },
+        .{ .str = "foo" },
+        .{ .marker = .{ .notation_def = .system } },
+        .{ .str = "bar" },
+    });
+    for ([_][]const u8{
+        "[ <!NOTATION foo PUBLIC \'\'> ]",
+        "[ <!NOTATION foo PUBLIC \"\"> ]",
+    }) |src| try testScanner(&buf_sizes, src, &[_]ScannerTestItem{
+        .{ .marker = .notation_decl },
+        .{ .str = "foo" },
+        .{ .marker = .{ .notation_def = .public } },
+        .{ .str = "" },
+        .{ .str = null },
+    });
+    for ([_][]const u8{
+        "[ <!NOTATION foo PUBLIC \'bar\'> ]",
+        "[ <!NOTATION foo PUBLIC \"bar\"> ]",
+    }) |src| try testScanner(&buf_sizes, src, &[_]ScannerTestItem{
+        .{ .marker = .notation_decl },
+        .{ .str = "foo" },
+        .{ .marker = .{ .notation_def = .public } },
+        .{ .str = "bar" },
+        .{ .str = null },
+    });
+    for ([_][]const u8{
+        "[ <!NOTATION foo PUBLIC \'\' \'\'> ]",
+        "[ <!NOTATION foo PUBLIC \"\" \"\"> ]",
+        "[ <!NOTATION foo PUBLIC \'\' \"\"> ]",
+        "[ <!NOTATION foo PUBLIC \"\" \'\'> ]",
+    }) |src| try testScanner(&buf_sizes, src, &[_]ScannerTestItem{
+        .{ .marker = .notation_decl },
+        .{ .str = "foo" },
+        .{ .marker = .{ .notation_def = .public } },
+        .{ .str = "" },
+        .{ .str = "" },
+    });
+    for ([_][]const u8{
+        "[ <!NOTATION foo PUBLIC \'bar\' \'\'> ]",
+        "[ <!NOTATION foo PUBLIC \"bar\" \"\"> ]",
+        "[ <!NOTATION foo PUBLIC \'bar\' \"\"> ]",
+        "[ <!NOTATION foo PUBLIC \"bar\" \'\'> ]",
+    }) |src| try testScanner(&buf_sizes, src, &[_]ScannerTestItem{
+        .{ .marker = .notation_decl },
+        .{ .str = "foo" },
+        .{ .marker = .{ .notation_def = .public } },
+        .{ .str = "bar" },
+        .{ .str = "" },
+    });
+    for ([_][]const u8{
+        "[ <!NOTATION foo PUBLIC \'\' \'baz\'> ]",
+        "[ <!NOTATION foo PUBLIC \"\" \"baz\"> ]",
+        "[ <!NOTATION foo PUBLIC \'\' \"baz\"> ]",
+        "[ <!NOTATION foo PUBLIC \"\" \'baz\'> ]",
+    }) |src| try testScanner(&buf_sizes, src, &[_]ScannerTestItem{
+        .{ .marker = .notation_decl },
+        .{ .str = "foo" },
+        .{ .marker = .{ .notation_def = .public } },
+        .{ .str = "" },
+        .{ .str = "baz" },
+    });
+    for ([_][]const u8{
+        "[ <!NOTATION foo PUBLIC \'bar\' \'baz\'> ]",
+        "[ <!NOTATION foo PUBLIC \"bar\" \"baz\"> ]",
+        "[ <!NOTATION foo PUBLIC \'bar\' \"baz\"> ]",
+        "[ <!NOTATION foo PUBLIC \"bar\" \'baz\'> ]",
+    }) |src| try testScanner(&buf_sizes, src, &[_]ScannerTestItem{
+        .{ .marker = .notation_decl },
+        .{ .str = "foo" },
+        .{ .marker = .{ .notation_def = .public } },
+        .{ .str = "bar" },
+        .{ .str = "baz" },
+    });
 }
 
 const std = @import("std");

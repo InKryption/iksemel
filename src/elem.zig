@@ -491,10 +491,10 @@ test sliceScanner {
         }
     }.nextSegmentStr;
 
-    var tokenizer = Tokenizer.initComplete(
+    var tokenizer = Tokenizer.initFull(
         \\<foo bar= "baz&a;"> lorem ipsum&lt; </foo>
     );
-    try std.testing.expectEqual(.angle_bracket_left, tokenizer.nextTypeNoUnderrun(.non_markup));
+    try std.testing.expectEqual(.angle_bracket_left, tokenizer.full.nextType(.non_markup));
 
     var scanner = sliceScanner(&tokenizer);
 
@@ -556,7 +556,7 @@ fn testScanner(
         for (buffer_sizes) |buffer_size| {
             const read_buffer = max_buffer[0..buffer_size];
             var fbs = std.io.fixedBufferStream(src);
-            var tokenizer = Tokenizer.initStreaming();
+            var tokenizer = Tokenizer.initStream();
 
             var scanner = readerScanner(&tokenizer, fbs.reader(), read_buffer);
             for (expected_items, 0..) |expected_item, i| {
@@ -576,7 +576,7 @@ fn testScanner(
         }
     }
 
-    var tokenizer = Tokenizer.initComplete(src);
+    var tokenizer = Tokenizer.initFull(src);
 
     var scanner = sliceScanner(&tokenizer);
     for (expected_items, 0..) |expected_item, i| {

@@ -2,26 +2,25 @@
 //! While simple, it provides little to no safety in the event of API misuse.
 //! It has two possible modes of operation: streaming and non-streaming.
 //!
-//! * Streaming: tokenizer is initialized with `initStreaming`, requires
-//! the programmer to make use of the `feedInput` method after encountering
-//! `error.BufferUnderrun` while using the `nextTypeStream` and `nextSrcStream`
-//! methods. `feedEof` must be used to signal the end of the XML source.
+//! * Streaming Source: tokenizer is initialized with `initStream`, requires
+//! the programmer to make use of the `stream.feedInput` method after encountering
+//! `error.BufferUnderrun` while using the `stream.nextType` and `stream.nextSrc`
+//! methods. `stream.feedEof` must be used to signal the end of the XML source.
 //!
-//! * Non-streaming: tokenizer is initialized with `initComplete`, or with
-//! `initStreaming` before eventually calling `feedEof`. This mode allows
-//! use of the standard API (`nextTypeStream`, `nextSrcStream`), in addition
-//! to the mirror methods `nextTypeNoUnderrun` & `nextSrcNoUnderrun`, which
-//! take advantage of the assumption that the entirety of the of the XML source
-//! has been given. The `feedInput` and `feedEof` methods are illegal in this mode.
+//! * Full Source: tokenizer is initialized with `initFull`. This mode allows use
+//! of a subset of the stream source API (`stream.nextType`, `stream.nextSrc`), in
+//! addition to the mirror methods `full.nextType` & `full.nextSrc`, which take
+//! advantage of the assumption that the entirety of the of the XML source has
+//! been fed. The methods `stream.feedInput` and `stream.feedEof` are illegal
+//! in this mode.
 //!
-//! Important to note: if the tokenizer was first initialized with `initStreaming`,
+//! Important to note: if the tokenizer was first initialized with `initStream`,
 //! and then becomes non-streaming via a call to `feedEof`, immediately following
 //! a call to `feedInput` as a response to `error.BufferUnderrun`, the currently
 //! in-bound token may still be returned partially, as part of it may have existed
-//! in the previous buffer.
-//!
-//! Any references in documentation to `nextTypeStream` apply equally to `nextTypeNoUnderrun`.
-//! Any references in documentation to `nextSrcStream` apply equally to `nextSrcNoUnderrun`.
+//! in the previous buffer; after the partially returned token is acquired, any
+//! subsequent tokens will be available in full, returned as such by the `stream`
+//! API, or explicitly by the `full` API.
 //!
 //! The tokenization of a valid document requires no special considerations,
 //! however the tokenizer is error-tolerant, and defines specially recognized
@@ -34,40 +33,46 @@ state: State,
 eof_specified: bool,
 debug: Debug,
 
-/// Initializes the `Tokenizer` with the full input.
-/// Calling `feedInput` or `feedEof` is illegal.
-/// Treating `error.BufferUnderrun` as `unreachable` is safe.
-/// Equivalent initialising a streaming tokenizer, feeding it
-/// `src`, and then feeding it eof.
-pub inline fn initComplete(src: []const u8) Tokenizer {
-    var tokenizer = Tokenizer.initStreaming();
-    tokenizer.feedInput(src);
-    tokenizer.feedEof();
-    return tokenizer;
-}
+/// Public namespace field exposing the stream source API.
+///
+/// A pointer to this field may be passed around to indicate
+/// intent to specifically interact with the stream source API.
+///
+/// Must not be copied, only used by reference, as its address
+/// is only meaningful as a pointer to the `Tokenizer`.
+stream: Stream,
+/// Public namespace field exposing the full source API.
+///
+/// A pointer to this field may be passed around to indicate
+/// intent to specifically interact with the full source API.
+///
+/// Must not be copied, only used by reference, as its address
+/// is only meaningful as a pointer to the `Tokenizer`.
+full: Full,
 
-pub inline fn initStreaming() Tokenizer {
+pub inline fn initStream() Tokenizer {
     return .{
         .src = "",
         .index = 0,
         .state = .blank,
         .eof_specified = false,
-
         .debug = .{},
+
+        .stream = .{},
+        .full = .{},
     };
 }
 
-pub fn feedInput(tokenizer: *Tokenizer, src: []const u8) void {
-    assert(!tokenizer.eof_specified);
-    assert(tokenizer.index == tokenizer.src.len);
-    tokenizer.src = src;
-    tokenizer.index = 0;
-}
-
-pub fn feedEof(tokenizer: *Tokenizer) void {
-    assert(!tokenizer.eof_specified);
-    assert(tokenizer.index == 0 or tokenizer.index == tokenizer.src.len);
-    tokenizer.eof_specified = true;
+/// Initializes the `Tokenizer` with the full input.
+/// Calling `stream.feedInput` or `stream.feedEof` is illegal.
+/// Treating `error.BufferUnderrun` as `unreachable` is safe.
+/// Equivalent initialising a streaming tokenizer, feeding it
+/// `src`, and then feeding it eof.
+pub inline fn initFull(src: []const u8) Tokenizer {
+    var tokenizer = Tokenizer.initStream();
+    tokenizer.stream.feedInput(src);
+    tokenizer.stream.feedEof();
+    return tokenizer;
 }
 
 pub const BufferError = error{BufferUnderrun};
@@ -197,48 +202,79 @@ pub const Context = enum {
     reference,
 };
 
-pub fn nextTypeStream(tokenizer: *Tokenizer, context: Context) BufferError!TokenType {
-    return switch (context) {
-        inline else => |ictx| tokenizer.nextTypeOrSrcImpl(ictx, .type),
-    };
-}
+pub const Stream = struct {
+    pub inline fn asTokenizer(stream: *Stream) *Tokenizer {
+        return @fieldParentPtr(Tokenizer, "stream", stream);
+    }
 
-pub fn nextTypeNoUnderrun(tokenizer: *Tokenizer, context: Context) TokenType {
-    return switch (context) {
-        inline else => |ictx| tokenizer.nextTypeOrSrcImpl(ictx, .type_no_underrun),
-    };
-}
+    pub fn feedInput(stream: *Tokenizer.Stream, src: []const u8) void {
+        const tokenizer = stream.asTokenizer();
+        assert(!tokenizer.eof_specified);
+        assert(tokenizer.index == tokenizer.src.len);
+        tokenizer.src = src;
+        tokenizer.index = 0;
+    }
 
-pub fn nextSrcStream(tokenizer: *Tokenizer, context: Context) BufferError!?[]const u8 {
-    const maybe_tok_src: ?TokenSrc = switch (context) {
-        inline else => |ictx| try tokenizer.nextTypeOrSrcImpl(ictx, .src),
-    };
-    const tok_src = maybe_tok_src orelse return null;
-    return switch (tok_src) {
-        .range => |range| range.toStr(tokenizer.src),
-        .literal => |literal| literal.toStr(),
-    };
-}
+    pub fn feedEof(stream: *Tokenizer.Stream) void {
+        const tokenizer = stream.asTokenizer();
+        assert(!tokenizer.eof_specified);
+        assert(tokenizer.index == 0 or tokenizer.index == tokenizer.src.len);
+        tokenizer.eof_specified = true;
+    }
 
-pub fn nextSrcNoUnderrun(tokenizer: *Tokenizer, context: Context) Range {
-    switch (context) {
-        inline else => |ictx| {
-            var full_range: Range = switch (tokenizer.nextTypeOrSrcImpl(ictx, .src_no_underrun).?) {
-                .range => |range| range,
-                .literal => |literal| literal.toRange(tokenizer),
-            };
-            while (tokenizer.nextTypeOrSrcImpl(ictx, .src_no_underrun)) |tok_src| {
-                const range: Range = switch (tok_src) {
+    pub fn nextType(stream: *Tokenizer.Stream, context: Context) BufferError!TokenType {
+        const tokenizer = stream.asTokenizer();
+        return switch (context) {
+            inline else => |ictx| tokenizer.nextTypeOrSrcImpl(ictx, .type),
+        };
+    }
+
+    pub fn nextSrc(stream: *Tokenizer.Stream, context: Context) BufferError!?[]const u8 {
+        const tokenizer = stream.asTokenizer();
+        const maybe_tok_src: ?TokenSrc = switch (context) {
+            inline else => |ictx| try tokenizer.nextTypeOrSrcImpl(ictx, .src),
+        };
+        const tok_src = maybe_tok_src orelse return null;
+        return switch (tok_src) {
+            .range => |range| range.toStr(tokenizer.src),
+            .literal => |literal| literal.toStr(),
+        };
+    }
+};
+
+pub const Full = struct {
+    pub inline fn asTokenizer(full: *Full) *Tokenizer {
+        return @fieldParentPtr(Tokenizer, "full", full);
+    }
+
+    pub fn nextType(full: *Tokenizer.Full, context: Context) TokenType {
+        const tokenizer = full.asTokenizer();
+        return switch (context) {
+            inline else => |ictx| tokenizer.nextTypeOrSrcImpl(ictx, .type_no_underrun),
+        };
+    }
+
+    pub fn nextSrc(full: *Tokenizer.Full, context: Context) Range {
+        const tokenizer = full.asTokenizer();
+        switch (context) {
+            inline else => |ictx| {
+                var full_range: Range = switch (tokenizer.nextTypeOrSrcImpl(ictx, .src_no_underrun).?) {
                     .range => |range| range,
                     .literal => |literal| literal.toRange(tokenizer),
                 };
-                assert(full_range.end == range.start);
-                full_range.end = range.end;
-            }
-            return full_range;
-        },
+                while (tokenizer.nextTypeOrSrcImpl(ictx, .src_no_underrun)) |tok_src| {
+                    const range: Range = switch (tok_src) {
+                        .range => |range| range,
+                        .literal => |literal| literal.toRange(tokenizer),
+                    };
+                    assert(full_range.end == range.start);
+                    full_range.end = range.end;
+                }
+                return full_range;
+            },
+        }
     }
-}
+};
 
 pub const TokenType = enum(u8) {
     /// A run of any non-markup characters, including whitespace.
@@ -357,7 +393,7 @@ pub const TokenType = enum(u8) {
     /// This is returned when inside the DTD.
     angle_bracket_left_bang_square_bracket_left,
 
-    /// Whether or not the token represents any text to be returned by `nextSrc*`.
+    /// Whether or not the token represents any text to be returned by `nextSrc`.
     pub inline fn hasSrc(token_type: TokenType) bool {
         return switch (token_type) {
             .text_data,
@@ -437,11 +473,6 @@ pub const Range = struct {
     start: usize,
     end: usize,
 
-    /// For a streaming `Tokenizer`, this must be called with the `src` field
-    /// immediately after it is returned from `nextSrcStream` to get the source string.
-    /// For a non-streaming `Tokenizer`, this can be called at any time with
-    /// the `src` field.
-    /// The returned string aliases the `src` parameter.
     pub inline fn toStr(range: Range, src: []const u8) []const u8 {
         return src[range.start..range.end];
     }
@@ -565,7 +596,7 @@ const Literal = enum {
 
     /// For a streaming `Tokenizer`, this is illegal.
     /// For a non-streaming `Tokenizer`, this must be called immediately after it is returned
-    /// from `nextSrcStream` to get the source range, which may then be turned into a string which
+    /// from `stream.nextSrc` to get the source range, which may then be turned into a string which
     /// aliases the `src` field.
     inline fn toRange(literal_tok: Literal, tokenizer: *const Tokenizer) Range {
         const len = literal_tok.toStr().len;
@@ -1637,27 +1668,34 @@ fn testTokenizer(
     src: []const u8,
     contexts_expected_tokens: []const struct { Context, TokenType, ?[]const u8 },
 ) !void {
+    const combo = packed struct(u2) {
+        a: bool,
+        b: bool,
+        inline fn combo(a: bool, b: bool) u2 {
+            return @bitCast(@This(){ .a = a, .b = b });
+        }
+    }.combo;
     {
         var actual_src_buf = std.ArrayList(u8).init(std.testing.allocator);
         defer actual_src_buf.deinit();
 
         for (opts.start_size..opts.max_buffer orelse src.len) |buffer_size| {
             const helper = struct {
-                fn getNextType(tokenizer: *Tokenizer, context: Context, feeder: *std.mem.WindowIterator(u8)) TokenType {
-                    return tokenizer.nextTypeStream(context) catch while (true) {
+                fn getNextType(tokenizer: *Tokenizer.Stream, context: Context, feeder: *std.mem.WindowIterator(u8)) TokenType {
+                    return tokenizer.nextType(context) catch while (true) {
                         if (feeder.next()) |input| {
                             tokenizer.feedInput(input);
                         } else {
                             tokenizer.feedEof();
                         }
-                        break tokenizer.nextTypeStream(context) catch continue;
+                        break tokenizer.nextType(context) catch continue;
                     };
                 }
             };
 
             var feeder = std.mem.window(u8, src, buffer_size, buffer_size);
 
-            var tokenizer = Tokenizer.initStreaming();
+            var tokenizer = Tokenizer.initStream();
             for (contexts_expected_tokens, 0..) |iteration_vals, i| {
                 errdefer testingPrint("difference occured on token {d}\n", .{i});
 
@@ -1667,19 +1705,19 @@ fn testTokenizer(
                 = iteration_vals;
                 if (expected_src != null) try std.testing.expect(expected_tt.hasSrc());
 
-                const actual_tt: TokenType = helper.getNextType(&tokenizer, context, &feeder);
+                const actual_tt: TokenType = helper.getNextType(&tokenizer.stream, context, &feeder);
                 const actual_src: ?[]const u8 = blk: {
                     if (!actual_tt.hasSrc()) break :blk null;
 
                     actual_src_buf.clearRetainingCapacity();
                     while (true) {
-                        const segment = (tokenizer.nextSrcStream(context) catch while (true) {
+                        const segment = (tokenizer.stream.nextSrc(context) catch while (true) {
                             if (feeder.next()) |input| {
-                                tokenizer.feedInput(input);
+                                tokenizer.stream.feedInput(input);
                             } else {
-                                tokenizer.feedEof();
+                                tokenizer.stream.feedEof();
                             }
-                            break tokenizer.nextSrcStream(context) catch continue;
+                            break tokenizer.stream.nextSrc(context) catch continue;
                         }) orelse break;
                         try actual_src_buf.appendSlice(segment);
                     }
@@ -1690,13 +1728,6 @@ fn testTokenizer(
 
                 try std.testing.expectEqual(expected_tt, actual_tt);
 
-                const combo = packed struct(u2) {
-                    a: bool,
-                    b: bool,
-                    inline fn combo(a: bool, b: bool) u2 {
-                        return @bitCast(@This(){ .a = a, .b = b });
-                    }
-                }.combo;
                 switch (combo(expected_src != null, actual_src != null)) {
                     combo(true, true) => try std.testing.expectEqualStrings(expected_src.?, actual_src.?),
                     combo(false, false) => {},
@@ -1712,11 +1743,11 @@ fn testTokenizer(
             }
             const ctx_count = contexts_expected_tokens.len;
             errdefer testingPrint("difference occured on token {d}\n", .{ctx_count});
-            try std.testing.expectEqual(.eof, helper.getNextType(&tokenizer, if (ctx_count != 0) contexts_expected_tokens[ctx_count - 1][0] else .non_markup, &feeder));
+            try std.testing.expectEqual(.eof, helper.getNextType(&tokenizer.stream, if (ctx_count != 0) contexts_expected_tokens[ctx_count - 1][0] else .non_markup, &feeder));
         }
     }
 
-    var tokenizer = Tokenizer.initComplete(src);
+    var tokenizer = Tokenizer.initFull(src);
     for (contexts_expected_tokens, 0..) |iteration_vals, i| {
         errdefer testingPrint("difference occured on token {d}\n", .{i});
 
@@ -1725,22 +1756,15 @@ fn testTokenizer(
         const expected_src: ?[]const u8 //
         = iteration_vals;
 
-        const actual_tt: TokenType = tokenizer.nextTypeNoUnderrun(context);
+        const actual_tt: TokenType = tokenizer.full.nextType(context);
         const actual_src: ?[]const u8 = blk: {
             if (!actual_tt.hasSrc()) break :blk null;
-            const range = tokenizer.nextSrcNoUnderrun(context);
+            const range = tokenizer.full.nextSrc(context);
             break :blk range.toStr(tokenizer.src);
         };
 
         try std.testing.expectEqual(expected_tt, actual_tt);
 
-        const combo = packed struct(u2) {
-            a: bool,
-            b: bool,
-            inline fn combo(a: bool, b: bool) u2 {
-                return @bitCast(@This(){ .a = a, .b = b });
-            }
-        }.combo;
         switch (combo(expected_src != null, actual_src != null)) {
             combo(true, true) => try std.testing.expectEqualStrings(expected_src.?, actual_src.?),
             combo(false, false) => {},
@@ -1756,7 +1780,7 @@ fn testTokenizer(
     }
     const ctx_count = contexts_expected_tokens.len;
     errdefer testingPrint("difference occured on token {d}\n", .{ctx_count});
-    try std.testing.expectEqual(.eof, tokenizer.nextTypeNoUnderrun(if (ctx_count != 0) contexts_expected_tokens[ctx_count - 1][0] else .non_markup));
+    try std.testing.expectEqual(.eof, tokenizer.full.nextType(if (ctx_count != 0) contexts_expected_tokens[ctx_count - 1][0] else .non_markup));
 }
 
 fn testingPrint(comptime fmt_str: []const u8, args: anytype) void {
