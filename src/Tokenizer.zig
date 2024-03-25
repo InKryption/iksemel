@@ -106,6 +106,7 @@ pub const Context = enum {
     /// * `.angle_bracket_right`
     /// * `.pi_start`
     /// * `.invalid_angle_bracket_left_bang`
+    /// * `.angle_bracket_left_bang_square_bracket_left`
     /// * `.dtd_decl`
     /// * `.invalid_comment_start_single_dash`
     /// * `.comment_start`
@@ -351,6 +352,10 @@ pub const TokenType = enum(u8) {
     /// This is returned when '<!' is followed by a sequence
     /// which does not ultimately form a recognized markup tag.
     invalid_angle_bracket_left_bang,
+    /// The '<![' token.
+    ///
+    /// This is returned when inside the DTD.
+    angle_bracket_left_bang_square_bracket_left,
 
     /// Whether or not the token represents any text to be returned by `nextSrc*`.
     pub inline fn hasSrc(token_type: TokenType) bool {
@@ -390,8 +395,6 @@ pub const TokenType = enum(u8) {
 
             .slash => "/",
 
-            .percent => "%",
-
             .quote_single => "\'",
             .quote_double => "\"",
 
@@ -401,14 +404,14 @@ pub const TokenType = enum(u8) {
             .square_bracket_left => "[",
             .square_bracket_right => "]",
 
+            .percent => "%",
+
             .ampersand => "&",
             .semicolon => ";",
             .invalid_reference_end => null,
 
             .pi_start => "<?",
             .pi_end => "?>",
-
-            .invalid_angle_bracket_left_bang => "<!",
 
             .cdata_start => "<![CDATA[",
             .invalid_cdata_start => null,
@@ -422,8 +425,10 @@ pub const TokenType = enum(u8) {
 
             .dtd_start => "<!DOCTYPE",
             .invalid_dtd_start => null,
-
             .dtd_decl => null,
+
+            .invalid_angle_bracket_left_bang => "<!",
+            .angle_bracket_left_bang_square_bracket_left => "<![",
         };
     }
 };
@@ -940,6 +945,11 @@ fn nextTypeOrSrcImpl(
                     if (tokenizer.index == src.len) {
                         tokenizer.state = .eof;
                         break .invalid_angle_bracket_left_bang;
+                    }
+                    if (src[tokenizer.index] == '[') {
+                        tokenizer.state = .blank;
+                        tokenizer.index += 1;
+                        break .angle_bracket_left_bang_square_bracket_left;
                     }
                     if (src[tokenizer.index] == '-') {
                         tokenizer.state = .@"<!-";
@@ -1931,10 +1941,15 @@ test "DTD" {
         .{ .dtd, .pipe, null },
         .{ .dtd, .comma, null },
         .{ .dtd, .percent, null },
-        // .{ .dtd, .tag_token, ";" },
         .{ .dtd, .square_bracket_left, null },
         .{ .dtd, .square_bracket_right, null },
         .{ .dtd, .hashtag, null },
+    });
+
+    try testTokenizer(.{}, "<![ <![", &.{
+        .{ .dtd, .angle_bracket_left_bang_square_bracket_left, null },
+        .{ .dtd, .tag_whitespace, " " },
+        .{ .dtd, .angle_bracket_left_bang_square_bracket_left, null },
     });
 }
 
