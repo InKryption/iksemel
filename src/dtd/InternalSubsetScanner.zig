@@ -300,10 +300,10 @@ const State = union(enum) {
 
             maybe_need_ent_kind: ScanMarker.EntityKind,
 
-            value_quoted_cached_tt: struct { Tokenizer.QuoteType, ?Tokenizer.TokenType },
-            value_quoted: Tokenizer.QuoteType,
+            value_quoted_cached_tt: struct { QuoteType, ?Tokenizer.TokenType },
+            value_quoted: QuoteType,
 
-            extid_lit: struct { Tokenizer.QuoteType, ScanMarker.EntityKind },
+            extid_lit: struct { QuoteType, ScanMarker.EntityKind },
         };
         const State = enum {
             name_start,
@@ -369,13 +369,41 @@ const State = union(enum) {
     };
 
     const Attlist = struct {
+        data: union {
+            none: void,
+            default_decl_value: QuoteType,
+        },
         state: enum {
             name_start,
             name_end,
+
+            att_def_start,
+
+            att_def_name_start,
+            att_def_name_end,
+
+            att_def_type,
+
+            att_def_type_enumerated_name_start,
+            att_def_type_enumerated_name_end,
+            att_def_type_enumerated_end,
+
+            default_decl_start,
+
+            default_decl_value_empty_start,
+            default_decl_value_empty_end,
+
+            default_decl_value_start,
+            default_decl_value_ref_start,
+            default_decl_value_ref_end,
+            default_decl_value_text,
         },
     };
 
     const Notation = struct {
+        data: union {
+            none: void,
+        },
         state: enum {
             name_start,
             name_end,
@@ -451,12 +479,7 @@ fn nextMarkerOrSrcImpl(
                     const DeclStr = enum { @"<!ENTITY", @"<!ELEMENT", @"<!ATTLIST", @"<!NOTATION" };
                     const decl_str = (try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, DeclStr)) orelse return ScanError.UnexpectedToken;
 
-                    if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                        .tag_whitespace => unreachable,
-                        .tag_token => unreachable,
-                        .eof => return ScanError.UnexpectedEof,
-                        else => return ScanError.UnexpectedToken,
-                    };
+                    try expectTagWhitespace(tokenizer, .dtd, MaybeReader, mbr);
 
                     // true if we find `.percent`, `.tag_token` ('%' Name),
                     // false if we just find `.tag_token` (Name).
@@ -471,12 +494,7 @@ fn nextMarkerOrSrcImpl(
                             .tag_token => break :percent false,
                             .percent => {},
                         }
-                        if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                            .tag_whitespace => unreachable,
-                            .tag_token => unreachable,
-                            .eof => return ScanError.UnexpectedEof,
-                            else => return ScanError.UnexpectedToken,
-                        };
+                        try expectTagWhitespace(tokenizer, .dtd, MaybeReader, mbr);
                         switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
                             else => return ScanError.UnexpectedToken,
                             .eof => return ScanError.UnexpectedEof,
@@ -506,6 +524,7 @@ fn nextMarkerOrSrcImpl(
                         .@"<!ATTLIST" => {
                             if (percent) return ScanError.UnexpectedToken;
                             scanner.state = .{ .attlist = .{
+                                .data = .{ .none = {} },
                                 .state = .name_start,
                             } };
                             break .attlist_decl;
@@ -513,6 +532,7 @@ fn nextMarkerOrSrcImpl(
                         .@"<!NOTATION" => {
                             if (percent) return ScanError.UnexpectedToken;
                             scanner.state = .{ .notation = .{
+                                .data = .{ .none = {} },
                                 .state = .name_start,
                             } };
                             break .notation_decl;
@@ -613,12 +633,7 @@ fn handleEntity(
             if (ret_type != .marker) unreachable;
             const ent_kind = entity.data.maybe_need_ent_kind;
 
-            if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                .tag_whitespace => unreachable,
-                .tag_token => unreachable,
-                .eof => return ScanError.UnexpectedEof,
-                else => return ScanError.UnexpectedToken,
-            };
+            try expectTagWhitespace(tokenizer, .dtd, MaybeReader, mbr);
 
             switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
                 else => return ScanError.UnexpectedToken,
@@ -626,7 +641,7 @@ fn handleEntity(
                 .tag_whitespace => unreachable,
 
                 inline .quote_single, .quote_double => |quote_tt| {
-                    const quote_type = comptime Tokenizer.QuoteType.fromTokenType(quote_tt).?;
+                    const quote_type = comptime QuoteType.fromTokenType(quote_tt).?;
                     entity.state, //
                     entity.data //
                     = switch (try parse_helper.nextTokenType(tokenizer, quote_type.entityValueCtx(), MaybeReader, mbr)) {
@@ -655,14 +670,9 @@ fn handleEntity(
                         };
                     };
 
-                    if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                        .tag_whitespace => unreachable,
-                        .tag_token => unreachable,
-                        .eof => return ScanError.UnexpectedEof,
-                        else => return ScanError.UnexpectedToken,
-                    };
+                    try expectTagWhitespace(tokenizer, .dtd, MaybeReader, mbr);
 
-                    const quote_type: Tokenizer.QuoteType = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                    const quote_type: QuoteType = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
                         else => return ScanError.UnexpectedToken,
                         .eof => return ScanError.UnexpectedEof,
                         .tag_whitespace => unreachable,
@@ -810,20 +820,9 @@ fn handleEntity(
             if (ret_type != .src) unreachable;
             const ent_kind = entity.data.maybe_need_ent_kind;
 
-            if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                .tag_whitespace => unreachable,
-                .eof => return ScanError.UnexpectedEof,
-                else => return ScanError.UnexpectedToken,
-            };
+            try expectTagWhitespace(tokenizer, .dtd, MaybeReader, mbr);
 
-            const quote_type = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
-                else => return ScanError.UnexpectedToken,
-                .eof => return ScanError.UnexpectedEof,
-                inline //
-                .quote_single,
-                .quote_double,
-                => |quote_tt| comptime Tokenizer.QuoteType.fromTokenType(quote_tt).?,
-            };
+            const quote_type = try expectQuoteTypeAssertNoTagWhitespace(tokenizer, .dtd, MaybeReader, mbr);
 
             entity.state, entity.data = switch (try parse_helper.nextTokenType(tokenizer, quote_type.systemLiteralCtx(), MaybeReader, mbr)) {
                 else => unreachable,
@@ -940,12 +939,7 @@ fn handleEntity(
                         if (try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, enum { NDATA }) == null) {
                             return ScanError.UnexpectedToken;
                         }
-                        if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                            .tag_whitespace => unreachable,
-                            .tag_token => unreachable,
-                            .eof => return ScanError.UnexpectedEof,
-                            else => return ScanError.UnexpectedToken,
-                        };
+                        try expectTagWhitespace(tokenizer, .dtd, MaybeReader, mbr);
 
                         switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
                             else => return ScanError.UnexpectedToken,
@@ -1025,12 +1019,7 @@ fn handleElement(
             switch (ret_type) {
                 .src => break null,
                 .marker => {
-                    if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .dtd, MaybeReader, mbr)) |non_ws| switch (non_ws) {
-                        .tag_whitespace => unreachable,
-                        .tag_token => unreachable,
-                        .eof => return ScanError.UnexpectedEof,
-                        else => return ScanError.UnexpectedToken,
-                    };
+                    try expectTagWhitespace(tokenizer, .dtd, MaybeReader, mbr);
 
                     const first_meaningful_tt = try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr);
                     switch (first_meaningful_tt) {
@@ -1364,11 +1353,337 @@ fn handleAttlist(
     mbr: parse_helper.MaybeBufferedReader(MaybeReader),
     comptime ret_type: ReturnType,
 ) !ret_type.Type(MaybeReader != null) {
-    _ = tokenizer;
-    _ = mbr;
     const scanner = @fieldParentPtr(Scanner, "state", @fieldParentPtr(Scanner.State, "attlist", attlist));
-    _ = scanner;
-    @panic("TODO");
+    return while (true) switch (attlist.state) {
+        .name_start => {
+            if (ret_type != .src) unreachable;
+            _ = attlist.data.none;
+            if (MaybeReader != null) {
+                if (try parse_helper.nextTokenSegment(tokenizer, .dtd, mbr.reader, mbr.read_buffer)) |segment| break segment;
+                attlist.state = .name_end;
+                continue;
+            } else {
+                attlist.state = .name_end;
+                break tokenizer.nextSrcNoUnderrun(.dtd);
+            }
+        },
+        .name_end => {
+            if (ret_type != .src) unreachable;
+            _ = attlist.data.none;
+            attlist.state = .att_def_start;
+            break null;
+        },
+
+        .att_def_start => {
+            if (ret_type != .marker) unreachable;
+            _ = attlist.data.none;
+
+            switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                else => return ScanError.UnexpectedToken,
+                .eof => return ScanError.UnexpectedEof,
+                .angle_bracket_right => {
+                    scanner.state = .blank;
+                    break .attlist_end;
+                },
+                .tag_whitespace => {},
+            }
+            try parse_helper.skipWhitespaceSrcUnchecked(tokenizer, .dtd, MaybeReader, mbr);
+
+            switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                else => return ScanError.UnexpectedToken,
+                .eof => return ScanError.UnexpectedEof,
+                .tag_whitespace => unreachable,
+
+                .angle_bracket_right => {
+                    scanner.state = .blank;
+                    break .attlist_end;
+                },
+                .tag_token => {},
+            }
+
+            attlist.state = .att_def_name_start;
+            break .attribute_name;
+        },
+
+        .att_def_name_start => {
+            if (ret_type != .src) unreachable;
+            _ = attlist.data.none;
+
+            if (MaybeReader != null) {
+                if (try parse_helper.nextTokenSegment(tokenizer, .dtd, mbr.reader, mbr.read_buffer)) |segment| break segment;
+                attlist.state = .att_def_name_end;
+                continue;
+            } else {
+                attlist.state = .att_def_name_end;
+                break tokenizer.nextSrcNoUnderrun(.dtd);
+            }
+        },
+        .att_def_name_end => {
+            if (ret_type != .src) unreachable;
+            attlist.state = .att_def_type;
+            break null;
+        },
+
+        .att_def_type => {
+            if (ret_type != .marker) unreachable;
+            _ = attlist.data.none;
+            try expectTagWhitespace(tokenizer, .dtd, MaybeReader, mbr);
+            const att_type: ScanMarker.AttType = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                else => return ScanError.UnexpectedToken,
+                .eof => return ScanError.UnexpectedEof,
+                .tag_whitespace => unreachable,
+                .lparen => .enumeration,
+                .tag_token => blk: {
+                    const AttTypeStr = enum {
+                        CDATA,
+                        ID,
+                        IDREF,
+                        IDREFS,
+                        ENTITY,
+                        ENTITIES,
+                        NMTOKEN,
+                        NMTOKENS,
+
+                        NOTATION,
+                    };
+                    const att_type_str: AttTypeStr = (try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, AttTypeStr)) orelse
+                        return ScanError.UnexpectedToken;
+                    break :blk switch (att_type_str) {
+                        .CDATA => .cdata,
+                        .ID => .id,
+                        .IDREF => .idref,
+                        .IDREFS => .idrefs,
+                        .ENTITY => .entity,
+                        .ENTITIES => .entities,
+                        .NMTOKEN => .nmtoken,
+                        .NMTOKENS => .nmtokens,
+
+                        .NOTATION => .notation,
+                    };
+                },
+            };
+
+            switch (att_type) {
+                else => {},
+                .notation => {
+                    try expectTagWhitespace(tokenizer, .dtd, MaybeReader, mbr);
+                    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                        else => return ScanError.UnexpectedToken,
+                        .eof => return ScanError.UnexpectedEof,
+                        .tag_whitespace => unreachable,
+                        // the last token type will have been lparen for both `.notation`
+                        // and `.enumeration` this way, allowing them to share logic.
+                        .lparen => {},
+                    }
+                },
+            }
+
+            switch (att_type) {
+                else => {},
+                .notation, .enumeration => switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+                    else => return ScanError.UnexpectedToken,
+                    .eof => return ScanError.UnexpectedEof,
+                    .tag_whitespace => unreachable,
+                    .tag_token => {},
+                },
+            }
+
+            attlist.state = switch (att_type) {
+                .notation, .enumeration => .att_def_type_enumerated_name_start,
+                else => .default_decl_start,
+            };
+            break .{ .attribute_type = att_type };
+        },
+
+        .att_def_type_enumerated_name_start => {
+            if (ret_type != .src) unreachable;
+            _ = attlist.data.none;
+            if (MaybeReader != null) {
+                if (try parse_helper.nextTokenSegment(tokenizer, .dtd, mbr.reader, mbr.read_buffer)) |segment| break segment;
+                attlist.state = .att_def_type_enumerated_name_end;
+                continue;
+            } else {
+                attlist.state = .att_def_type_enumerated_name_end;
+                break tokenizer.nextSrcNoUnderrun(.dtd);
+            }
+        },
+        .att_def_type_enumerated_name_end => {
+            if (ret_type != .src) unreachable;
+            _ = attlist.data.none;
+            switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+                else => return ScanError.UnexpectedToken,
+                .eof => return ScanError.UnexpectedEof,
+                .tag_whitespace => unreachable,
+
+                .pipe => {
+                    switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .dtd, MaybeReader, mbr)) {
+                        else => return ScanError.UnexpectedToken,
+                        .eof => return ScanError.UnexpectedEof,
+                        .tag_whitespace => unreachable,
+                        .tag_token => {},
+                    }
+                    attlist.state = .att_def_type_enumerated_name_start;
+                },
+                .rparen => {
+                    attlist.state = .att_def_type_enumerated_end;
+                },
+            }
+            break null;
+        },
+        .att_def_type_enumerated_end => {
+            if (ret_type != .src) unreachable;
+            _ = attlist.data.none;
+            attlist.state = .default_decl_start;
+            break null;
+        },
+
+        .default_decl_start => {
+            if (ret_type != .marker) unreachable;
+            _ = attlist.data.none;
+            try expectTagWhitespace(tokenizer, .dtd, MaybeReader, mbr);
+            const default_decl: union(ScanMarker.DefaultDecl) {
+                required,
+                implied,
+                fixed: QuoteType,
+                value: QuoteType,
+            } = switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                else => return ScanError.UnexpectedToken,
+                .eof => return ScanError.UnexpectedEof,
+                .tag_whitespace => unreachable,
+
+                .hashtag => blk: {
+                    switch (try parse_helper.nextTokenType(tokenizer, .dtd, MaybeReader, mbr)) {
+                        else => return ScanError.UnexpectedToken,
+                        .eof => return ScanError.UnexpectedEof,
+                        .tag_token => {},
+                    }
+                    const maybe_dd_tag = try parse_helper.nextTokenSrcAsEnum(tokenizer, .dtd, MaybeReader, mbr, enum { REQUIRED, IMPLIED, FIXED });
+                    break :blk switch (maybe_dd_tag orelse return ScanError.UnexpectedToken) {
+                        .REQUIRED => .required,
+                        .IMPLIED => .implied,
+                        .FIXED => .{ .fixed = quote_type: {
+                            try expectTagWhitespace(tokenizer, .dtd, MaybeReader, mbr);
+                            break :quote_type try expectQuoteTypeAssertNoTagWhitespace(tokenizer, .dtd, MaybeReader, mbr);
+                        } },
+                    };
+                },
+                inline //
+                .quote_single,
+                .quote_double,
+                => |quote_tt| .{ .value = comptime QuoteType.fromTokenType(quote_tt).? },
+            };
+
+            attlist.state, attlist.data = switch (default_decl) {
+                .required, .implied => .{ .att_def_start, .{ .none = {} } },
+                .fixed, .value => |quote_type| switch (try parse_helper.nextTokenType(tokenizer, quote_type.attributeValueCtx(), MaybeReader, mbr)) {
+                    else => return ScanError.UnexpectedToken,
+                    .eof => return ScanError.UnexpectedEof,
+                    .angle_bracket_left => return ScanError.UnexpectedToken,
+
+                    .quote_single, .quote_double => .{ .default_decl_value_empty_start, .{ .none = attlist.data.none } },
+                    .ampersand => .{ .default_decl_value_ref_start, .{ .default_decl_value = quote_type } },
+                    .text_data => .{ .default_decl_value_text, .{ .default_decl_value = quote_type } },
+                },
+            };
+            break .{ .attribute_default_decl = default_decl };
+        },
+
+        .default_decl_value_empty_start => {
+            _ = attlist.data.none;
+            switch (ret_type) {
+                .marker => break .text,
+                .src => {
+                    attlist.state = .default_decl_value_empty_end;
+                    break if (MaybeReader != null) "" else .{ .start = tokenizer.index - 1, .end = tokenizer.index - 1 };
+                },
+            }
+        },
+        .default_decl_value_empty_end => {
+            if (ret_type != .src) unreachable;
+            _ = attlist.data.none;
+            attlist.data = .{ .none = {} };
+            attlist.state = .att_def_start;
+            break null;
+        },
+
+        .default_decl_value_start => {
+            const quote_type = attlist.data.default_decl_value;
+            switch (ret_type) {
+                .marker => {
+                    switch (try parse_helper.nextTokenType(tokenizer, quote_type.attributeValueCtx(), MaybeReader, mbr)) {
+                        else => return ScanError.UnexpectedToken,
+                        .eof => return ScanError.UnexpectedEof,
+                        .angle_bracket_left => return ScanError.UnexpectedToken,
+
+                        .ampersand => attlist.state = .default_decl_value_ref_start,
+                        .text_data => attlist.state = .default_decl_value_text,
+                        .quote_single, .quote_double => {
+                            attlist.data = .{ .none = {} };
+                            attlist.state = .att_def_start;
+                        },
+                    }
+                    continue;
+                },
+                // only reached from `.default_decl_value_text`
+                .src => break null,
+            }
+        },
+
+        .default_decl_value_ref_start => {
+            _ = attlist.data.default_decl_value;
+            switch (ret_type) {
+                .marker => break switch (try getReferenceTypeDeterminedUpToTagToken(tokenizer, MaybeReader, mbr)) {
+                    .eof => return ScanError.UnexpectedEof,
+                    .empty => return ScanError.EmptyReference,
+                    .invalid_end => return ScanError.UnexpectedToken,
+                    .unexpected_hashtag => return ScanError.UnexpectedToken,
+
+                    .ge_reference => .reference_ge,
+                    .char_reference => .reference_char,
+                },
+                .src => {
+                    if (MaybeReader != null) {
+                        if (try parse_helper.nextTokenSegment(tokenizer, .reference, mbr.reader, mbr.read_buffer)) |segment| break segment;
+                        attlist.state = .default_decl_value_ref_end;
+                        continue;
+                    } else {
+                        attlist.state = .default_decl_value_ref_end;
+                        break tokenizer.nextSrcNoUnderrun(.reference);
+                    }
+                },
+            }
+        },
+        .default_decl_value_ref_end => {
+            if (ret_type != .src) unreachable;
+            _ = attlist.data.default_decl_value;
+            switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
+                else => unreachable,
+                .tag_token => unreachable,
+                .eof => return ScanError.UnexpectedEof,
+                .hashtag => return ScanError.UnexpectedToken,
+                .invalid_reference_end => return ScanError.UnexpectedToken,
+                .semicolon => {},
+            }
+            attlist.state = .default_decl_value_start;
+            break null;
+        },
+        .default_decl_value_text => {
+            const quote_type = attlist.data.default_decl_value;
+            switch (ret_type) {
+                .marker => break .text,
+                .src => {
+                    if (MaybeReader != null) {
+                        if (try parse_helper.nextTokenSegment(tokenizer, quote_type.attributeValueCtx(), mbr.reader, mbr.read_buffer)) |segment| break segment;
+                        attlist.state = .default_decl_value_start;
+                        continue;
+                    } else {
+                        attlist.state = .default_decl_value_start;
+                        break tokenizer.nextSrcNoUnderrun(quote_type.attributeValueCtx());
+                    }
+                },
+            }
+        },
+    };
 }
 
 fn handleNotation(
@@ -1385,10 +1700,41 @@ fn handleNotation(
     @panic("TODO");
 }
 
+inline fn expectTagWhitespace(
+    tokenizer: *Tokenizer,
+    context: Tokenizer.Context,
+    comptime MaybeReader: ?type,
+    mbr: parse_helper.MaybeBufferedReader(MaybeReader),
+) ScanError!void {
+    return if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, context, MaybeReader, mbr)) |non_ws| switch (non_ws) {
+        .tag_whitespace => unreachable,
+        .eof => ScanError.UnexpectedEof,
+        else => ScanError.UnexpectedToken,
+    };
+}
+
+inline fn expectQuoteTypeAssertNoTagWhitespace(
+    tokenizer: *Tokenizer,
+    context: Tokenizer.Context,
+    comptime MaybeReader: ?type,
+    mbr: parse_helper.MaybeBufferedReader(MaybeReader),
+) !QuoteType {
+    return switch (try parse_helper.nextTokenType(tokenizer, context, MaybeReader, mbr)) {
+        else => ScanError.UnexpectedToken,
+        .eof => ScanError.UnexpectedEof,
+        .tag_whitespace => unreachable,
+
+        inline //
+        .quote_single,
+        .quote_double,
+        => |tt| comptime QuoteType.fromTokenType(tt).?,
+    };
+}
+
 fn validPubidLiteralSegment(
     str: []const u8,
     /// The surrounding quote type.
-    quote: Tokenizer.QuoteType,
+    quote: QuoteType,
 ) bool {
     return for (str) |char| switch (char) {
         '\u{20}', '\u{D}', '\u{A}' => {},
@@ -1971,7 +2317,6 @@ test "ELEMENT" {
 }
 
 test "ATTLIST" {
-    if (true) return error.SkipZigTest;
     const buf_sizes = [_]usize{
         1,  2,  3,  4,  5,  6,  7,  8,  10,  12,  14,  16,  20,  24,
         28, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256,
@@ -2177,5 +2522,6 @@ const builtin = @import("builtin");
 
 const iksemel = @import("../iksemel.zig");
 const Tokenizer = iksemel.Tokenizer;
+const QuoteType = Tokenizer.QuoteType;
 
 const parse_helper = @import("../parse_helper.zig");
