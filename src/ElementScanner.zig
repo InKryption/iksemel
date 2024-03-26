@@ -3,7 +3,7 @@
 //! and which has returned the first left angle bracket token.
 
 const Scanner = @This();
-state: State = .@"<",
+state: State,
 
 /// Should never be directly copied by value.
 /// This is a namespace field for the full source API.
@@ -16,19 +16,24 @@ full: Full = .{},
 /// intent to exclusively use the stream source API.
 stream: Stream = .{},
 
+/// Used to initialise the scanner.
+pub const init: Scanner = .{
+    .state = .@"<",
+};
+
 pub const Full = struct {
-    pub inline fn asScanner(full: *Full) *Scanner {
+    pub inline fn asScanner(full: *Scanner.Full) *Scanner {
         return @fieldParentPtr(Scanner, "full", full);
     }
 
     pub fn nextMarker(
         full: *Scanner.Full,
         /// Full source tokenizer.
-        tokenizer: *Tokenizer,
+        tokenizer: *Tokenizer.Full,
     ) ScanError!ScanMarker {
         return nextMarkerOrSegmentImpl(
             full.asScanner(),
-            tokenizer,
+            tokenizer.asTokenizer(),
             null,
             .{ .reader = {}, .read_buffer = {} },
             .marker,
@@ -38,11 +43,11 @@ pub const Full = struct {
     pub fn nextSrc(
         full: *Scanner.Full,
         /// Full source tokenizer.
-        tokenizer: *Tokenizer,
+        tokenizer: *Tokenizer.Full,
     ) ScanError!?Tokenizer.Range {
         return nextMarkerOrSegmentImpl(
             full.asScanner(),
-            tokenizer,
+            tokenizer.asTokenizer(),
             null,
             .{ .reader = {}, .read_buffer = {} },
             .src,
@@ -56,13 +61,13 @@ pub const Stream = struct {
     pub fn nextMarker(
         stream: *Scanner.Stream,
         /// Streaming source tokenizer.
-        tokenizer: *Tokenizer,
+        tokenizer: *Tokenizer.Stream,
         reader: anytype,
         read_buffer: []u8,
     ) (@TypeOf(reader).Error || ScanError)!ScanMarker {
         return nextMarkerOrSegmentImpl(
             stream.asScanner(),
-            tokenizer,
+            tokenizer.asTokenizer(),
             @TypeOf(reader),
             .{ .reader = reader, .read_buffer = read_buffer },
             .marker,
@@ -72,13 +77,13 @@ pub const Stream = struct {
     pub fn nextSrc(
         stream: *Scanner.Stream,
         /// Streaming source tokenizer.
-        tokenizer: *Tokenizer,
+        tokenizer: *Tokenizer.Stream,
         reader: anytype,
         read_buffer: []u8,
     ) (@TypeOf(reader).Error || ScanError)!?[]const u8 {
         return nextMarkerOrSegmentImpl(
             stream.asScanner(),
-            tokenizer,
+            tokenizer.asTokenizer(),
             @TypeOf(reader),
             .{ .reader = reader, .read_buffer = read_buffer },
             .src,
@@ -738,13 +743,13 @@ fn testScanner(
             var fbs = std.io.fixedBufferStream(src);
             var tokenizer = Tokenizer.initStream();
 
-            var scanner: Scanner = .{};
+            var scanner: Scanner = Scanner.init;
             for (expected_items, 0..) |expected_item, i| {
                 errdefer std.log.err("Error occurred on item {d}", .{i});
                 switch (expected_item) {
-                    .marker => |marker| try std.testing.expectEqual(marker, scanner.stream.nextMarker(&tokenizer, fbs.reader(), read_buffer)),
+                    .marker => |marker| try std.testing.expectEqual(marker, scanner.stream.nextMarker(&tokenizer.stream, fbs.reader(), read_buffer)),
                     .str => |str| {
-                        while (try scanner.stream.nextSrc(&tokenizer, fbs.reader(), read_buffer)) |segment| {
+                        while (try scanner.stream.nextSrc(&tokenizer.stream, fbs.reader(), read_buffer)) |segment| {
                             try str_buffer.appendSlice(segment);
                         }
                         try std.testing.expectEqualStrings(str, str_buffer.items);
@@ -752,19 +757,19 @@ fn testScanner(
                     },
                 }
             }
-            try std.testing.expectEqual(.eof, scanner.stream.nextMarker(&tokenizer, fbs.reader(), read_buffer));
+            try std.testing.expectEqual(.eof, scanner.stream.nextMarker(&tokenizer.stream, fbs.reader(), read_buffer));
         }
     }
 
     var tokenizer = Tokenizer.initFull(src);
 
-    var scanner: Scanner = .{};
+    var scanner: Scanner = Scanner.init;
     for (expected_items, 0..) |expected_item, i| {
         errdefer std.log.err("Error occurred on item {d}", .{i});
         switch (expected_item) {
-            .marker => |marker| try std.testing.expectEqual(marker, scanner.full.nextMarker(&tokenizer)),
+            .marker => |marker| try std.testing.expectEqual(marker, scanner.full.nextMarker(&tokenizer.full)),
             .str => |str| {
-                while (try scanner.full.nextSrc(&tokenizer)) |segment| {
+                while (try scanner.full.nextSrc(&tokenizer.full)) |segment| {
                     try str_buffer.appendSlice(segment.toStr(src));
                 }
                 try std.testing.expectEqualStrings(str, str_buffer.items);
@@ -772,7 +777,7 @@ fn testScanner(
             },
         }
     }
-    try std.testing.expectEqual(.eof, scanner.full.nextMarker(&tokenizer));
+    try std.testing.expectEqual(.eof, scanner.full.nextMarker(&tokenizer.full));
 }
 
 test "1" {

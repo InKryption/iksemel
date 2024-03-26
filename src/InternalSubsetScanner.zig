@@ -4,7 +4,7 @@
 //! Is default initialised, with behaviour based upon the utilized `Tokenizer`,
 /// and stream source.
 const Scanner = @This();
-state: State = .blank,
+state: State,
 
 /// Should never be directly copied by value.
 /// This is a namespace field for the full source API.
@@ -17,6 +17,11 @@ full: Full = .{},
 /// intent to exclusively use the stream source API.
 stream: Stream = .{},
 
+/// Used to initialise the scanner.
+pub const init: Scanner = .{
+    .state = .blank,
+};
+
 pub const Full = struct {
     pub inline fn asScanner(full: *Full) *Scanner {
         return @fieldParentPtr(Scanner, "full", full);
@@ -25,11 +30,11 @@ pub const Full = struct {
     pub fn nextMarker(
         full: *Scanner.Full,
         /// Full source tokenizer.
-        tokenizer: *Tokenizer,
+        tokenizer: *Tokenizer.Full,
     ) ScanError!ScanMarker {
         return nextMarkerOrSrcImpl(
             full.asScanner(),
-            tokenizer,
+            tokenizer.asTokenizer(),
             null,
             .{ .reader = {}, .read_buffer = {} },
             .marker,
@@ -39,11 +44,11 @@ pub const Full = struct {
     pub fn nextSrc(
         full: *Scanner.Full,
         /// Full source tokenizer.
-        tokenizer: *Tokenizer,
+        tokenizer: *Tokenizer.Full,
     ) ScanError!?Tokenizer.Range {
         return nextMarkerOrSrcImpl(
             full.asScanner(),
-            tokenizer,
+            tokenizer.asTokenizer(),
             null,
             .{ .reader = {}, .read_buffer = {} },
             .src,
@@ -57,13 +62,13 @@ pub const Stream = struct {
     pub fn nextMarker(
         stream: *Scanner.Stream,
         /// Streaming source tokenizer.
-        tokenizer: *Tokenizer,
+        tokenizer: *Tokenizer.Stream,
         reader: anytype,
         read_buffer: []u8,
     ) (@TypeOf(reader).Error || ScanError)!ScanMarker {
         return nextMarkerOrSrcImpl(
             stream.asScanner(),
-            tokenizer,
+            tokenizer.asTokenizer(),
             @TypeOf(reader),
             .{ .reader = reader, .read_buffer = read_buffer },
             .marker,
@@ -73,13 +78,13 @@ pub const Stream = struct {
     pub fn nextSrc(
         stream: *Scanner.Stream,
         /// Streaming source tokenizer.
-        tokenizer: *Tokenizer,
+        tokenizer: *Tokenizer.Stream,
         reader: anytype,
         read_buffer: []u8,
     ) (@TypeOf(reader).Error || ScanError)!?[]const u8 {
         return nextMarkerOrSrcImpl(
             stream.asScanner(),
-            tokenizer,
+            tokenizer.asTokenizer(),
             @TypeOf(reader),
             .{ .reader = reader, .read_buffer = read_buffer },
             .src,
@@ -93,7 +98,6 @@ pub const ScanError = error{
     MissingAsterisk,
     EmptyPI,
     EmptyReference,
-    InvalidPubidLiteral,
 };
 
 pub const ScanMarker = union(enum) {
@@ -859,16 +863,13 @@ fn handleEntity(
             const quote_type, _ = entity.data.extid_lit;
             if (MaybeReader != null) {
                 if (try parse_helper.nextTokenSegment(tokenizer, quote_type.systemLiteralCtx(), mbr.reader, mbr.read_buffer)) |segment| {
-                    if (!validPubidLiteralSegment(segment, quote_type)) return ScanError.InvalidPubidLiteral;
                     break segment;
                 }
                 entity.state = .def_extid_pub_literal_end;
                 continue;
             } else {
-                const range = tokenizer.full.nextSrc(quote_type.systemLiteralCtx());
-                if (!validPubidLiteralSegment(range.toStr(tokenizer.src), quote_type)) return ScanError.InvalidPubidLiteral;
                 entity.state = .def_extid_pub_literal_end;
-                break range;
+                break tokenizer.full.nextSrc(quote_type.systemLiteralCtx());
             }
         },
         .def_extid_pub_literal_end => {
@@ -1812,14 +1813,12 @@ fn handleNotation(
             const quote_type = notation.data.literal;
             if (MaybeReader != null) {
                 if (try parse_helper.nextTokenSegment(tokenizer, quote_type.systemLiteralCtx(), mbr.reader, mbr.read_buffer)) |segment| {
-                    if (!validPubidLiteralSegment(segment, quote_type)) return ScanError.UnexpectedToken;
                     break segment;
                 }
                 notation.state = .pub_literal_end;
                 continue;
             } else {
                 const range = tokenizer.full.nextSrc(quote_type.systemLiteralCtx());
-                if (!validPubidLiteralSegment(range.toStr(tokenizer.src), quote_type)) return ScanError.UnexpectedToken;
                 notation.state = .pub_literal_end;
                 break range;
             }
@@ -1927,24 +1926,6 @@ inline fn expectQuoteTypeAssertNoTagWhitespace(
     };
 }
 
-fn validPubidLiteralSegment(
-    str: []const u8,
-    /// The surrounding quote type.
-    quote: QuoteType,
-) bool {
-    return for (str) |char| switch (char) {
-        '\u{20}', '\u{D}', '\u{A}' => {},
-        'a'...'z', 'A'...'Z', '0'...'9' => {},
-        '-' => {},
-        '\'' => switch (quote) {
-            .double => {},
-            .single => break false,
-        },
-        '(', ')', '+', ',', '.', '/', ':', '=', '?', ';', '!', '*', '#', '@', '$', '_', '%' => {},
-        else => break false,
-    } else true;
-}
-
 const ReferenceTypeDeterminedUpToTagToken = enum {
     eof,
     empty,
@@ -2005,16 +1986,16 @@ fn testScanner(
                 .read_buffer = read_buffer,
             }) catch unreachable == .square_bracket_left);
 
-            var scanner: Scanner = .{};
+            var scanner: Scanner = Scanner.init;
             for (expected_items, 0..) |expected_item, i| {
                 errdefer std.log.err("Error occurred on item {d}", .{i});
                 switch (expected_item) {
-                    .marker => |marker| try std.testing.expectEqual(marker, scanner.stream.nextMarker(&tokenizer, fbs.reader(), read_buffer)),
+                    .marker => |marker| try std.testing.expectEqual(marker, scanner.stream.nextMarker(&tokenizer.stream, fbs.reader(), read_buffer)),
                     .str => |expected_maybe_str_or_err| {
                         const actual_maybe_str_or_err: ScanError!?[]const u8 = blk: {
                             var first = true;
                             while (true) : (first = false) {
-                                const maybe_segment = scanner.stream.nextSrc(&tokenizer, fbs.reader(), read_buffer) catch |actual_err| {
+                                const maybe_segment = scanner.stream.nextSrc(&tokenizer.stream, fbs.reader(), read_buffer) catch |actual_err| {
                                     comptime assert(@TypeOf(actual_err) == ScanError);
                                     break :blk actual_err;
                                 };
@@ -2032,23 +2013,23 @@ fn testScanner(
                     },
                 }
             }
-            try std.testing.expectEqual(.end, scanner.stream.nextMarker(&tokenizer, fbs.reader(), read_buffer));
+            try std.testing.expectEqual(.end, scanner.stream.nextMarker(&tokenizer.stream, fbs.reader(), read_buffer));
         }
     }
 
     var tokenizer = Tokenizer.initFull(src);
     assert(tokenizer.full.nextType(.dtd) == .square_bracket_left);
 
-    var scanner: Scanner = .{};
+    var scanner: Scanner = Scanner.init;
     for (expected_items, 0..) |expected_item, i| {
         errdefer std.log.err("Error occurred on item {d}", .{i});
         switch (expected_item) {
-            .marker => |marker| try std.testing.expectEqual(marker, scanner.full.nextMarker(&tokenizer)),
+            .marker => |marker| try std.testing.expectEqual(marker, scanner.full.nextMarker(&tokenizer.full)),
             .str => |expected_maybe_str_or_err| {
                 const actual_maybe_str_or_err: ScanError!?[]const u8 = blk: {
                     var first = true;
                     while (true) : (first = false) {
-                        const maybe_segment = scanner.full.nextSrc(&tokenizer) catch |actual_err| {
+                        const maybe_segment = scanner.full.nextSrc(&tokenizer.full) catch |actual_err| {
                             comptime assert(@TypeOf(actual_err) == ScanError);
                             break :blk actual_err;
                         };
@@ -2065,7 +2046,7 @@ fn testScanner(
             },
         }
     }
-    try std.testing.expectEqual(.end, scanner.full.nextMarker(&tokenizer));
+    try std.testing.expectEqual(.end, scanner.full.nextMarker(&tokenizer.full));
 }
 
 fn expectEqualStringOrErrOrNull(
@@ -2834,8 +2815,8 @@ const assert = std.debug.assert;
 
 const builtin = @import("builtin");
 
-const iksemel = @import("../iksemel.zig");
+const iksemel = @import("iksemel.zig");
 const Tokenizer = iksemel.Tokenizer;
 const QuoteType = Tokenizer.QuoteType;
 
-const parse_helper = @import("../parse_helper.zig");
+const parse_helper = @import("parse_helper.zig");

@@ -116,7 +116,9 @@ pub const Stream = struct {
 
 pub const Full = struct {
     pub inline fn asTokenizer(full: *Full) *Tokenizer {
-        return @fieldParentPtr(Tokenizer, "full", full);
+        const tokenizer = @fieldParentPtr(Tokenizer, "full", full);
+        assert(tokenizer.eof_specified);
+        return tokenizer;
     }
 
     pub fn nextType(full: *Tokenizer.Full, context: Context) TokenType {
