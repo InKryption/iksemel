@@ -41,6 +41,7 @@ debug: Debug,
 /// Must not be copied, only used by reference, as its address
 /// is only meaningful as a pointer to the `Tokenizer`.
 stream: Stream,
+
 /// Public namespace field exposing the full source API.
 ///
 /// A pointer to this field may be passed around to indicate
@@ -76,131 +77,6 @@ pub inline fn initFull(src: []const u8) Tokenizer {
 }
 
 pub const BufferError = error{BufferUnderrun};
-
-pub const Context = enum {
-    /// * `.eof`
-    /// * `.angle_bracket_left`
-    /// * `.text_data`
-    /// * `.ampersand`
-    /// * `.pi_start`
-    /// * `.comment_start`
-    /// * `.invalid_comment_start_single_dash`
-    /// * `.cdata_start`
-    /// * `.invalid_cdata_start`
-    /// * `.cdata_end`
-    /// * `.dtd_start`
-    /// * `.invalid_dtd_start`
-    /// * `.invalid_angle_bracket_left_bang`
-    non_markup,
-
-    /// * `.eof`
-    /// * `.lparen`
-    /// * `.rparen`
-    /// * `.qmark`
-    /// * `.asterisk`
-    /// * `.plus`
-    /// * `.pipe`
-    /// * `.comma`
-    /// * `.hashtag`
-    /// * `.percent`
-    /// * `.quote_single`
-    /// * `.quote_double`
-    /// * `.square_bracket_left`
-    /// * `.square_bracket_right`
-    /// * `.angle_bracket_left`
-    /// * `.angle_bracket_right`
-    /// * `.pi_start`
-    /// * `.invalid_angle_bracket_left_bang`
-    /// * `.angle_bracket_left_bang_square_bracket_left`
-    /// * `.dtd_decl`
-    /// * `.invalid_comment_start_single_dash`
-    /// * `.comment_start`
-    /// * `.tag_whitespace`
-    /// * `.tag_token`
-    dtd,
-
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.slash`
-    /// * `.equals`
-    /// * `.quote_single`
-    /// * `.quote_double`
-    /// * `.angle_bracket_right`
-    /// * `.tag_whitespace`
-    /// * `.tag_token`
-    element_tag,
-
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.text_data`
-    /// * `.invalid_comment_dash_dash`
-    /// * `.invalid_comment_end_triple_dash`
-    /// * `.comment_end`
-    comment,
-
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.text_data`
-    /// * `.pi_end`
-    pi,
-
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.text_data`
-    /// * `.cdata_end`
-    cdata,
-
-    /// Should be used for both system literals and pubid literals, single quoted.
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.quote_single`
-    /// * `.text_data`
-    system_literal_quote_single,
-    /// Should be used for both system literals and pubid literals, single quoted.
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.quote_double`
-    /// * `.text_data`
-    system_literal_quote_double,
-
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.quote_single`
-    /// * `.ampersand`
-    /// * `.angle_bracket_left`
-    /// * `.text_data`
-    attribute_value_quote_single,
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.quote_double`
-    /// * `.ampersand`
-    /// * `.angle_bracket_left`
-    /// * `.text_data`
-    attribute_value_quote_double,
-
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.quote_single`
-    /// * `.ampersand`
-    /// * `.percent`
-    /// * `.text_data`
-    entity_value_quote_single,
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.quote_double`
-    /// * `.ampersand`
-    /// * `.percent`
-    /// * `.text_data`
-    entity_value_quote_double,
-
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.hashtag`
-    /// * `.tag_token`
-    /// * `.invalid_reference_end`
-    /// * `.semicolon`
-    reference,
-};
 
 pub const Stream = struct {
     pub inline fn asTokenizer(stream: *Stream) *Tokenizer {
@@ -274,6 +150,131 @@ pub const Full = struct {
             },
         }
     }
+};
+
+pub const Context = enum {
+    /// * `.eof`
+    /// * `.angle_bracket_left`
+    /// * `.text_data`
+    /// * `.ampersand`
+    /// * `.pi_start`
+    /// * `.comment_start`
+    /// * `.invalid_comment_start_single_dash`
+    /// * `.cdata_start`
+    /// * `.invalid_cdata_start`
+    /// * `.cdata_end`
+    /// * `.dtd_start`
+    /// * `.invalid_dtd_start`
+    /// * `.invalid_angle_bracket_left_bang`
+    non_markup,
+
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.text_data`
+    /// * `.cdata_end`
+    cdata,
+
+    /// * `.eof`
+    /// * `.lparen`
+    /// * `.rparen`
+    /// * `.qmark`
+    /// * `.asterisk`
+    /// * `.plus`
+    /// * `.pipe`
+    /// * `.comma`
+    /// * `.hashtag`
+    /// * `.percent`
+    /// * `.quote_single`
+    /// * `.quote_double`
+    /// * `.square_bracket_left`
+    /// * `.square_bracket_right`
+    /// * `.angle_bracket_left`
+    /// * `.angle_bracket_right`
+    /// * `.pi_start`
+    /// * `.invalid_angle_bracket_left_bang`
+    /// * `.angle_bracket_left_bang_square_bracket_left`
+    /// * `.dtd_decl`
+    /// * `.invalid_comment_start_single_dash`
+    /// * `.comment_start`
+    /// * `.tag_whitespace`
+    /// * `.tag_token`
+    dtd,
+
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.slash`
+    /// * `.equals`
+    /// * `.quote_single`
+    /// * `.quote_double`
+    /// * `.angle_bracket_right`
+    /// * `.tag_whitespace`
+    /// * `.tag_token`
+    element_tag,
+
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.text_data`
+    /// * `.invalid_comment_dash_dash`
+    /// * `.invalid_comment_end_triple_dash`
+    /// * `.comment_end`
+    comment,
+
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.text_data`
+    /// * `.pi_end`
+    pi,
+
+    /// Should be used for both system literals and pubid literals, single quoted.
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.quote_single`
+    /// * `.text_data`
+    system_literal_quote_single,
+    /// Should be used for both system literals and pubid literals, single quoted.
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.quote_double`
+    /// * `.text_data`
+    system_literal_quote_double,
+
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.quote_single`
+    /// * `.ampersand`
+    /// * `.angle_bracket_left`
+    /// * `.text_data`
+    attribute_value_quote_single,
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.quote_double`
+    /// * `.ampersand`
+    /// * `.angle_bracket_left`
+    /// * `.text_data`
+    attribute_value_quote_double,
+
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.quote_single`
+    /// * `.ampersand`
+    /// * `.percent`
+    /// * `.text_data`
+    entity_value_quote_single,
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.quote_double`
+    /// * `.ampersand`
+    /// * `.percent`
+    /// * `.text_data`
+    entity_value_quote_double,
+
+    /// Possible token types are:
+    /// * `.eof`
+    /// * `.hashtag`
+    /// * `.tag_token`
+    /// * `.invalid_reference_end`
+    /// * `.semicolon`
+    reference,
 };
 
 pub const TokenType = enum(u8) {
@@ -612,9 +613,9 @@ const Literal = enum {
     }
 };
 
-fn nextTypeOrSrcImpl(
+inline fn nextTypeOrSrcImpl(
     tokenizer: *Tokenizer,
-    comptime context: Context,
+    context: Context,
     comptime ret_type: next_helper.ReturnType,
 ) ret_type.Type() {
     const ret_kind = comptime ret_type.kind();
@@ -866,6 +867,47 @@ fn nextTypeOrSrcImpl(
                     tokenizer.state = .blank;
                     break null;
                 },
+            },
+
+            else => unreachable,
+        },
+
+        .cdata => switch (tokenizer.state) {
+            .eof => break eof_result,
+
+            .blank => switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .eof;
+                    }
+                    if (src[tokenizer.index] != ']') {
+                        break .text_data;
+                    }
+                    tokenizer.state = .@"]";
+                    tokenizer.index += 1;
+                    continue;
+                },
+                .src => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break null;
+                    }
+                    const str_start = tokenizer.index;
+                    const str_end = std.mem.indexOfScalarPos(u8, src, tokenizer.index, ']') orelse src.len;
+                    tokenizer.index = str_end;
+                    if (str_start != str_end) {
+                        break next_helper.rangeInit(str_start, str_end);
+                    }
+                    tokenizer.state = .@"]";
+                    tokenizer.index += 1;
+                    continue;
+                },
+            },
+
+            inline .@"]", .@"]]", .@"]]]" => |state| switch (next_helper.handlePossibleCdataEnd(tokenizer, state, ret_type)) {
+                .@"continue" => continue,
+                .@"return" => |result| break result,
             },
 
             else => unreachable,
@@ -1257,46 +1299,6 @@ fn nextTypeOrSrcImpl(
 
             else => unreachable,
         },
-        .cdata => switch (tokenizer.state) {
-            .eof => break eof_result,
-
-            .blank => switch (ret_kind) {
-                .type => {
-                    if (tokenizer.index == src.len) {
-                        tokenizer.state = .eof;
-                        break .eof;
-                    }
-                    if (src[tokenizer.index] != ']') {
-                        break .text_data;
-                    }
-                    tokenizer.state = .@"]";
-                    tokenizer.index += 1;
-                    continue;
-                },
-                .src => {
-                    if (tokenizer.index == src.len) {
-                        tokenizer.state = .eof;
-                        break null;
-                    }
-                    const str_start = tokenizer.index;
-                    const str_end = std.mem.indexOfScalarPos(u8, src, tokenizer.index, ']') orelse src.len;
-                    tokenizer.index = str_end;
-                    if (str_start != str_end) {
-                        break next_helper.rangeInit(str_start, str_end);
-                    }
-                    tokenizer.state = .@"]";
-                    tokenizer.index += 1;
-                    continue;
-                },
-            },
-
-            inline .@"]", .@"]]", .@"]]]" => |state| switch (next_helper.handlePossibleCdataEnd(tokenizer, state, ret_type)) {
-                .@"continue" => continue,
-                .@"return" => |result| break result,
-            },
-
-            else => unreachable,
-        },
 
         .system_literal_quote_single,
         .system_literal_quote_double,
@@ -1353,7 +1355,7 @@ fn nextTypeOrSrcImpl(
 
                     const matching_quote_char: u8, //
                     const matching_quote_type: TokenType //
-                    = comptime switch (tag) {
+                    = switch (tag) {
                         .attribute_value_quote_single, .entity_value_quote_single => .{ '\'', .quote_single },
                         .attribute_value_quote_double, .entity_value_quote_double => .{ '\"', .quote_double },
                         else => unreachable,
@@ -1385,7 +1387,7 @@ fn nextTypeOrSrcImpl(
                 },
                 .src => {
                     if (tokenizer.index == src.len) break null;
-                    const matching_quote_char: u8 = comptime switch (tag) {
+                    const matching_quote_char: u8 = switch (tag) {
                         .attribute_value_quote_single, .entity_value_quote_single => '\'',
                         .attribute_value_quote_double, .entity_value_quote_double => '\"',
                         else => unreachable,
@@ -1501,41 +1503,41 @@ const next_helper = struct {
     };
 
     fn handlePossibleCdataEnd(
-        _tokenizer: *Tokenizer,
+        tokenizer: *Tokenizer,
         comptime state: State,
         comptime ret_type: ReturnType,
     ) union(enum) { @"continue", @"return": ret_type.Type() } {
-        const src = _tokenizer.src;
+        const src = tokenizer.src;
         return switch (state) {
             .@"]" => switch (ret_type.kind()) {
                 .type => {
-                    if (_tokenizer.index == src.len) return .{ .@"return" = .text_data };
-                    if (src[_tokenizer.index] != ']') return .{ .@"return" = .text_data };
-                    _tokenizer.state = .@"]]";
-                    _tokenizer.index += 1;
+                    if (tokenizer.index == src.len) return .{ .@"return" = .text_data };
+                    if (src[tokenizer.index] != ']') return .{ .@"return" = .text_data };
+                    tokenizer.state = .@"]]";
+                    tokenizer.index += 1;
                     return .@"continue";
                 },
                 .src => {
-                    if (_tokenizer.index == src.len) {
-                        _tokenizer.state = .eof;
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
                         return .{ .@"return" = literalInit(.@"]") };
                     }
-                    if (src[_tokenizer.index] != ']') {
-                        _tokenizer.state = .blank;
+                    if (src[tokenizer.index] != ']') {
+                        tokenizer.state = .blank;
                         return .{ .@"return" = literalInit(.@"]") };
                     }
-                    _tokenizer.state = .@"]]";
-                    _tokenizer.index += 1;
+                    tokenizer.state = .@"]]";
+                    tokenizer.index += 1;
                     return .@"continue";
                 },
             },
             .@"]]" => switch (ret_type.kind()) {
                 .type => {
-                    if (_tokenizer.index == src.len) return .{ .@"return" = .text_data };
-                    switch (src[_tokenizer.index]) {
+                    if (tokenizer.index == src.len) return .{ .@"return" = .text_data };
+                    switch (src[tokenizer.index]) {
                         '>' => {
-                            _tokenizer.state = .blank;
-                            _tokenizer.index += 1;
+                            tokenizer.state = .blank;
+                            tokenizer.index += 1;
                             return .{ .@"return" = .cdata_end };
                         },
                         ']' => return .{ .@"return" = .text_data },
@@ -1543,17 +1545,17 @@ const next_helper = struct {
                     }
                 },
                 .src => {
-                    if (_tokenizer.index == src.len) {
-                        _tokenizer.state = .eof;
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
                         return .{ .@"return" = literalInit(.@"]]") };
                     }
-                    switch (src[_tokenizer.index]) {
+                    switch (src[tokenizer.index]) {
                         '>' => return .{ .@"return" = null },
                         ']' => {
                             const prev_str = "]]";
-                            if (_tokenizer.index >= prev_str.len) {
+                            if (tokenizer.index >= prev_str.len) {
                                 if (std.debug.runtime_safety) {
-                                    const prev_str_start = _tokenizer.index - prev_str.len;
+                                    const prev_str_start = tokenizer.index - prev_str.len;
                                     assert(std.mem.eql(u8, prev_str, src[prev_str_start..][0..prev_str.len]));
                                 }
                                 // If the index is greater than the length of ']]', that means we have not been fed
@@ -1569,15 +1571,15 @@ const next_helper = struct {
                                 // after `feedEof`.
                                 // TODO: measure if limiting this to when `eof_specified` is true is worth the branch
                                 // to avoid the future branch switch from `.@"]]]"` to `.@"]]"`.
-                                _tokenizer.state = .@"]]]";
-                                _tokenizer.index -= 1; // we move backwards one, so that the previous character is the first ']'.
+                                tokenizer.state = .@"]]]";
+                                tokenizer.index -= 1; // we move backwards one, so that the previous character is the first ']'.
                             } else {
-                                _tokenizer.index += 1;
+                                tokenizer.index += 1;
                             }
                             return .{ .@"return" = literalInit(.@"]") };
                         },
                         else => {
-                            _tokenizer.state = .blank;
+                            tokenizer.state = .blank;
                             return .{ .@"return" = literalInit(.@"]]") };
                         },
                     }
@@ -1588,9 +1590,9 @@ const next_helper = struct {
                 .src => {
                     // currently the index is just in front of the first ']', indexing the second ']',
                     // so we move forwards two characters, to be just in front of the third ']'.
-                    assert(std.mem.eql(u8, src[_tokenizer.index - 1 ..][0.."]]]".len], "]]]"));
-                    _tokenizer.state = .@"]]";
-                    _tokenizer.index += 2;
+                    assert(std.mem.eql(u8, src[tokenizer.index - 1 ..][0.."]]]".len], "]]]"));
+                    tokenizer.state = .@"]]";
+                    tokenizer.index += 2;
                     return .@"continue";
                 },
             },

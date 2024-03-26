@@ -1,3 +1,7 @@
+//! Facilitates the scanning of elements in the document body.
+//! Operates on a tokenizer which has tokenized past the prolog,
+//! and which has returned the first left angle bracket token.
+
 const Scanner = @This();
 state: State = .@"<",
 
