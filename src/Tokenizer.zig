@@ -269,7 +269,7 @@ pub const Context = enum {
     entity_value_quote_double,
 };
 
-pub const TokenType = enum(u8) {
+pub const TokenType = enum {
     /// A run of any non-markup characters, including whitespace.
     /// This will never be returned consecutively.
     text_data,
@@ -619,12 +619,16 @@ inline fn nextTypeOrSrcImplDebugChecks(
 
     if (comptime std.debug.runtime_safety) switch (ret_kind) {
         .type => {
-            tokenizer.debug.expected_context = context;
             assert(!tokenizer.debug.src_queued_up);
+            if (tokenizer.debug.expected_context) |expected_context| {
+                assert(context == expected_context);
+            } else {
+                tokenizer.debug.expected_context = context;
+            }
         },
         .src => {
-            assert(context == tokenizer.debug.expected_context.?);
             assert(tokenizer.debug.src_queued_up);
+            assert(context == tokenizer.debug.expected_context.?);
         },
     };
 
@@ -643,6 +647,9 @@ inline fn nextTypeOrSrcImplDebugChecks(
     if (std.debug.runtime_safety) switch (ret_kind) {
         .type => {
             tokenizer.debug.src_queued_up = result.hasSrc();
+            if (!tokenizer.debug.src_queued_up) {
+                tokenizer.debug.expected_context = null;
+            }
         },
         .src => if (result == null) {
             tokenizer.debug.expected_context = null;

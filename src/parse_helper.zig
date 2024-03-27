@@ -5,9 +5,13 @@ const iksemel = @import("iksemel.zig");
 const Tokenizer = iksemel.Tokenizer;
 
 pub fn MaybeBufferedReader(comptime MaybeReader: ?type) type {
+    const Reader = MaybeReader orelse return struct {
+        reader: void = {},
+        read_buffer: void = {},
+    };
     return struct {
-        reader: (MaybeReader orelse void),
-        read_buffer: if (MaybeReader != null) []u8 else void,
+        reader: Reader,
+        read_buffer: []u8,
     };
 }
 

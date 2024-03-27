@@ -2,94 +2,65 @@
 //! Operates on a tokenizer which has tokenized past the prolog,
 //! and which has returned the first left angle bracket token.
 
-const Scanner = @This();
-state: State,
+pub inline fn fullScanner() Scanner(null) {
+    return .{
+        .reader = {},
+        .read_buffer = {},
+    };
+}
 
-/// Should never be directly copied by value.
-/// This is a namespace field for the full source API.
-/// A pointer to this field can be used as a means of communicating
-/// intent to exclusively use the full source API.
-full: Full = .{},
-/// Should never be directly copied by value.
-/// This is a namespace field for the stream source API.
-/// A pointer to this field can be used as a means of communicating
-/// intent to exclusively use the stream source API.
-stream: Stream = .{},
+pub inline fn streamScanner(reader: anytype, read_buffer: []u8) Scanner(@TypeOf(reader)) {
+    return .{
+        .reader = reader,
+        .read_buffer = read_buffer,
+    };
+}
 
-/// Used to initialise the scanner.
-pub const init: Scanner = .{
-    .state = .@"<",
-};
+pub fn Scanner(comptime MaybeReader: ?type) type {
+    return struct {
+        reader: (MaybeReader orelse void),
+        read_buffer: if (MaybeReader != null) []u8 else void,
+        state: State = .@"<",
+        const Self = @This();
 
-pub const Full = struct {
-    pub inline fn asScanner(full: *Scanner.Full) *Scanner {
-        return @fieldParentPtr(Scanner, "full", full);
-    }
+        pub const Error = ScanError || if (MaybeReader) |Reader| Reader.Error else error{};
+        pub const TokenizerAPI = if (MaybeReader != null) Tokenizer.Stream else Tokenizer.Full;
+        pub const Src = if (MaybeReader != null) []const u8 else Tokenizer.Range;
 
-    pub fn nextMarker(
-        full: *Scanner.Full,
-        /// Full source tokenizer.
-        tokenizer: *Tokenizer.Full,
-    ) ScanError!ScanMarker {
-        return nextMarkerOrSegmentImpl(
-            full.asScanner(),
-            tokenizer.asTokenizer(),
-            null,
-            .{ .reader = {}, .read_buffer = {} },
-            .marker,
-        );
-    }
+        pub fn nextMarker(
+            scanner: *Self,
+            tokenizer: *TokenizerAPI,
+        ) Error!ScanMarker {
+            return @errorCast(nextMarkerOrSegmentImpl(
+                MaybeReader != null,
+                &scanner.state,
+                scanner.erasedReader(),
+                scanner.read_buffer,
+                tokenizer.asTokenizer(),
+                .marker,
+            ));
+        }
 
-    pub fn nextSrc(
-        full: *Scanner.Full,
-        /// Full source tokenizer.
-        tokenizer: *Tokenizer.Full,
-    ) ScanError!?Tokenizer.Range {
-        return nextMarkerOrSegmentImpl(
-            full.asScanner(),
-            tokenizer.asTokenizer(),
-            null,
-            .{ .reader = {}, .read_buffer = {} },
-            .src,
-        );
-    }
-};
-pub const Stream = struct {
-    pub inline fn asScanner(stream: *Scanner.Stream) *Scanner {
-        return @fieldParentPtr(Scanner, "stream", stream);
-    }
-    pub fn nextMarker(
-        stream: *Scanner.Stream,
-        /// Streaming source tokenizer.
-        tokenizer: *Tokenizer.Stream,
-        reader: anytype,
-        read_buffer: []u8,
-    ) (@TypeOf(reader).Error || ScanError)!ScanMarker {
-        return nextMarkerOrSegmentImpl(
-            stream.asScanner(),
-            tokenizer.asTokenizer(),
-            @TypeOf(reader),
-            .{ .reader = reader, .read_buffer = read_buffer },
-            .marker,
-        );
-    }
+        pub fn nextSrc(
+            scanner: *Self,
+            tokenizer: *TokenizerAPI,
+        ) Error!?Src {
+            return @errorCast(nextMarkerOrSegmentImpl(
+                MaybeReader != null,
+                &scanner.state,
+                scanner.erasedReader(),
+                scanner.read_buffer,
+                tokenizer.asTokenizer(),
+                .src,
+            ));
+        }
 
-    pub fn nextSrc(
-        stream: *Scanner.Stream,
-        /// Streaming source tokenizer.
-        tokenizer: *Tokenizer.Stream,
-        reader: anytype,
-        read_buffer: []u8,
-    ) (@TypeOf(reader).Error || ScanError)!?[]const u8 {
-        return nextMarkerOrSegmentImpl(
-            stream.asScanner(),
-            tokenizer.asTokenizer(),
-            @TypeOf(reader),
-            .{ .reader = reader, .read_buffer = read_buffer },
-            .src,
-        );
-    }
-};
+        inline fn erasedReader(scanner: *Self) if (MaybeReader != null) std.io.AnyReader else void {
+            if (MaybeReader == null) return;
+            return scanner.reader.any();
+        }
+    };
+}
 
 pub const ScanError = error{
     UnexpectedToken,
@@ -122,6 +93,7 @@ pub const ScanMarker = enum {
     /// Secondly, `nextMarker` will return one of:
     /// * `.text`
     /// * `.reference`
+    /// * `.char_reference`
     /// * `.attribute_end`
     /// If it's anything other than `.attribute_end` (`.text` or `.reference`),
     /// repeat the second step here.
@@ -169,21 +141,28 @@ const State = enum {
 };
 
 fn nextMarkerOrSegmentImpl(
-    scanner: *Scanner,
+    comptime from_reader: bool,
+    state: *State,
+    reader: if (from_reader) std.io.AnyReader else void,
+    read_buffer: if (from_reader) []u8 else void,
     tokenizer: *Tokenizer,
-    comptime MaybeReader: ?type,
-    mbr: parse_helper.MaybeBufferedReader(MaybeReader),
     comptime ret_type: enum { marker, src },
 ) !switch (ret_type) {
     .marker => ScanMarker,
-    .src => ?if (MaybeReader != null) []const u8 else Tokenizer.Range,
+    .src => ?if (from_reader) []const u8 else Tokenizer.Range,
 } {
-    return while (true) break switch (scanner.state) {
+    const MaybeReader: ?type = if (from_reader) std.io.AnyReader else null;
+    const mbr: parse_helper.MaybeBufferedReader(MaybeReader) = .{
+        .reader = reader,
+        .read_buffer = read_buffer,
+    };
+
+    return while (true) break switch (state.*) {
         .non_markup => switch (ret_type) {
             .marker => switch (try parse_helper.nextTokenType(tokenizer, .non_markup, MaybeReader, mbr)) {
                 .eof => break .eof,
                 .text_data => {
-                    scanner.state = .text_data;
+                    state.* = .text_data;
                     break .text;
                 },
                 .cdata_start => {
@@ -193,19 +172,19 @@ fn nextMarkerOrSegmentImpl(
                         .cdata_end => continue,
                         .text_data => {},
                     }
-                    scanner.state = .cdata;
+                    state.* = .cdata;
                     break .text;
                 },
                 .pi_start => {
-                    scanner.state = .pi;
+                    state.* = .pi;
                     continue;
                 },
                 .ampersand => {
-                    scanner.state = .ref;
+                    state.* = .ref;
                     continue;
                 },
                 .angle_bracket_left => {
-                    scanner.state = .@"<";
+                    state.* = .@"<";
                     continue;
                 },
                 .comment_start => switch (try parse_helper.handleCommentSkip(tokenizer, MaybeReader, mbr)) {
@@ -226,7 +205,7 @@ fn nextMarkerOrSegmentImpl(
                     else => unreachable,
 
                     .text_data => {
-                        scanner.state = .text_data;
+                        state.* = .text_data;
                         continue;
                     },
                     .cdata_start => {
@@ -236,14 +215,14 @@ fn nextMarkerOrSegmentImpl(
                             .cdata_end => continue,
                             .text_data => {},
                         }
-                        scanner.state = .cdata;
+                        state.* = .cdata;
                         continue;
                     },
 
-                    .eof => scanner.state = .non_markup,
-                    .pi_start => scanner.state = .pi,
-                    .angle_bracket_left => scanner.state = .@"<",
-                    .ampersand => scanner.state = .ref,
+                    .eof => state.* = .non_markup,
+                    .pi_start => state.* = .pi,
+                    .angle_bracket_left => state.* = .@"<",
+                    .ampersand => state.* = .ref,
                     .comment_start => switch (try parse_helper.handleCommentSkip(tokenizer, MaybeReader, mbr)) {
                         .normal_end => continue,
                         .invalid_end_triple_dash => return ScanError.UnexpectedToken,
@@ -269,11 +248,11 @@ fn nextMarkerOrSegmentImpl(
                     if (try parse_helper.nextTokenSegment(tokenizer, .non_markup, mbr.reader, mbr.read_buffer)) |segment| {
                         break segment;
                     }
-                    scanner.state = .maybe_continue_text;
+                    state.* = .maybe_continue_text;
                     continue;
                 } else {
                     const range = tokenizer.full.nextSrc(.non_markup);
-                    scanner.state = .maybe_continue_text;
+                    state.* = .maybe_continue_text;
                     break range;
                 }
             },
@@ -292,7 +271,7 @@ fn nextMarkerOrSegmentImpl(
                         .eof => return ScanError.UnexpectedEof,
                         .cdata_end => {},
                     }
-                    scanner.state = .maybe_continue_text;
+                    state.* = .maybe_continue_text;
                     continue;
                 } else {
                     const range = tokenizer.full.nextSrc(.cdata);
@@ -302,7 +281,7 @@ fn nextMarkerOrSegmentImpl(
                         .eof => return ScanError.UnexpectedEof,
                         .cdata_end => {},
                     }
-                    scanner.state = .maybe_continue_text;
+                    state.* = .maybe_continue_text;
                     break range;
                 }
             },
@@ -329,7 +308,7 @@ fn nextMarkerOrSegmentImpl(
                         .eof => return ScanError.UnexpectedEof,
                         .pi_end => {},
                     }
-                    scanner.state = .non_markup;
+                    state.* = .non_markup;
                     continue;
                 } else {
                     const range = tokenizer.full.nextSrc(.pi);
@@ -339,7 +318,7 @@ fn nextMarkerOrSegmentImpl(
                         .eof => return ScanError.UnexpectedEof,
                         .pi_end => {},
                     }
-                    scanner.state = .non_markup;
+                    state.* = .non_markup;
                     break range;
                 }
             },
@@ -370,12 +349,12 @@ fn nextMarkerOrSegmentImpl(
                         break segment;
                     }
                     try expectReferenceSemicolonAfterTagToken(tokenizer, MaybeReader, mbr);
-                    scanner.state = .non_markup;
+                    state.* = .non_markup;
                     continue;
                 } else {
                     const range = tokenizer.full.nextSrc(.reference);
                     try expectReferenceSemicolonAfterTagToken(tokenizer, MaybeReader, mbr);
-                    scanner.state = .non_markup;
+                    state.* = .non_markup;
                     break range;
                 }
             },
@@ -392,7 +371,7 @@ fn nextMarkerOrSegmentImpl(
                         .eof => return ScanError.UnexpectedEof,
                         .tag_token => {},
                     }
-                    scanner.state = .element_close_tag_start;
+                    state.* = .element_close_tag_start;
                     break .element_close;
                 },
                 .tag_token => break .element_open_start,
@@ -402,10 +381,10 @@ fn nextMarkerOrSegmentImpl(
                     if (try parse_helper.nextTokenSegment(tokenizer, .element_tag, mbr.reader, mbr.read_buffer)) |segment| {
                         break segment;
                     }
-                    scanner.state = .element_tag;
+                    state.* = .element_tag;
                     continue;
                 } else {
-                    scanner.state = .element_tag;
+                    state.* = .element_tag;
                     break tokenizer.full.nextSrc(.element_tag);
                 }
             },
@@ -426,7 +405,7 @@ fn nextMarkerOrSegmentImpl(
                         .eof => return ScanError.UnexpectedEof,
                         .angle_bracket_right => {},
                     }
-                    scanner.state = .non_markup;
+                    state.* = .non_markup;
                     continue;
                 } else {
                     const range = tokenizer.full.nextSrc(.element_tag);
@@ -435,7 +414,7 @@ fn nextMarkerOrSegmentImpl(
                         .eof => return ScanError.UnexpectedEof,
                         .angle_bracket_right => {},
                     }
-                    scanner.state = .non_markup;
+                    state.* = .non_markup;
                     break range;
                 }
             },
@@ -449,7 +428,7 @@ fn nextMarkerOrSegmentImpl(
                     .tag_whitespace => unreachable,
                     .angle_bracket_right => {},
                 }
-                scanner.state = .non_markup;
+                state.* = .non_markup;
                 continue;
             },
         },
@@ -475,15 +454,15 @@ fn nextMarkerOrSegmentImpl(
                             .eof => return ScanError.UnexpectedEof,
                             .angle_bracket_right => {},
                         }
-                        scanner.state = .non_markup;
+                        state.* = .non_markup;
                         break .element_open_end_inline_close;
                     },
                     .angle_bracket_right => {
-                        scanner.state = .non_markup;
+                        state.* = .non_markup;
                         break .element_open_end;
                     },
                     .tag_token => {
-                        scanner.state = .attribute_name_start;
+                        state.* = .attribute_name_start;
                         break .attribute_start;
                     },
                 }
@@ -496,10 +475,10 @@ fn nextMarkerOrSegmentImpl(
                     if (try parse_helper.nextTokenSegment(tokenizer, .element_tag, mbr.reader, mbr.read_buffer)) |segment| {
                         break segment;
                     }
-                    scanner.state = .attribute_name_end;
+                    state.* = .attribute_name_end;
                     continue;
                 } else {
-                    scanner.state = .attribute_name_end;
+                    state.* = .attribute_name_end;
                     break tokenizer.full.nextSrc(.element_tag);
                 }
             },
@@ -523,7 +502,7 @@ fn nextMarkerOrSegmentImpl(
                     .quote_double,
                     => |tt| comptime QuoteType.fromTokenType(tt).?,
                 };
-                scanner.state = switch (quote_type) {
+                state.* = switch (quote_type) {
                     .single => .attribute_value_type_sq,
                     .double => .attribute_value_type_dq,
                 };
@@ -547,7 +526,7 @@ fn nextMarkerOrSegmentImpl(
                         .angle_bracket_left => return ScanError.UnexpectedToken,
 
                         .quote_single, .quote_double => {
-                            scanner.state = .element_tag;
+                            state.* = .element_tag;
                             break .attribute_end;
                         },
                         .ampersand => {
@@ -566,14 +545,14 @@ fn nextMarkerOrSegmentImpl(
                                 },
                                 .tag_token => .reference,
                             };
-                            scanner.state = switch (quote_type) {
+                            state.* = switch (quote_type) {
                                 .single => .attribute_value_ref_sq,
                                 .double => .attribute_value_ref_dq,
                             };
                             break ref_kind;
                         },
                         .text_data => {
-                            scanner.state = switch (quote_type) {
+                            state.* = switch (quote_type) {
                                 .single => .attribute_value_text_sq,
                                 .double => .attribute_value_text_dq,
                             };
@@ -605,12 +584,12 @@ fn nextMarkerOrSegmentImpl(
                             break segment;
                         }
                         try expectReferenceSemicolonAfterTagToken(tokenizer, MaybeReader, mbr);
-                        scanner.state = type_state;
+                        state.* = type_state;
                         continue;
                     } else {
                         const range = tokenizer.full.nextSrc(.reference);
                         try expectReferenceSemicolonAfterTagToken(tokenizer, MaybeReader, mbr);
-                        scanner.state = type_state;
+                        state.* = type_state;
                         break range;
                     }
                 },
@@ -636,10 +615,10 @@ fn nextMarkerOrSegmentImpl(
                         if (try parse_helper.nextTokenSegment(tokenizer, quote_type.attributeValueCtx(), mbr.reader, mbr.read_buffer)) |segment| {
                             break segment;
                         }
-                        scanner.state = type_state;
+                        state.* = type_state;
                         continue;
                     } else {
-                        scanner.state = type_state;
+                        state.* = type_state;
                         break tokenizer.full.nextSrc(quote_type.attributeValueCtx());
                     }
                 },
@@ -663,65 +642,6 @@ fn expectReferenceSemicolonAfterTagToken(
     }
 }
 
-test {
-    if (true) return error.SkipZigTest;
-    const nextSrcStr = struct {
-        fn nextSrcStr(scanner: anytype) !?[]const u8 {
-            if (@TypeOf(scanner.mbr) != parse_helper.MaybeBufferedReader(null)) {
-                return scanner.nextSrc();
-            }
-            const maybe_segment = try scanner.nextSrc();
-            const segment = maybe_segment orelse return null;
-            return segment.toStr(scanner.tokenizer.src);
-        }
-    }.nextSrcStr;
-
-    var tokenizer = Tokenizer.initFull(
-        \\<foo bar= "baz&a;"> lorem ipsum&lt; </foo>
-    );
-    try std.testing.expectEqual(.angle_bracket_left, tokenizer.full.nextType(.non_markup));
-
-    var scanner: Scanner = .{};
-
-    try std.testing.expectEqual(.element_open_start, scanner.full.nextMarker(&tokenizer));
-    try std.testing.expectEqualDeep("foo", nextSrcStr(&scanner));
-    try std.testing.expectEqualDeep(null, nextSrcStr(&scanner));
-
-    try std.testing.expectEqual(.attribute_start, scanner.full.nextMarker(&tokenizer));
-
-    try std.testing.expectEqualDeep("bar", nextSrcStr(&scanner));
-    try std.testing.expectEqualDeep(null, nextSrcStr(&scanner));
-
-    try std.testing.expectEqual(.text, scanner.full.nextMarker(&tokenizer));
-    try std.testing.expectEqualDeep("baz", nextSrcStr(&scanner));
-    try std.testing.expectEqualDeep(null, nextSrcStr(&scanner));
-
-    try std.testing.expectEqual(.reference, scanner.full.nextMarker(&tokenizer));
-    try std.testing.expectEqualDeep("a", nextSrcStr(&scanner));
-    try std.testing.expectEqualDeep(null, nextSrcStr(&scanner));
-
-    try std.testing.expectEqual(.attribute_end, scanner.full.nextMarker(&tokenizer));
-    try std.testing.expectEqual(.element_open_end, scanner.full.nextMarker(&tokenizer));
-
-    try std.testing.expectEqual(.text, scanner.full.nextMarker(&tokenizer));
-    try std.testing.expectEqualDeep(" lorem ipsum", nextSrcStr(&scanner));
-    try std.testing.expectEqualDeep(null, nextSrcStr(&scanner));
-
-    try std.testing.expectEqual(.reference, scanner.full.nextMarker(&tokenizer));
-    try std.testing.expectEqualDeep("lt", nextSrcStr(&scanner));
-    try std.testing.expectEqualDeep(null, nextSrcStr(&scanner));
-
-    try std.testing.expectEqual(.text, scanner.full.nextMarker(&tokenizer));
-    try std.testing.expectEqualDeep(" ", nextSrcStr(&scanner));
-    try std.testing.expectEqualDeep(null, nextSrcStr(&scanner));
-
-    try std.testing.expectEqual(.element_close, scanner.full.nextMarker(&tokenizer));
-    try std.testing.expectEqualDeep("foo", nextSrcStr(&scanner));
-    try std.testing.expectEqualDeep(null, nextSrcStr(&scanner));
-
-    try std.testing.expectEqual(.eof, scanner.full.nextMarker(&tokenizer));
-}
-
 const ScannerTestItem = union(enum) {
     marker: ScanMarker,
     str: []const u8,
@@ -743,13 +663,13 @@ fn testScanner(
             var fbs = std.io.fixedBufferStream(src);
             var tokenizer = Tokenizer.initStream();
 
-            var scanner: Scanner = Scanner.init;
+            var scanner = streamScanner(fbs.reader(), read_buffer);
             for (expected_items, 0..) |expected_item, i| {
                 errdefer std.log.err("Error occurred on item {d}", .{i});
                 switch (expected_item) {
-                    .marker => |marker| try std.testing.expectEqual(marker, scanner.stream.nextMarker(&tokenizer.stream, fbs.reader(), read_buffer)),
+                    .marker => |marker| try std.testing.expectEqual(marker, scanner.nextMarker(&tokenizer.stream)),
                     .str => |str| {
-                        while (try scanner.stream.nextSrc(&tokenizer.stream, fbs.reader(), read_buffer)) |segment| {
+                        while (try scanner.nextSrc(&tokenizer.stream)) |segment| {
                             try str_buffer.appendSlice(segment);
                         }
                         try std.testing.expectEqualStrings(str, str_buffer.items);
@@ -757,19 +677,19 @@ fn testScanner(
                     },
                 }
             }
-            try std.testing.expectEqual(.eof, scanner.stream.nextMarker(&tokenizer.stream, fbs.reader(), read_buffer));
+            try std.testing.expectEqual(.eof, scanner.nextMarker(&tokenizer.stream));
         }
     }
 
     var tokenizer = Tokenizer.initFull(src);
 
-    var scanner: Scanner = Scanner.init;
+    var scanner = fullScanner();
     for (expected_items, 0..) |expected_item, i| {
         errdefer std.log.err("Error occurred on item {d}", .{i});
         switch (expected_item) {
-            .marker => |marker| try std.testing.expectEqual(marker, scanner.full.nextMarker(&tokenizer.full)),
+            .marker => |marker| try std.testing.expectEqual(marker, scanner.nextMarker(&tokenizer.full)),
             .str => |str| {
-                while (try scanner.full.nextSrc(&tokenizer.full)) |segment| {
+                while (try scanner.nextSrc(&tokenizer.full)) |segment| {
                     try str_buffer.appendSlice(segment.toStr(src));
                 }
                 try std.testing.expectEqualStrings(str, str_buffer.items);
@@ -777,7 +697,7 @@ fn testScanner(
             },
         }
     }
-    try std.testing.expectEqual(.eof, scanner.full.nextMarker(&tokenizer.full));
+    try std.testing.expectEqual(.eof, scanner.nextMarker(&tokenizer.full));
 }
 
 test "1" {
