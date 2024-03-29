@@ -41,9 +41,12 @@ pub fn nextTokenType(
 pub fn nextTokenSegment(
     tokenizer: *Tokenizer,
     context: Tokenizer.Context,
-    reader: anytype,
-    read_buffer: []u8,
-) !?[]const u8 {
+    comptime MaybeReader: ?type,
+    mbr: MaybeBufferedReader(MaybeReader),
+) !?if (MaybeReader != null) []const u8 else Tokenizer.Range {
+    if (MaybeReader == null) return tokenizer.full.nextSrc(context);
+    const reader = mbr.reader;
+    const read_buffer = mbr.read_buffer;
     return tokenizer.stream.nextSrc(context) catch while (true) {
         const bytes_read = try reader.read(read_buffer);
         if (bytes_read != 0) {
@@ -124,13 +127,13 @@ pub fn skipWhitespaceTokenSrc(
 ) !enum { all_whitespace, non_whitespace } {
     var any_non_whitespace = false;
     if (MaybeReader != null) {
-        while (try nextTokenSegment(tokenizer, context, mbr.reader, mbr.read_buffer)) |str| {
+        while (try nextTokenSegment(tokenizer, context, MaybeReader, mbr)) |str| {
             if (std.mem.indexOfNone(u8, str, Tokenizer.whitespace_set) == null) continue;
             any_non_whitespace = false;
             // don't break, we need to consume the whole token source
         }
     } else {
-        const range = tokenizer.full.nextSrc(context);
+        const range = tokenizer.full.nextSrcComplete(context);
         any_non_whitespace = std.mem.indexOfNone(u8, range.toStr(tokenizer.src), Tokenizer.whitespace_set) != null;
     }
     return if (any_non_whitespace) .non_whitespace else .all_whitespace;
@@ -200,11 +203,7 @@ pub fn skipTokenStr(
     comptime MaybeReader: ?type,
     mbr: MaybeBufferedReader(MaybeReader),
 ) (if (MaybeReader) |Reader| Reader.Error else error{})!void {
-    if (MaybeReader == null) {
-        _ = tokenizer.full.nextSrc(context);
-        return;
-    }
-    while (try nextTokenSegment(tokenizer, context, mbr.reader, mbr.read_buffer)) |_| {}
+    while (try nextTokenSegment(tokenizer, context, MaybeReader, mbr)) |_| {}
 }
 
 pub const CommentSkipResult = enum {

@@ -76,12 +76,18 @@ pub inline fn initFull(src: []const u8) Tokenizer {
     return tokenizer;
 }
 
-pub const BufferError = error{BufferUnderrun};
+/// Returns the range into `tokenizer.src` representing the remaining source
+/// string which hasn't been returned as a token type or as a string.
+pub inline fn remainingSrc(tokenizer: Tokenizer) Range {
+    return .{ .start = tokenizer.index, .end = tokenizer.src.len };
+}
 
 pub const Stream = struct {
     pub inline fn asTokenizer(stream: *Stream) *Tokenizer {
         return @fieldParentPtr(Tokenizer, "stream", stream);
     }
+
+    pub const BufferError = error{BufferUnderrun};
 
     pub fn feedInput(stream: *Tokenizer.Stream, src: []const u8) void {
         const tokenizer = stream.asTokenizer();
@@ -126,21 +132,22 @@ pub const Full = struct {
         return tokenizer.nextTypeOrSrcImpl(context, .type_no_underrun);
     }
 
-    pub fn nextSrc(full: *Tokenizer.Full, context: Context) Range {
+    pub fn nextSrc(full: *Tokenizer.Full, context: Context) ?Range {
         const tokenizer = full.asTokenizer();
-        var full_range: Range = switch (tokenizer.nextTypeOrSrcImpl(context, .src_no_underrun).?) {
+        const tok_src: TokenSrc = tokenizer.nextTypeOrSrcImpl(context, .src_no_underrun) orelse return null;
+        return switch (tok_src) {
             .range => |range| range,
             .literal => |literal| literal.toRange(tokenizer),
         };
-        while (tokenizer.nextTypeOrSrcImpl(context, .src_no_underrun)) |tok_src| {
-            const range: Range = switch (tok_src) {
-                .range => |range| range,
-                .literal => |literal| literal.toRange(tokenizer),
-            };
-            assert(full_range.end == range.start);
-            full_range.end = range.end;
+    }
+
+    pub fn nextSrcComplete(full: *Tokenizer.Full, context: Context) Range {
+        var range: Range = full.nextSrc(context).?;
+        while (full.nextSrc(context)) |subsequent_range| {
+            assert(range.end == subsequent_range.start);
+            range.end = subsequent_range.end;
         }
-        return full_range;
+        return range;
     }
 };
 
@@ -919,101 +926,97 @@ fn nextTypeOrSrcImplUnchecked(
         },
 
         ctxState(.non_markup, .@"]"),
-        ctxState(.non_markup, .@"]]"),
-        ctxState(.non_markup, .@"]]]"),
-
         ctxState(.cdata, .@"]"),
+        => switch (ret_type.kind()) {
+            .type => {
+                if (tokenizer.index == src.len) break .text_data;
+                if (src[tokenizer.index] != ']') break .text_data;
+                tokenizer.state = .@"]]";
+                tokenizer.index += 1;
+                continue;
+            },
+            .src => {
+                if (tokenizer.index == src.len) {
+                    tokenizer.state = .eof;
+                    break next_helper.literalInit(.@"]");
+                }
+                if (src[tokenizer.index] != ']') {
+                    tokenizer.state = .blank;
+                    break next_helper.literalInit(.@"]");
+                }
+                tokenizer.state = .@"]]";
+                tokenizer.index += 1;
+                continue;
+            },
+        },
+        ctxState(.non_markup, .@"]]"),
         ctxState(.cdata, .@"]]"),
-        ctxState(.cdata, .@"]]]"),
-        => |ctx_state| switch (ctx_state.bits().state) {
-            .@"]" => switch (ret_type.kind()) {
-                .type => {
-                    if (tokenizer.index == src.len) break .text_data;
-                    if (src[tokenizer.index] != ']') break .text_data;
-                    tokenizer.state = .@"]]";
-                    tokenizer.index += 1;
-                    continue;
-                },
-                .src => {
-                    if (tokenizer.index == src.len) {
-                        tokenizer.state = .eof;
-                        break next_helper.literalInit(.@"]");
-                    }
-                    if (src[tokenizer.index] != ']') {
+        => switch (ret_type.kind()) {
+            .type => {
+                if (tokenizer.index == src.len) break .text_data;
+                switch (src[tokenizer.index]) {
+                    '>' => {
                         tokenizer.state = .blank;
-                        break next_helper.literalInit(.@"]");
-                    }
-                    tokenizer.state = .@"]]";
-                    tokenizer.index += 1;
-                    continue;
-                },
+                        tokenizer.index += 1;
+                        break .cdata_end;
+                    },
+                    ']' => break .text_data,
+                    else => break .text_data,
+                }
             },
-            .@"]]" => switch (ret_type.kind()) {
-                .type => {
-                    if (tokenizer.index == src.len) break .text_data;
-                    switch (src[tokenizer.index]) {
-                        '>' => {
-                            tokenizer.state = .blank;
-                            tokenizer.index += 1;
-                            break .cdata_end;
-                        },
-                        ']' => break .text_data,
-                        else => break .text_data,
-                    }
-                },
-                .src => {
-                    if (tokenizer.index == src.len) {
-                        tokenizer.state = .eof;
-                        break next_helper.literalInit(.@"]]");
-                    }
-                    switch (src[tokenizer.index]) {
-                        '>' => break null,
-                        ']' => {
-                            const prev_str = "]]";
-                            if (tokenizer.index >= prev_str.len) {
-                                if (std.debug.runtime_safety) {
-                                    const prev_str_start = tokenizer.index - prev_str.len;
-                                    assert(std.mem.eql(u8, prev_str, src[prev_str_start..][0..prev_str.len]));
-                                }
-                                // If the index is greater than the length of ']]', that means we have not been fed
-                                // any input since encountering the first ']', meaning that `src[index - 2][0..3]` is
-                                // equal to "]]]". If we're in streaming mode, this doesn't matter, as it is not legal
-                                // to convert the `Literal` into a range; however, if we're in non-streaming mode, we
-                                // must leave the tokenizer in a state which allows the caller to convert the returned
-                                // `Literal` value into a range which accurately points at the first ']' character, and
-                                // then return back to this state to continue checking if the ']]' sequence is followed
-                                // by a '>' to form ']]>'.
-                                // NOTE: we cannot limit this to `assert_eof_specified`, as the `*Stream` API could be
-                                // used either equivalently to the `*NoUnderrun` API or during transition to the latter
-                                // after `feedEof`.
-                                // TODO: measure if limiting this to when `eof_specified` is true is worth the branch
-                                // to avoid the future branch switch from `.@"]]]"` to `.@"]]"`.
-                                tokenizer.state = .@"]]]";
-                                tokenizer.index -= 1; // we move backwards one, so that the previous character is the first ']'.
-                            } else {
-                                tokenizer.index += 1;
+            .src => {
+                if (tokenizer.index == src.len) {
+                    tokenizer.state = .eof;
+                    break next_helper.literalInit(.@"]]");
+                }
+                switch (src[tokenizer.index]) {
+                    '>' => break null,
+                    ']' => {
+                        const prev_str = "]]";
+                        if (tokenizer.index >= prev_str.len) {
+                            if (std.debug.runtime_safety) {
+                                const prev_str_start = tokenizer.index - prev_str.len;
+                                assert(std.mem.eql(u8, prev_str, src[prev_str_start..][0..prev_str.len]));
                             }
-                            break next_helper.literalInit(.@"]");
-                        },
-                        else => {
-                            tokenizer.state = .blank;
-                            break next_helper.literalInit(.@"]]");
-                        },
-                    }
-                },
+                            // If the index is greater than the length of ']]', that means we have not been fed
+                            // any input since encountering the first ']', meaning that `src[index - 2][0..3]` is
+                            // equal to "]]]". If we're in streaming mode, this doesn't matter, as it is not legal
+                            // to convert the `Literal` into a range; however, if we're in non-streaming mode, we
+                            // must leave the tokenizer in a state which allows the caller to convert the returned
+                            // `Literal` value into a range which accurately points at the first ']' character, and
+                            // then return back to this state to continue checking if the ']]' sequence is followed
+                            // by a '>' to form ']]>'.
+                            // NOTE: we cannot limit this to `assert_eof_specified`, as the `*Stream` API could be
+                            // used either equivalently to the `*NoUnderrun` API or during transition to the latter
+                            // after `feedEof`.
+                            // TODO: measure if limiting this to when `eof_specified` is true is worth the branch
+                            // to avoid the future branch switch from `.@"]]]"` to `.@"]]"`.
+                            tokenizer.state = .@"]]]";
+                            tokenizer.index -= 1; // we move backwards one, so that the previous character is the first ']'.
+                        } else {
+                            tokenizer.index += 1;
+                        }
+                        break next_helper.literalInit(.@"]");
+                    },
+                    else => {
+                        tokenizer.state = .blank;
+                        break next_helper.literalInit(.@"]]");
+                    },
+                }
             },
-            .@"]]]" => switch (ret_type.kind()) {
-                .type => unreachable,
-                .src => {
-                    // currently the index is just in front of the first ']', indexing the second ']',
-                    // so we move forwards two characters, to be just in front of the third ']'.
-                    assert(std.mem.eql(u8, src[tokenizer.index - 1 ..][0.."]]]".len], "]]]"));
-                    tokenizer.state = .@"]]";
-                    tokenizer.index += 2;
-                    continue;
-                },
+        },
+        ctxState(.non_markup, .@"]]]"),
+        ctxState(.cdata, .@"]]]"),
+        => switch (ret_type.kind()) {
+            .type => unreachable,
+            .src => {
+                // currently the index is just in front of the first ']', indexing the second ']',
+                // so we move forwards two characters, to be just in front of the third ']'.
+                assert(std.mem.eql(u8, src[tokenizer.index - 1 ..][0.."]]]".len], "]]]"));
+                tokenizer.state = .@"]]";
+                tokenizer.index += 2;
+                continue;
             },
-            else => unreachable,
         },
 
         ctxState(.cdata, .blank) => switch (ret_kind) {
@@ -1572,9 +1575,9 @@ const next_helper = struct {
 
         fn Type(ret_type: ReturnType) type {
             return switch (ret_type) {
-                .type => BufferError!TokenType,
+                .type => Stream.BufferError!TokenType,
                 .type_no_underrun => TokenType,
-                .src => BufferError!?TokenSrc,
+                .src => Stream.BufferError!?TokenSrc,
                 .src_no_underrun => ?TokenSrc,
             };
         }
@@ -1826,7 +1829,7 @@ fn testTokenizer(
         const actual_tt: TokenType = tokenizer.full.nextType(context);
         const actual_src: ?[]const u8 = blk: {
             if (!actual_tt.hasSrc()) break :blk null;
-            const range = tokenizer.full.nextSrc(context);
+            const range = tokenizer.full.nextSrcComplete(context);
             break :blk range.toStr(tokenizer.src);
         };
 

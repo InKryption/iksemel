@@ -1,14 +1,12 @@
-pub const extra = @import("extra.zig");
+pub const validation = @import("validation.zig");
 
 pub const Tokenizer = @import("Tokenizer.zig");
-pub const InternalSubsetScanner = @import("InternalSubsetScanner.zig");
 pub const elem = @import("elem.zig");
 
 comptime {
-    _ = extra;
+    _ = validation;
 
     _ = Tokenizer;
-    _ = InternalSubsetScanner;
     _ = elem;
 
     _ = @import("parse_helper.zig");
