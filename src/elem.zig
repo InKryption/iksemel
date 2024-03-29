@@ -233,7 +233,7 @@ fn nextMarkerOrSrcImpl(
                     .invalid_comment_start_single_dash => return ScanError.UnexpectedToken,
                     .invalid_cdata_start => return ScanError.UnexpectedToken,
                     .invalid_dtd_start => return ScanError.UnexpectedToken,
-                    .invalid_angle_bracket_left_bang => return ScanError.UnexpectedToken,
+                    .angle_bracket_left_bang => return ScanError.UnexpectedToken,
                 }
                 break null;
             },

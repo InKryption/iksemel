@@ -164,7 +164,7 @@ pub const Context = enum {
     /// * `.cdata_end`
     /// * `.dtd_start`
     /// * `.invalid_dtd_start`
-    /// * `.invalid_angle_bracket_left_bang`
+    /// * `.angle_bracket_left_bang`
     non_markup,
 
     /// Possible token types are:
@@ -206,6 +206,7 @@ pub const Context = enum {
     /// * `.semicolon`
     reference,
 
+    /// Possible token types are:
     /// * `.eof`
     /// * `.lparen`
     /// * `.rparen`
@@ -223,9 +224,8 @@ pub const Context = enum {
     /// * `.angle_bracket_left`
     /// * `.angle_bracket_right`
     /// * `.pi_start`
-    /// * `.invalid_angle_bracket_left_bang`
+    /// * `.angle_bracket_left_bang`
     /// * `.angle_bracket_left_bang_square_bracket_left`
-    /// * `.dtd_decl`
     /// * `.invalid_comment_start_single_dash`
     /// * `.comment_start`
     /// * `.tag_whitespace`
@@ -371,27 +371,23 @@ pub const TokenType = enum {
     /// Indicates '-->' after a comment.
     comment_end,
 
+    /// The '<!' token.
+    ///
+    /// Outside the DTD this is an invalid token; outside the DTD,
+    /// this is potentially the start of a declaration when followed
+    /// by an applicable `.tag_token`.
+    angle_bracket_left_bang,
+    /// The '<![' token.
+    ///
+    /// This is returned when inside the DTD.
+    angle_bracket_left_bang_square_bracket_left,
+
     /// The '<!DOCTYPE' token.
     dtd_start,
     /// A token which partially matches the '<!DOCTYPE' token.
     ///
     /// The source for the matched token is returned.
     invalid_dtd_start,
-    /// The '<!' token followed by some tag token, such as 'ENTITY',
-    /// 'ATTLIST', 'ELEMENT', 'NOTATION', or an invalid variant.
-    ///
-    /// The source for the matched token is returned.
-    dtd_decl,
-
-    /// The '<!' token.
-    ///
-    /// This is returned when '<!' is followed by a sequence
-    /// which does not ultimately form a recognized markup tag.
-    invalid_angle_bracket_left_bang,
-    /// The '<![' token.
-    ///
-    /// This is returned when inside the DTD.
-    angle_bracket_left_bang_square_bracket_left,
 
     /// Whether or not the token represents any text to be returned by `nextSrc`.
     pub inline fn hasSrc(token_type: TokenType) bool {
@@ -402,7 +398,6 @@ pub const TokenType = enum {
 
             .invalid_cdata_start,
             .invalid_dtd_start,
-            .dtd_decl,
             => true,
 
             else => false,
@@ -459,12 +454,11 @@ pub const TokenType = enum {
             .invalid_comment_end_triple_dash => "--->",
             .comment_end => "-->",
 
+            .angle_bracket_left_bang => "<!",
+            .angle_bracket_left_bang_square_bracket_left => "<![",
+
             .dtd_start => "<!DOCTYPE",
             .invalid_dtd_start => null,
-            .dtd_decl => null,
-
-            .invalid_angle_bracket_left_bang => "<!",
-            .angle_bracket_left_bang_square_bracket_left => "<![",
         };
     }
 };
@@ -768,7 +762,7 @@ fn nextTypeOrSrcImplUnchecked(
             .type => {
                 if (tokenizer.index == src.len) {
                     tokenizer.state = .eof;
-                    break .invalid_angle_bracket_left_bang;
+                    break .angle_bracket_left_bang;
                 }
                 tokenizer.state = switch (src[tokenizer.index]) {
                     '-' => .@"<!-",
@@ -776,7 +770,7 @@ fn nextTypeOrSrcImplUnchecked(
                     'D' => .@"<!D",
                     else => {
                         tokenizer.state = .blank;
-                        break .invalid_angle_bracket_left_bang;
+                        break .angle_bracket_left_bang;
                     },
                 };
                 tokenizer.index += 1;
@@ -1394,7 +1388,7 @@ fn nextTypeOrSrcImplUnchecked(
             .type => {
                 if (tokenizer.index == src.len) {
                     tokenizer.state = .eof;
-                    break .invalid_angle_bracket_left_bang;
+                    break .angle_bracket_left_bang;
                 }
                 if (src[tokenizer.index] == '[') {
                     tokenizer.state = .blank;
@@ -1406,12 +1400,8 @@ fn nextTypeOrSrcImplUnchecked(
                     tokenizer.index += 1;
                     continue;
                 }
-                if (std.mem.indexOfScalar(u8, whitespace_set ++ next_helper.dtd_terminal_characters, src[tokenizer.index]) != null) {
-                    tokenizer.state = .blank;
-                    break .invalid_angle_bracket_left_bang;
-                }
-                tokenizer.state = .dtd_subtag_start;
-                break .dtd_decl;
+                tokenizer.state = .blank;
+                break .angle_bracket_left_bang;
             },
             .src => unreachable,
         },
@@ -2002,30 +1992,38 @@ test "DTD" {
     });
 
     try testTokenizer(.{}, "<!ENTITY> <!ATTLIST> <!ELEMENT> <!NOTATION> <!EEEE> >", &.{
-        .{ .dtd, .dtd_decl, "<!ENTITY" },
+        .{ .dtd, .angle_bracket_left_bang, null },
+        .{ .dtd, .tag_token, "ENTITY" },
         .{ .dtd, .angle_bracket_right, null },
         .{ .dtd, .tag_whitespace, " " },
 
-        .{ .dtd, .dtd_decl, "<!ATTLIST" },
+        .{ .dtd, .angle_bracket_left_bang, null },
+        .{ .dtd, .tag_token, "ATTLIST" },
         .{ .dtd, .angle_bracket_right, null },
         .{ .dtd, .tag_whitespace, " " },
 
-        .{ .dtd, .dtd_decl, "<!ELEMENT" },
+        .{ .dtd, .angle_bracket_left_bang, null },
+        .{ .dtd, .tag_token, "ELEMENT" },
         .{ .dtd, .angle_bracket_right, null },
         .{ .dtd, .tag_whitespace, " " },
 
-        .{ .dtd, .dtd_decl, "<!NOTATION" },
+        .{ .dtd, .angle_bracket_left_bang, null },
+        .{ .dtd, .tag_token, "NOTATION" },
         .{ .dtd, .angle_bracket_right, null },
         .{ .dtd, .tag_whitespace, " " },
 
-        .{ .dtd, .dtd_decl, "<!EEEE" },
+        .{ .dtd, .angle_bracket_left_bang, null },
+        .{ .dtd, .tag_token, "EEEE" },
         .{ .dtd, .angle_bracket_right, null },
         .{ .dtd, .tag_whitespace, " " },
 
         .{ .dtd, .angle_bracket_right, null },
     });
 
-    try testTokenizer(.{}, "<!ENTITYYY", &.{.{ .dtd, .dtd_decl, "<!ENTITYYY" }});
+    try testTokenizer(.{}, "<!ENTITYYY", &.{
+        .{ .dtd, .angle_bracket_left_bang, null },
+        .{ .dtd, .tag_token, "ENTITYYY" },
+    });
     try testTokenizer(.{}, "()?*+|,%[]#", &.{
         .{ .dtd, .lparen, null },
         .{ .dtd, .rparen, null },
