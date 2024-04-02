@@ -406,7 +406,7 @@ fn nextMarkerOrSrcImpl(
                     .equals => {},
                 }
 
-                const quote_type = switch ((try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .markup, MaybeReader, mbr)).narrowInto(.markup).?) {
+                const quote_type = switch ((try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .markup, MaybeReader, mbr)).intoNarrow(.markup).?) {
                     else => return ScanError.UnexpectedToken,
                     .eof => return ScanError.UnexpectedEof,
                     .tag_whitespace => unreachable,

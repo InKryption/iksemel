@@ -111,7 +111,7 @@ pub const Stream = struct {
 
     pub fn nextTypeNarrow(stream: *Tokenizer.Stream, comptime context: Context) BufferError!TokenType.Subset(context) {
         const token_type = try stream.nextType(context);
-        return token_type.narrowInto(context).?;
+        return token_type.intoNarrow(context).?;
     }
 
     pub fn nextSrc(stream: *Tokenizer.Stream, context: Context) BufferError!?[]const u8 {
@@ -139,7 +139,7 @@ pub const Full = struct {
 
     pub fn nextTypeNarrow(full: *Tokenizer.Full, comptime context: Context) TokenType.Subset(context) {
         const token_type = full.nextType(context);
-        return token_type.narrowInto(context).?;
+        return token_type.intoNarrow(context).?;
     }
 
     pub fn nextSrc(full: *Tokenizer.Full, context: Context) ?Range {
@@ -462,7 +462,7 @@ pub const TokenType = enum {
     }
 
     /// Narrows `token_type` into `Subset(context)`, or returns null if it is not part of the subset.
-    pub fn narrowInto(token_type: TokenType, comptime context: Context) ?Subset(context) {
+    pub fn intoNarrow(token_type: TokenType, comptime context: Context) ?Subset(context) {
         const Narrowed = Subset(context);
         const part_of_subset: bool = switch (token_type) {
             inline else => |tt| @hasField(Narrowed, @tagName(tt)),
@@ -498,7 +498,7 @@ pub const TokenType = enum {
             const tt_value: TokenType = @enumFromInt(tt_field.value);
             for (ctx_fields) |ctx_field| {
                 const ctx_value: Context = @enumFromInt(ctx_field.value);
-                const narrowed_value = tt_value.narrowInto(ctx_value) orelse continue;
+                const narrowed_value = tt_value.intoNarrow(ctx_value) orelse continue;
 
                 match: {
                     if (@intFromEnum(tt_value) != @intFromEnum(narrowed_value)) break :match;

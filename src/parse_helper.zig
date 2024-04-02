@@ -22,7 +22,7 @@ pub fn nextTokenTypeNarrow(
     mbr: MaybeBufferedReader(MaybeReader),
 ) !Tokenizer.TokenType.Subset(context) {
     const token_type = try nextTokenType(tokenizer, context, MaybeReader, mbr);
-    return token_type.narrowInto(context).?;
+    return token_type.intoNarrow(context).?;
 }
 
 pub fn nextTokenType(
@@ -90,42 +90,18 @@ pub fn nextTokenSrcAsEnum(
     }) = .{};
 
     if (MaybeReader != null) {
-        while (try nextTokenSegment(tokenizer, context, mbr.reader, mbr.read_buffer)) |segment| {
+        while (try nextTokenSegment(tokenizer, context, MaybeReader, mbr)) |segment| {
             str.appendSlice(segment) catch {
                 try skipTokenStr(tokenizer, context, MaybeReader, mbr);
                 return null;
             };
         }
     } else {
-        const range = tokenizer.full.nextSrc(context);
+        const range = tokenizer.full.nextSrcComplete(context);
         str.appendSlice(range.toStr(tokenizer.src)) catch return null;
     }
 
     return std.meta.stringToEnum(E, str.constSlice());
-}
-
-/// Simple helper structure which allows iteration over the source
-/// of a tokenizer with a unified API regardless of whether it is
-/// streaming the source from a reader or from a slice.
-pub fn TokenSrcIter(comptime MaybeReader: ?type) type {
-    return struct {
-        iterated_once: if (MaybeReader == null) bool else void = if (MaybeReader == null) false,
-        const Self = @This();
-
-        pub fn next(
-            iter: *Self,
-            tokenizer: *Tokenizer,
-            context: Tokenizer.Context,
-            mbr: MaybeBufferedReader(MaybeReader),
-        ) !?if (MaybeReader != null) []const u8 else Tokenizer.Range {
-            if (MaybeReader != null) {
-                return nextTokenSegment(tokenizer, context, mbr.reader, mbr.read_buffer);
-            } else {
-                defer iter.iterated_once = true;
-                return if (iter.iterated_once) null else tokenizer.full.nextSrc(context);
-            }
-        }
-    };
 }
 
 /// Consumes the token source, returns whether or not it contained non-whitespace.
@@ -167,6 +143,16 @@ pub fn skipWhitespaceSrcUnchecked(
     }
 }
 
+pub fn nextTokenTypeNarrowIgnoreTagWhitespace(
+    tokenizer: *Tokenizer,
+    comptime context: Tokenizer.Context,
+    comptime MaybeReader: ?type,
+    mbr: MaybeBufferedReader(MaybeReader),
+) (if (MaybeReader) |Reader| Reader.Error else error{})!Tokenizer.TokenType.Subset(context) {
+    const token_type = try nextTokenTypeIgnoreTagWhitespace(tokenizer, context, MaybeReader, mbr);
+    return token_type.intoNarrow(context).?;
+}
+
 /// Gets the immediate next token type; if it's `.tag_whitespace`, it skips
 /// the whitespace token source, and then returns the next token type,
 /// asserting it is not of `.tag_whitespace` (two can't be returned consecutively).
@@ -192,11 +178,11 @@ pub fn nextTokenTypeIgnoreTagWhitespace(
 /// it returns the actual token type.
 pub fn skipIfTagWhitespaceOrGetNextTokType(
     tokenizer: *Tokenizer,
-    context: Tokenizer.Context,
+    comptime context: Tokenizer.Context,
     comptime MaybeReader: ?type,
     mbr: MaybeBufferedReader(MaybeReader),
-) (if (MaybeReader) |Reader| Reader.Error else error{})!?Tokenizer.TokenType {
-    switch (try nextTokenType(tokenizer, context, MaybeReader, mbr)) {
+) (if (MaybeReader) |Reader| Reader.Error else error{})!?Tokenizer.TokenType.Subset(context) {
+    switch (try nextTokenTypeNarrow(tokenizer, context, MaybeReader, mbr)) {
         else => |tag| return tag,
         .tag_whitespace => {},
     }
