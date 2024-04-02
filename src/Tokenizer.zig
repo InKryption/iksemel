@@ -84,7 +84,7 @@ pub inline fn remainingSrc(tokenizer: Tokenizer) Range {
 
 pub const Stream = struct {
     pub inline fn asTokenizer(stream: *Stream) *Tokenizer {
-        return @fieldParentPtr(Tokenizer, "stream", stream);
+        return @alignCast(@fieldParentPtr("stream", stream));
     }
 
     pub const BufferError = error{BufferUnderrun};
@@ -122,7 +122,7 @@ pub const Stream = struct {
 
 pub const Full = struct {
     pub inline fn asTokenizer(full: *Full) *Tokenizer {
-        const tokenizer = @fieldParentPtr(Tokenizer, "full", full);
+        const tokenizer: *Tokenizer = @alignCast(@fieldParentPtr("full", full));
         assert(tokenizer.eof_specified);
         return tokenizer;
     }
