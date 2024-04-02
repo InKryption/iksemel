@@ -109,6 +109,11 @@ pub const Stream = struct {
         return tokenizer.nextTypeOrSrcImpl(context, .type);
     }
 
+    pub fn nextTypeNarrow(stream: *Tokenizer.Stream, comptime context: Context) BufferError!TokenType.Subset(context) {
+        const token_type = try stream.nextType(context);
+        return token_type.narrowInto(context).?;
+    }
+
     pub fn nextSrc(stream: *Tokenizer.Stream, context: Context) BufferError!?[]const u8 {
         const tokenizer = stream.asTokenizer();
         const maybe_tok_src: ?TokenSrc = try tokenizer.nextTypeOrSrcImpl(context, .src);
@@ -132,6 +137,11 @@ pub const Full = struct {
         return tokenizer.nextTypeOrSrcImpl(context, .type_no_underrun);
     }
 
+    pub fn nextTypeNarrow(full: *Tokenizer.Full, comptime context: Context) TokenType.Subset(context) {
+        const token_type = full.nextType(context);
+        return token_type.narrowInto(context).?;
+    }
+
     pub fn nextSrc(full: *Tokenizer.Full, context: Context) ?Range {
         const tokenizer = full.asTokenizer();
         const tok_src: TokenSrc = tokenizer.nextTypeOrSrcImpl(context, .src_no_underrun) orelse return null;
@@ -152,131 +162,119 @@ pub const Full = struct {
 };
 
 pub const Context = enum {
-    /// * `.eof`
-    /// * `.angle_bracket_left`
-    /// * `.text_data`
-    /// * `.ampersand`
-    /// * `.pi_start`
-    /// * `.comment_start`
-    /// * `.invalid_comment_start_single_dash`
-    /// * `.cdata_start`
-    /// * `.invalid_cdata_start`
-    /// * `.cdata_end`
-    /// * `.dtd_start`
-    /// * `.invalid_dtd_start`
-    /// * `.angle_bracket_left_bang`
+    /// Used to scan markup tags (element open tags, element close tags, DTD Declaration, DTD Internal Subset & its tags).
+    markup,
+
     non_markup,
-
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.text_data`
-    /// * `.cdata_end`
     cdata,
-
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.slash`
-    /// * `.equals`
-    /// * `.quote_single`
-    /// * `.quote_double`
-    /// * `.angle_bracket_right`
-    /// * `.tag_whitespace`
-    /// * `.tag_token`
-    element_tag,
-
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.text_data`
-    /// * `.invalid_comment_dash_dash`
-    /// * `.invalid_comment_end_triple_dash`
-    /// * `.comment_end`
+    reference,
     comment,
-
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.text_data`
-    /// * `.pi_end`
     pi,
 
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.hashtag`
-    /// * `.tag_token`
-    /// * `.invalid_reference_end`
-    /// * `.semicolon`
-    reference,
-
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.lparen`
-    /// * `.rparen`
-    /// * `.qmark`
-    /// * `.asterisk`
-    /// * `.plus`
-    /// * `.pipe`
-    /// * `.comma`
-    /// * `.hashtag`
-    /// * `.percent`
-    /// * `.quote_single`
-    /// * `.quote_double`
-    /// * `.square_bracket_left`
-    /// * `.square_bracket_right`
-    /// * `.angle_bracket_left`
-    /// * `.angle_bracket_right`
-    /// * `.pi_start`
-    /// * `.angle_bracket_left_bang`
-    /// * `.angle_bracket_left_bang_square_bracket_left`
-    /// * `.invalid_comment_start_single_dash`
-    /// * `.comment_start`
-    /// * `.tag_whitespace`
-    /// * `.tag_token`
-    dtd,
-
     /// Should be used for both system literals and pubid literals, single quoted.
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.quote_single`
-    /// * `.text_data`
     system_literal_quote_single,
-    /// Should be used for both system literals and pubid literals, single quoted.
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.quote_double`
-    /// * `.text_data`
+    /// Should be used for both system literals and pubid literals, double quoted.
     system_literal_quote_double,
 
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.quote_single`
-    /// * `.ampersand`
-    /// * `.angle_bracket_left`
-    /// * `.text_data`
     attribute_value_quote_single,
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.quote_double`
-    /// * `.ampersand`
-    /// * `.angle_bracket_left`
-    /// * `.text_data`
     attribute_value_quote_double,
 
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.quote_single`
-    /// * `.ampersand`
-    /// * `.percent`
-    /// * `.text_data`
     entity_value_quote_single,
-    /// Possible token types are:
-    /// * `.eof`
-    /// * `.quote_double`
-    /// * `.ampersand`
-    /// * `.percent`
-    /// * `.text_data`
     entity_value_quote_double,
+
+    /// Each field corresponds to a context, holding a slice of the subset of possible token types
+    /// which can be returned from the given context.
+    pub const token_sets_map: std.enums.EnumFieldStruct(Context, []const TokenType, null) = .{
+        .markup = &[_]TokenType{
+            .eof,
+            .tag_whitespace,
+            .tag_token,
+            .equals,
+            .lparen,
+            .rparen,
+            .pipe,
+            .comma,
+            .hashtag,
+            .qmark,
+            .asterisk,
+            .plus,
+            .slash,
+            .quote_single,
+            .quote_double,
+            .angle_bracket_left,
+            .angle_bracket_right,
+            .square_bracket_left,
+            .square_bracket_right,
+            .percent,
+            .pi_start,
+            .comment_start,
+            .invalid_comment_start_single_dash,
+            .angle_bracket_left_bang,
+            .angle_bracket_left_bang_square_bracket_left,
+        },
+
+        .non_markup = &[_]TokenType{
+            .eof,
+            .text_data,
+            .angle_bracket_left,
+            .ampersand,
+            .pi_start,
+            .cdata_start,
+            .invalid_cdata_start,
+            .cdata_end,
+            .comment_start,
+            .invalid_comment_start_single_dash,
+            .angle_bracket_left_bang,
+            .dtd_start,
+            .invalid_dtd_start,
+        },
+
+        .cdata = &[_]TokenType{
+            .eof,
+            .text_data,
+            .cdata_end,
+        },
+
+        .comment = &[_]TokenType{
+            .eof,
+            .text_data,
+            .invalid_comment_dash_dash,
+            .invalid_comment_end_triple_dash,
+            .comment_end,
+        },
+
+        .pi = &[_]TokenType{
+            .eof,
+            .text_data,
+            .pi_end,
+        },
+
+        .reference = &[_]TokenType{
+            .eof,
+            .tag_token,
+            .hashtag,
+            .semicolon,
+            .invalid_reference_end,
+        },
+
+        .system_literal_quote_single = &[_]TokenType{ .eof, .text_data, .quote_single },
+        .system_literal_quote_double = &[_]TokenType{ .eof, .text_data, .quote_double },
+
+        .attribute_value_quote_single = &[_]TokenType{ .eof, .text_data, .quote_single, .angle_bracket_left, .ampersand },
+        .attribute_value_quote_double = &[_]TokenType{ .eof, .text_data, .quote_double, .angle_bracket_left, .ampersand },
+
+        .entity_value_quote_single = &[_]TokenType{ .eof, .text_data, .quote_single, .percent, .ampersand },
+        .entity_value_quote_double = &[_]TokenType{ .eof, .text_data, .quote_double, .percent, .ampersand },
+    };
 };
 
 pub const TokenType = enum {
+    /// The end of the XML source.
+    /// This is the last token that will appear.
+    /// Terminates the token sequence.
+    /// The tokenizer will continue to return this after returning it once.
+    eof,
+
     /// A run of any non-markup characters, including whitespace.
     /// This will never be returned consecutively.
     text_data,
@@ -286,12 +284,6 @@ pub const TokenType = enum {
     /// A run of one or more non-whitespace characters inside a markup tag.
     /// This will never be returned consecutively.
     tag_token,
-
-    /// The end of the XML source.
-    /// This is the last token that will appear.
-    /// Terminates the token sequence.
-    /// The tokenizer will continue to return this after returning it once.
-    eof,
 
     /// The '=' token.
     equals,
@@ -460,6 +452,66 @@ pub const TokenType = enum {
             .dtd_start => "<!DOCTYPE",
             .invalid_dtd_start => null,
         };
+    }
+
+    pub fn fromNarrow(narrowed: anytype) TokenType {
+        comptime for (@typeInfo(Context).Enum.fields) |ctx_field| {
+            if (@TypeOf(narrowed) == Subset(@enumFromInt(ctx_field.value))) break;
+        } else @compileError("Expected Subset(context), got " ++ @typeName(@TypeOf(narrowed)));
+        return @enumFromInt(@intFromEnum(narrowed));
+    }
+
+    /// Narrows `token_type` into `Subset(context)`, or returns null if it is not part of the subset.
+    pub fn narrowInto(token_type: TokenType, comptime context: Context) ?Subset(context) {
+        const Narrowed = Subset(context);
+        const part_of_subset: bool = switch (token_type) {
+            inline else => |tt| @hasField(Narrowed, @tagName(tt)),
+        };
+        if (!part_of_subset) return null;
+        return @enumFromInt(@intFromEnum(token_type));
+    }
+
+    /// Returns an enum which represents the subset of `TokenType`s
+    /// that can be tokenized when using the given `context`.
+    pub fn Subset(comptime context: Context) type {
+        const tok_types: []const TokenType = @field(Context.token_sets_map, @tagName(context));
+        @setEvalBranchQuota(tok_types.len + 1);
+        var fields: [tok_types.len]std.builtin.Type.EnumField = undefined;
+        for (&fields, tok_types) |*field, tt| field.* = .{
+            .name = @tagName(tt),
+            .value = @intFromEnum(tt),
+        };
+        return @Type(.{ .Enum = .{
+            .is_exhaustive = true,
+            .tag_type = @typeInfo(TokenType).Enum.tag_type,
+            .decls = &.{},
+            .fields = &fields,
+        } });
+    }
+
+    comptime {
+        const tt_fields = @typeInfo(TokenType).Enum.fields;
+        const ctx_fields = @typeInfo(Context).Enum.fields;
+        @setEvalBranchQuota(tt_fields.len * ctx_fields.len * 10);
+
+        for (tt_fields) |tt_field| {
+            const tt_value: TokenType = @enumFromInt(tt_field.value);
+            for (ctx_fields) |ctx_field| {
+                const ctx_value: Context = @enumFromInt(ctx_field.value);
+                const narrowed_value = tt_value.narrowInto(ctx_value) orelse continue;
+
+                match: {
+                    if (@intFromEnum(tt_value) != @intFromEnum(narrowed_value)) break :match;
+                    if (!std.mem.eql(u8, @tagName(tt_value), @tagName(narrowed_value))) break :match;
+                    continue;
+                }
+
+                @compileError(std.fmt.comptimePrint("Expected .{} ({d}), got .{} ({d})", .{
+                    std.zig.fmtId(@tagName(tt_value)),       @intFromEnum(tt_value),
+                    std.zig.fmtId(@tagName(narrowed_value)), @intFromEnum(narrowed_value),
+                }));
+            }
+        }
     }
 };
 
@@ -680,10 +732,10 @@ fn nextTypeOrSrcImplUnchecked(
     @setEvalBranchQuota(3000);
     const ctxState = next_helper.ctxState;
     return while (tokenizer.index != src.len or eof_specified) break switch (ctxState(context, tokenizer.state)) {
+        ctxState(.markup, .eof),
+
         ctxState(.non_markup, .eof),
         ctxState(.cdata, .eof),
-        ctxState(.dtd, .eof),
-        ctxState(.element_tag, .eof),
         ctxState(.comment, .eof),
         ctxState(.pi, .eof),
         ctxState(.reference, .eof),
@@ -699,6 +751,146 @@ fn nextTypeOrSrcImplUnchecked(
         => break switch (ret_kind) {
             .type => .eof,
             .src => null,
+        },
+
+        ctxState(.markup, .blank) => switch (ret_kind) {
+            .type => {
+                if (tokenizer.index == src.len) {
+                    tokenizer.state = .eof;
+                    break .eof;
+                }
+                switch (src[tokenizer.index]) {
+                    inline '(', ')', '=', '?', '*', '+', '|', ',', '#', '%', '\'', '\"', '[', ']', '/', '>' => |char| {
+                        tokenizer.index += 1;
+                        break comptime switch (char) {
+                            '(' => .lparen,
+                            ')' => .rparen,
+                            '=' => .equals,
+                            '?' => .qmark,
+                            '*' => .asterisk,
+                            '+' => .plus,
+                            '|' => .pipe,
+                            ',' => .comma,
+                            '#' => .hashtag,
+                            '%' => .percent,
+                            '\'' => .quote_single,
+                            '\"' => .quote_double,
+                            '[' => .square_bracket_left,
+                            ']' => .square_bracket_right,
+                            '/' => .slash,
+                            '>' => .angle_bracket_right,
+                            else => unreachable,
+                        };
+                    },
+                    '<' => {
+                        tokenizer.state = .@"<";
+                        tokenizer.index += 1;
+                        continue;
+                    },
+                    else => |char| {
+                        const not_whitespace = std.mem.indexOfScalar(u8, whitespace_set, char) == null;
+                        if (not_whitespace) break .tag_token;
+                        tokenizer.state = .whitespace;
+                        break .tag_whitespace;
+                    },
+                }
+            },
+            .src => {
+                if (tokenizer.index == src.len) {
+                    tokenizer.state = .eof;
+                    break null;
+                }
+                const str_start = tokenizer.index;
+                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ next_helper.dtd_terminal_characters) orelse src.len;
+                tokenizer.index = str_end;
+                if (str_start == str_end) break null;
+                break next_helper.rangeInit(str_start, str_end);
+            },
+        },
+        ctxState(.markup, .whitespace) => switch (ret_kind) {
+            .type => unreachable,
+            .src => {
+                if (tokenizer.index == src.len) {
+                    tokenizer.state = .eof;
+                    break null;
+                }
+                const str_start = tokenizer.index;
+                const str_end = std.mem.indexOfNonePos(u8, src, tokenizer.index, whitespace_set) orelse src.len;
+                tokenizer.index = str_end;
+                if (str_start != str_end) {
+                    break next_helper.rangeInit(str_start, str_end);
+                }
+                tokenizer.state = .blank;
+                break null;
+            },
+        },
+        ctxState(.markup, .@"<") => switch (ret_kind) {
+            .type => {
+                if (tokenizer.index == src.len) {
+                    tokenizer.state = .eof;
+                    break .angle_bracket_left;
+                }
+                switch (src[tokenizer.index]) {
+                    '?' => {
+                        tokenizer.state = .blank;
+                        tokenizer.index += 1;
+                        break .pi_start;
+                    },
+                    '!' => {
+                        tokenizer.state = .@"<!";
+                        tokenizer.index += 1;
+                        continue;
+                    },
+                    else => {
+                        tokenizer.state = .blank;
+                        break .angle_bracket_left;
+                    },
+                }
+            },
+            .src => unreachable,
+        },
+        ctxState(.markup, .@"<!") => switch (ret_kind) {
+            .type => {
+                if (tokenizer.index == src.len) {
+                    tokenizer.state = .eof;
+                    break .angle_bracket_left_bang;
+                }
+                if (src[tokenizer.index] == '[') {
+                    tokenizer.state = .blank;
+                    tokenizer.index += 1;
+                    break .angle_bracket_left_bang_square_bracket_left;
+                }
+                if (src[tokenizer.index] == '-') {
+                    tokenizer.state = .@"<!-";
+                    tokenizer.index += 1;
+                    continue;
+                }
+                tokenizer.state = .blank;
+                break .angle_bracket_left_bang;
+            },
+            .src => unreachable,
+        },
+        ctxState(.markup, .@"<!-") => switch (ret_kind) {
+            .type => {
+                if (tokenizer.index == src.len) {
+                    tokenizer.state = .eof;
+                    break .invalid_comment_start_single_dash;
+                }
+                tokenizer.state = .blank;
+                if (src[tokenizer.index] != '-') {
+                    break .invalid_comment_start_single_dash;
+                }
+                tokenizer.index += 1;
+                break .comment_start;
+            },
+            .src => unreachable,
+        },
+        ctxState(.markup, .dtd_subtag_start) => switch (ret_kind) {
+            .type => unreachable,
+            .src => {
+                tokenizer.state = .blank; // fall through to the code for tokenizing tag_token
+                break next_helper.literalInit(.@"<!");
+            },
         },
 
         ctxState(.non_markup, .blank) => switch (ret_kind) {
@@ -919,6 +1111,36 @@ fn nextTypeOrSrcImplUnchecked(
             },
         },
 
+        ctxState(.cdata, .blank) => switch (ret_kind) {
+            .type => {
+                if (tokenizer.index == src.len) {
+                    tokenizer.state = .eof;
+                    break .eof;
+                }
+                if (src[tokenizer.index] != ']') {
+                    break .text_data;
+                }
+                tokenizer.state = .@"]";
+                tokenizer.index += 1;
+                continue;
+            },
+            .src => {
+                if (tokenizer.index == src.len) {
+                    tokenizer.state = .eof;
+                    break null;
+                }
+                const str_start = tokenizer.index;
+                const str_end = std.mem.indexOfScalarPos(u8, src, tokenizer.index, ']') orelse src.len;
+                tokenizer.index = str_end;
+                if (str_start != str_end) {
+                    break next_helper.rangeInit(str_start, str_end);
+                }
+                tokenizer.state = .@"]";
+                tokenizer.index += 1;
+                continue;
+            },
+        },
+
         ctxState(.non_markup, .@"]"),
         ctxState(.cdata, .@"]"),
         => switch (ret_type.kind()) {
@@ -1013,84 +1235,39 @@ fn nextTypeOrSrcImplUnchecked(
             },
         },
 
-        ctxState(.cdata, .blank) => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .eof;
-                }
-                if (src[tokenizer.index] != ']') {
-                    break .text_data;
-                }
-                tokenizer.state = .@"]";
-                tokenizer.index += 1;
-                continue;
-            },
-            .src => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break null;
-                }
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfScalarPos(u8, src, tokenizer.index, ']') orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start != str_end) {
-                    break next_helper.rangeInit(str_start, str_end);
-                }
-                tokenizer.state = .@"]";
-                tokenizer.index += 1;
-                continue;
-            },
-        },
-
-        ctxState(.element_tag, .blank) => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .eof;
-                }
-                switch (src[tokenizer.index]) {
-                    inline '\'', '\"', '/', '=', '>' => |char| {
+        ctxState(.reference, .blank) => {
+            const terminal_chars = whitespace_set ++ next_helper.dtd_terminal_characters ++ &[_]u8{'&'};
+            switch (ret_kind) {
+                .type => {
+                    if (tokenizer.index == src.len) {
+                        tokenizer.state = .eof;
+                        break .eof;
+                    }
+                    if (src[tokenizer.index] == '#') {
                         tokenizer.index += 1;
-                        break comptime switch (char) {
-                            '\'' => .quote_single,
-                            '\"' => .quote_double,
-                            '/' => .slash,
-                            '=' => .equals,
-                            '>' => .angle_bracket_right,
-                            else => unreachable,
-                        };
-                    },
-                    else => |char| {
-                        const not_whitespace = std.mem.indexOfScalar(u8, whitespace_set, char) == null;
-                        if (not_whitespace) break .tag_token;
-                        tokenizer.state = .whitespace;
-                        break .tag_whitespace;
-                    },
-                }
-            },
-            .src => {
-                if (tokenizer.index == src.len) break null;
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ &[_]u8{ '\'', '\"', '/', '=', '>' }) orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start == str_end) break null;
-                break next_helper.rangeInit(str_start, str_end);
-            },
-        },
-        ctxState(.element_tag, .whitespace) => switch (ret_kind) {
-            .type => unreachable,
-            .src => {
-                if (tokenizer.index == src.len) break null;
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfNonePos(u8, src, tokenizer.index, whitespace_set) orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start != str_end) {
-                    break next_helper.rangeInit(str_start, str_end);
-                }
-                tokenizer.state = .blank;
-                break null;
-            },
+                        break .hashtag;
+                    }
+                    if (src[tokenizer.index] == ';') {
+                        tokenizer.index += 1;
+                        break .semicolon;
+                    }
+                    if (std.mem.indexOfScalar(u8, terminal_chars, src[tokenizer.index]) != null) {
+                        tokenizer.state = .blank;
+                        break .invalid_reference_end;
+                    }
+                    break .tag_token;
+                },
+                .src => {
+                    if (tokenizer.index == src.len) break null;
+                    const str_start = tokenizer.index;
+                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, terminal_chars) orelse src.len;
+                    tokenizer.index = str_end;
+                    if (str_start != str_end) {
+                        break next_helper.rangeInit(str_start, str_end);
+                    }
+                    break null;
+                },
+            }
         },
 
         ctxState(.comment, .blank) => switch (ret_kind) {
@@ -1255,179 +1432,6 @@ fn nextTypeOrSrcImplUnchecked(
             },
         },
 
-        ctxState(.reference, .blank) => {
-            const terminal_chars = whitespace_set ++ next_helper.dtd_terminal_characters ++ &[_]u8{'&'};
-            switch (ret_kind) {
-                .type => {
-                    if (tokenizer.index == src.len) {
-                        tokenizer.state = .eof;
-                        break .eof;
-                    }
-                    if (src[tokenizer.index] == '#') {
-                        tokenizer.index += 1;
-                        break .hashtag;
-                    }
-                    if (src[tokenizer.index] == ';') {
-                        tokenizer.index += 1;
-                        break .semicolon;
-                    }
-                    if (std.mem.indexOfScalar(u8, terminal_chars, src[tokenizer.index]) != null) {
-                        tokenizer.state = .blank;
-                        break .invalid_reference_end;
-                    }
-                    break .tag_token;
-                },
-                .src => {
-                    if (tokenizer.index == src.len) break null;
-                    const str_start = tokenizer.index;
-                    const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, terminal_chars) orelse src.len;
-                    tokenizer.index = str_end;
-                    if (str_start != str_end) {
-                        break next_helper.rangeInit(str_start, str_end);
-                    }
-                    break null;
-                },
-            }
-        },
-
-        ctxState(.dtd, .blank) => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .eof;
-                }
-                switch (src[tokenizer.index]) {
-                    inline '(', ')', '?', '*', '+', '|', ',', '#', '%', '\'', '\"', '[', ']', '>' => |char| {
-                        tokenizer.index += 1;
-                        break comptime switch (char) {
-                            '(' => .lparen,
-                            ')' => .rparen,
-                            '?' => .qmark,
-                            '*' => .asterisk,
-                            '+' => .plus,
-                            '|' => .pipe,
-                            ',' => .comma,
-                            '#' => .hashtag,
-                            '%' => .percent,
-                            '\'' => .quote_single,
-                            '\"' => .quote_double,
-                            '[' => .square_bracket_left,
-                            ']' => .square_bracket_right,
-                            '>' => .angle_bracket_right,
-                            else => unreachable,
-                        };
-                    },
-                    '<' => {
-                        tokenizer.state = .@"<";
-                        tokenizer.index += 1;
-                        continue;
-                    },
-                    else => |char| {
-                        const not_whitespace = std.mem.indexOfScalar(u8, whitespace_set, char) == null;
-                        if (not_whitespace) break .tag_token;
-                        tokenizer.state = .whitespace;
-                        break .tag_whitespace;
-                    },
-                }
-            },
-            .src => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break null;
-                }
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, whitespace_set ++ next_helper.dtd_terminal_characters) orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start == str_end) break null;
-                break next_helper.rangeInit(str_start, str_end);
-            },
-        },
-        ctxState(.dtd, .whitespace) => switch (ret_kind) {
-            .type => unreachable,
-            .src => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break null;
-                }
-                const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfNonePos(u8, src, tokenizer.index, whitespace_set) orelse src.len;
-                tokenizer.index = str_end;
-                if (str_start != str_end) {
-                    break next_helper.rangeInit(str_start, str_end);
-                }
-                tokenizer.state = .blank;
-                break null;
-            },
-        },
-        ctxState(.dtd, .@"<") => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .angle_bracket_left;
-                }
-                switch (src[tokenizer.index]) {
-                    '?' => {
-                        tokenizer.state = .blank;
-                        tokenizer.index += 1;
-                        break .pi_start;
-                    },
-                    '!' => {
-                        tokenizer.state = .@"<!";
-                        tokenizer.index += 1;
-                        continue;
-                    },
-                    else => {
-                        tokenizer.state = .blank;
-                        break .angle_bracket_left;
-                    },
-                }
-            },
-            .src => unreachable,
-        },
-        ctxState(.dtd, .@"<!") => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .angle_bracket_left_bang;
-                }
-                if (src[tokenizer.index] == '[') {
-                    tokenizer.state = .blank;
-                    tokenizer.index += 1;
-                    break .angle_bracket_left_bang_square_bracket_left;
-                }
-                if (src[tokenizer.index] == '-') {
-                    tokenizer.state = .@"<!-";
-                    tokenizer.index += 1;
-                    continue;
-                }
-                tokenizer.state = .blank;
-                break .angle_bracket_left_bang;
-            },
-            .src => unreachable,
-        },
-        ctxState(.dtd, .@"<!-") => switch (ret_kind) {
-            .type => {
-                if (tokenizer.index == src.len) {
-                    tokenizer.state = .eof;
-                    break .invalid_comment_start_single_dash;
-                }
-                tokenizer.state = .blank;
-                if (src[tokenizer.index] != '-') {
-                    break .invalid_comment_start_single_dash;
-                }
-                tokenizer.index += 1;
-                break .comment_start;
-            },
-            .src => unreachable,
-        },
-        ctxState(.dtd, .dtd_subtag_start) => switch (ret_kind) {
-            .type => unreachable,
-            .src => {
-                tokenizer.state = .blank; // fall through to the code for tokenizing tag_token
-                break next_helper.literalInit(.@"<!");
-            },
-        },
-
         ctxState(.system_literal_quote_single, .blank),
         ctxState(.system_literal_quote_double, .blank),
         => |ctx_state| {
@@ -1536,10 +1540,12 @@ fn nextTypeOrSrcImplUnchecked(
 
 const next_helper = struct {
     const dtd_terminal_characters = &[_]u8{
-        '[',  ']',  '(', ')',
-        '?',  '*',  '+', '|',
-        ',',  '#',  '%', ';',
-        '\'', '\"', '<', '>',
+        '\"', '#', '%',
+        '\'', '(', ')',
+        '*',  '+', ',',
+        '/',  ';', '<',
+        '=',  '>', '?',
+        '[',  ']', '|',
     };
 
     inline fn rangeInit(range_start: usize, range_end: usize) TokenSrc {
@@ -1583,65 +1589,62 @@ const next_helper = struct {
         //!
         //! The field names are never used directly, rather all values of this type are computed
         //! via `ctxState`.
-        ctx_state_00 = ctxStateInt(.non_markup, .eof),
-        ctx_state_01 = ctxStateInt(.cdata, .eof),
-        ctx_state_02 = ctxStateInt(.dtd, .eof),
-        ctx_state_03 = ctxStateInt(.element_tag, .eof),
-        ctx_state_04 = ctxStateInt(.comment, .eof),
-        ctx_state_05 = ctxStateInt(.pi, .eof),
-        ctx_state_06 = ctxStateInt(.reference, .eof),
-        ctx_state_07 = ctxStateInt(.system_literal_quote_single, .eof),
-        ctx_state_08 = ctxStateInt(.system_literal_quote_double, .eof),
-        ctx_state_09 = ctxStateInt(.attribute_value_quote_single, .eof),
-        ctx_state_10 = ctxStateInt(.attribute_value_quote_double, .eof),
-        ctx_state_11 = ctxStateInt(.entity_value_quote_single, .eof),
-        ctx_state_12 = ctxStateInt(.entity_value_quote_double, .eof),
-        ctx_state_13 = ctxStateInt(.non_markup, .blank),
-        ctx_state_14 = ctxStateInt(.non_markup, .@"<"),
-        ctx_state_15 = ctxStateInt(.non_markup, .@"<!"),
-        ctx_state_16 = ctxStateInt(.non_markup, .@"<!-"),
-        ctx_state_17 = ctxStateInt(.non_markup, .@"<!["),
-        ctx_state_18 = ctxStateInt(.non_markup, .@"<![C"),
-        ctx_state_19 = ctxStateInt(.non_markup, .@"<![CD"),
-        ctx_state_20 = ctxStateInt(.non_markup, .@"<![CDA"),
-        ctx_state_21 = ctxStateInt(.non_markup, .@"<![CDAT"),
-        ctx_state_22 = ctxStateInt(.non_markup, .@"<![CDATA"),
-        ctx_state_23 = ctxStateInt(.non_markup, .@"<!D"),
-        ctx_state_24 = ctxStateInt(.non_markup, .@"<!DO"),
-        ctx_state_25 = ctxStateInt(.non_markup, .@"<!DOC"),
-        ctx_state_26 = ctxStateInt(.non_markup, .@"<!DOCT"),
-        ctx_state_27 = ctxStateInt(.non_markup, .@"<!DOCTY"),
-        ctx_state_28 = ctxStateInt(.non_markup, .@"<!DOCTYP"),
-        ctx_state_29 = ctxStateInt(.non_markup, .@"<!DOCTYPE"),
-        ctx_state_30 = ctxStateInt(.non_markup, .angle_bracket_left_bang_invalid_tag_returned),
-        ctx_state_31 = ctxStateInt(.non_markup, .@"]"),
-        ctx_state_32 = ctxStateInt(.non_markup, .@"]]"),
-        ctx_state_33 = ctxStateInt(.non_markup, .@"]]]"),
-        ctx_state_34 = ctxStateInt(.cdata, .@"]"),
-        ctx_state_35 = ctxStateInt(.cdata, .@"]]"),
-        ctx_state_36 = ctxStateInt(.cdata, .@"]]]"),
-        ctx_state_37 = ctxStateInt(.cdata, .blank),
-        ctx_state_38 = ctxStateInt(.element_tag, .blank),
-        ctx_state_39 = ctxStateInt(.element_tag, .whitespace),
-        ctx_state_40 = ctxStateInt(.comment, .blank),
-        ctx_state_41 = ctxStateInt(.comment, .@"-"),
-        ctx_state_42 = ctxStateInt(.comment, .@"--"),
-        ctx_state_43 = ctxStateInt(.comment, .@"---"),
-        ctx_state_44 = ctxStateInt(.pi, .blank),
-        ctx_state_45 = ctxStateInt(.pi, .@"?"),
-        ctx_state_46 = ctxStateInt(.reference, .blank),
-        ctx_state_47 = ctxStateInt(.dtd, .blank),
-        ctx_state_48 = ctxStateInt(.dtd, .whitespace),
-        ctx_state_49 = ctxStateInt(.dtd, .@"<"),
-        ctx_state_50 = ctxStateInt(.dtd, .@"<!"),
-        ctx_state_51 = ctxStateInt(.dtd, .@"<!-"),
-        ctx_state_52 = ctxStateInt(.dtd, .dtd_subtag_start),
-        ctx_state_53 = ctxStateInt(.system_literal_quote_single, .blank),
-        ctx_state_54 = ctxStateInt(.system_literal_quote_double, .blank),
-        ctx_state_55 = ctxStateInt(.attribute_value_quote_single, .blank),
-        ctx_state_56 = ctxStateInt(.attribute_value_quote_double, .blank),
-        ctx_state_57 = ctxStateInt(.entity_value_quote_single, .blank),
-        ctx_state_58 = ctxStateInt(.entity_value_quote_double, .blank),
+        ctx_state_00 = ctxStateInt(.markup, .eof),
+        ctx_state_01 = ctxStateInt(.non_markup, .eof),
+        ctx_state_02 = ctxStateInt(.cdata, .eof),
+        ctx_state_03 = ctxStateInt(.comment, .eof),
+        ctx_state_04 = ctxStateInt(.pi, .eof),
+        ctx_state_05 = ctxStateInt(.reference, .eof),
+        ctx_state_06 = ctxStateInt(.system_literal_quote_single, .eof),
+        ctx_state_07 = ctxStateInt(.system_literal_quote_double, .eof),
+        ctx_state_08 = ctxStateInt(.attribute_value_quote_single, .eof),
+        ctx_state_09 = ctxStateInt(.attribute_value_quote_double, .eof),
+        ctx_state_10 = ctxStateInt(.entity_value_quote_single, .eof),
+        ctx_state_11 = ctxStateInt(.entity_value_quote_double, .eof),
+        ctx_state_12 = ctxStateInt(.markup, .blank),
+        ctx_state_13 = ctxStateInt(.markup, .whitespace),
+        ctx_state_14 = ctxStateInt(.markup, .@"<"),
+        ctx_state_15 = ctxStateInt(.markup, .@"<!"),
+        ctx_state_16 = ctxStateInt(.markup, .@"<!-"),
+        ctx_state_17 = ctxStateInt(.markup, .dtd_subtag_start),
+        ctx_state_18 = ctxStateInt(.non_markup, .blank),
+        ctx_state_19 = ctxStateInt(.non_markup, .@"<"),
+        ctx_state_20 = ctxStateInt(.non_markup, .@"<!"),
+        ctx_state_21 = ctxStateInt(.non_markup, .@"<!-"),
+        ctx_state_22 = ctxStateInt(.non_markup, .@"<!["),
+        ctx_state_23 = ctxStateInt(.non_markup, .@"<![C"),
+        ctx_state_24 = ctxStateInt(.non_markup, .@"<![CD"),
+        ctx_state_25 = ctxStateInt(.non_markup, .@"<![CDA"),
+        ctx_state_26 = ctxStateInt(.non_markup, .@"<![CDAT"),
+        ctx_state_27 = ctxStateInt(.non_markup, .@"<![CDATA"),
+        ctx_state_28 = ctxStateInt(.non_markup, .@"<!D"),
+        ctx_state_29 = ctxStateInt(.non_markup, .@"<!DO"),
+        ctx_state_30 = ctxStateInt(.non_markup, .@"<!DOC"),
+        ctx_state_31 = ctxStateInt(.non_markup, .@"<!DOCT"),
+        ctx_state_32 = ctxStateInt(.non_markup, .@"<!DOCTY"),
+        ctx_state_33 = ctxStateInt(.non_markup, .@"<!DOCTYP"),
+        ctx_state_34 = ctxStateInt(.non_markup, .@"<!DOCTYPE"),
+        ctx_state_35 = ctxStateInt(.non_markup, .angle_bracket_left_bang_invalid_tag_returned),
+        ctx_state_36 = ctxStateInt(.cdata, .blank),
+        ctx_state_37 = ctxStateInt(.non_markup, .@"]"),
+        ctx_state_38 = ctxStateInt(.cdata, .@"]"),
+        ctx_state_39 = ctxStateInt(.non_markup, .@"]]"),
+        ctx_state_40 = ctxStateInt(.cdata, .@"]]"),
+        ctx_state_41 = ctxStateInt(.non_markup, .@"]]]"),
+        ctx_state_42 = ctxStateInt(.cdata, .@"]]]"),
+        ctx_state_43 = ctxStateInt(.reference, .blank),
+        ctx_state_44 = ctxStateInt(.comment, .blank),
+        ctx_state_45 = ctxStateInt(.comment, .@"-"),
+        ctx_state_46 = ctxStateInt(.comment, .@"--"),
+        ctx_state_47 = ctxStateInt(.comment, .@"---"),
+        ctx_state_48 = ctxStateInt(.pi, .blank),
+        ctx_state_49 = ctxStateInt(.pi, .@"?"),
+        ctx_state_50 = ctxStateInt(.system_literal_quote_single, .blank),
+        ctx_state_51 = ctxStateInt(.system_literal_quote_double, .blank),
+        ctx_state_52 = ctxStateInt(.attribute_value_quote_single, .blank),
+        ctx_state_53 = ctxStateInt(.attribute_value_quote_double, .blank),
+        ctx_state_54 = ctxStateInt(.entity_value_quote_single, .blank),
+        ctx_state_55 = ctxStateInt(.entity_value_quote_double, .blank),
 
         const CtxStateBits = packed struct {
             ctx: Context,
@@ -1879,9 +1882,9 @@ test "References" {
 
     try testTokenizer(.{}, " ", &.{ .{ .reference, .invalid_reference_end, null }, .{ .non_markup, .text_data, " " } });
     try testTokenizer(.{}, " ", &.{ .{ .reference, .invalid_reference_end, null }, .{ .attribute_value_quote_single, .text_data, " " } });
-    try testTokenizer(.{}, " ", &.{ .{ .reference, .invalid_reference_end, null }, .{ .dtd, .tag_whitespace, " " } });
+    try testTokenizer(.{}, " ", &.{ .{ .reference, .invalid_reference_end, null }, .{ .markup, .tag_whitespace, " " } });
     try testTokenizer(.{}, "lt", &.{ .{ .reference, .tag_token, "lt" }, .{ .reference, .eof, null } });
-    try testTokenizer(.{}, "lt;", &.{ .{ .reference, .tag_token, "lt" }, .{ .reference, .semicolon, null }, .{ .dtd, .eof, null } });
+    try testTokenizer(.{}, "lt;", &.{ .{ .reference, .tag_token, "lt" }, .{ .reference, .semicolon, null }, .{ .markup, .eof, null } });
     // TODO: more exhaustive testing of invariants
 }
 
@@ -1893,12 +1896,12 @@ test "Attribute Value" {
 
 test "Element tags" {
     try testTokenizer(.{}, "/foo/bar/>", &.{
-        .{ .element_tag, .slash, null },
-        .{ .element_tag, .tag_token, "foo" },
-        .{ .element_tag, .slash, null },
-        .{ .element_tag, .tag_token, "bar" },
-        .{ .element_tag, .slash, null },
-        .{ .element_tag, .angle_bracket_right, null },
+        .{ .markup, .slash, null },
+        .{ .markup, .tag_token, "foo" },
+        .{ .markup, .slash, null },
+        .{ .markup, .tag_token, "bar" },
+        .{ .markup, .slash, null },
+        .{ .markup, .angle_bracket_right, null },
     });
 }
 
@@ -1938,7 +1941,8 @@ test "CDATA" {
 
 test "PI" {
     try testTokenizer(.{}, "<?", &.{.{ .non_markup, .pi_start, null }});
-    try testTokenizer(.{}, "<?", &.{.{ .dtd, .pi_start, null }});
+    try testTokenizer(.{}, "<?", &.{.{ .markup, .pi_start, null }});
+    try testTokenizer(.{}, "<?", &.{.{ .pi, .text_data, "<?" }});
     try testTokenizer(.{}, "?>", &.{.{ .pi, .pi_end, null }});
 
     try testTokenizer(.{}, "?", &.{
@@ -1966,9 +1970,9 @@ test "PI" {
 
 test "Comment" {
     try testTokenizer(.{}, "<!--", &.{.{ .non_markup, .comment_start, null }});
-    try testTokenizer(.{}, "<!--", &.{.{ .dtd, .comment_start, null }});
+    try testTokenizer(.{}, "<!--", &.{.{ .markup, .comment_start, null }});
     try testTokenizer(.{}, "<!-", &.{.{ .non_markup, .invalid_comment_start_single_dash, null }});
-    try testTokenizer(.{}, "<!-", &.{.{ .dtd, .invalid_comment_start_single_dash, null }});
+    try testTokenizer(.{}, "<!-", &.{.{ .markup, .invalid_comment_start_single_dash, null }});
     try testTokenizer(.{}, "-->", &.{.{ .comment, .comment_end, null }});
 
     try testTokenizer(.{}, "--", &.{.{ .comment, .invalid_comment_dash_dash, null }});
@@ -1982,66 +1986,66 @@ test "Comment" {
     });
 }
 
-test "DTD" {
+test "Markup" {
     try testTokenizer(.{}, "<!DOCTYPE", &.{.{ .non_markup, .dtd_start, null }});
     try testTokenizer(.{}, "<!DOCTY", &.{.{ .non_markup, .invalid_dtd_start, "<!DOCTY" }});
     try testTokenizer(.{}, "<!DOCTYPEE", &.{.{ .non_markup, .invalid_dtd_start, "<!DOCTYPEE" }});
     try testTokenizer(.{}, "<!DOCTYPEE>", &.{
         .{ .non_markup, .invalid_dtd_start, "<!DOCTYPEE" },
-        .{ .dtd, .angle_bracket_right, null },
+        .{ .markup, .angle_bracket_right, null },
     });
 
     try testTokenizer(.{}, "<!ENTITY> <!ATTLIST> <!ELEMENT> <!NOTATION> <!EEEE> >", &.{
-        .{ .dtd, .angle_bracket_left_bang, null },
-        .{ .dtd, .tag_token, "ENTITY" },
-        .{ .dtd, .angle_bracket_right, null },
-        .{ .dtd, .tag_whitespace, " " },
+        .{ .markup, .angle_bracket_left_bang, null },
+        .{ .markup, .tag_token, "ENTITY" },
+        .{ .markup, .angle_bracket_right, null },
+        .{ .markup, .tag_whitespace, " " },
 
-        .{ .dtd, .angle_bracket_left_bang, null },
-        .{ .dtd, .tag_token, "ATTLIST" },
-        .{ .dtd, .angle_bracket_right, null },
-        .{ .dtd, .tag_whitespace, " " },
+        .{ .markup, .angle_bracket_left_bang, null },
+        .{ .markup, .tag_token, "ATTLIST" },
+        .{ .markup, .angle_bracket_right, null },
+        .{ .markup, .tag_whitespace, " " },
 
-        .{ .dtd, .angle_bracket_left_bang, null },
-        .{ .dtd, .tag_token, "ELEMENT" },
-        .{ .dtd, .angle_bracket_right, null },
-        .{ .dtd, .tag_whitespace, " " },
+        .{ .markup, .angle_bracket_left_bang, null },
+        .{ .markup, .tag_token, "ELEMENT" },
+        .{ .markup, .angle_bracket_right, null },
+        .{ .markup, .tag_whitespace, " " },
 
-        .{ .dtd, .angle_bracket_left_bang, null },
-        .{ .dtd, .tag_token, "NOTATION" },
-        .{ .dtd, .angle_bracket_right, null },
-        .{ .dtd, .tag_whitespace, " " },
+        .{ .markup, .angle_bracket_left_bang, null },
+        .{ .markup, .tag_token, "NOTATION" },
+        .{ .markup, .angle_bracket_right, null },
+        .{ .markup, .tag_whitespace, " " },
 
-        .{ .dtd, .angle_bracket_left_bang, null },
-        .{ .dtd, .tag_token, "EEEE" },
-        .{ .dtd, .angle_bracket_right, null },
-        .{ .dtd, .tag_whitespace, " " },
+        .{ .markup, .angle_bracket_left_bang, null },
+        .{ .markup, .tag_token, "EEEE" },
+        .{ .markup, .angle_bracket_right, null },
+        .{ .markup, .tag_whitespace, " " },
 
-        .{ .dtd, .angle_bracket_right, null },
+        .{ .markup, .angle_bracket_right, null },
     });
 
     try testTokenizer(.{}, "<!ENTITYYY", &.{
-        .{ .dtd, .angle_bracket_left_bang, null },
-        .{ .dtd, .tag_token, "ENTITYYY" },
+        .{ .markup, .angle_bracket_left_bang, null },
+        .{ .markup, .tag_token, "ENTITYYY" },
     });
     try testTokenizer(.{}, "()?*+|,%[]#", &.{
-        .{ .dtd, .lparen, null },
-        .{ .dtd, .rparen, null },
-        .{ .dtd, .qmark, null },
-        .{ .dtd, .asterisk, null },
-        .{ .dtd, .plus, null },
-        .{ .dtd, .pipe, null },
-        .{ .dtd, .comma, null },
-        .{ .dtd, .percent, null },
-        .{ .dtd, .square_bracket_left, null },
-        .{ .dtd, .square_bracket_right, null },
-        .{ .dtd, .hashtag, null },
+        .{ .markup, .lparen, null },
+        .{ .markup, .rparen, null },
+        .{ .markup, .qmark, null },
+        .{ .markup, .asterisk, null },
+        .{ .markup, .plus, null },
+        .{ .markup, .pipe, null },
+        .{ .markup, .comma, null },
+        .{ .markup, .percent, null },
+        .{ .markup, .square_bracket_left, null },
+        .{ .markup, .square_bracket_right, null },
+        .{ .markup, .hashtag, null },
     });
 
     try testTokenizer(.{}, "<![ <![", &.{
-        .{ .dtd, .angle_bracket_left_bang_square_bracket_left, null },
-        .{ .dtd, .tag_whitespace, " " },
-        .{ .dtd, .angle_bracket_left_bang_square_bracket_left, null },
+        .{ .markup, .angle_bracket_left_bang_square_bracket_left, null },
+        .{ .markup, .tag_whitespace, " " },
+        .{ .markup, .angle_bracket_left_bang_square_bracket_left, null },
     });
 }
 
@@ -2105,29 +2109,29 @@ test "General Test" {
             .{ .non_markup, .text_data, "\n\n" },
 
             .{ .non_markup, .angle_bracket_left, null },
-            .{ .element_tag, .tag_token, "foo" },
-            .{ .element_tag, .angle_bracket_right, null },
+            .{ .markup, .tag_token, "foo" },
+            .{ .markup, .angle_bracket_right, null },
             .{ .non_markup, .text_data, "\n  Lorem ipsum\n  " },
 
             .{ .non_markup, .angle_bracket_left, null },
-            .{ .element_tag, .tag_token, "bar" },
-            .{ .element_tag, .tag_whitespace, " " },
-            .{ .element_tag, .tag_token, "fizz" },
-            .{ .element_tag, .equals, null },
-            .{ .element_tag, .quote_single, null },
+            .{ .markup, .tag_token, "bar" },
+            .{ .markup, .tag_whitespace, " " },
+            .{ .markup, .tag_token, "fizz" },
+            .{ .markup, .equals, null },
+            .{ .markup, .quote_single, null },
             .{ .attribute_value_quote_single, .text_data, "buzz" },
             .{ .attribute_value_quote_single, .quote_single, null },
-            .{ .element_tag, .angle_bracket_right, null },
+            .{ .markup, .angle_bracket_right, null },
 
             .{ .non_markup, .angle_bracket_left, null },
-            .{ .element_tag, .tag_token, "baz" },
-            .{ .element_tag, .slash, null },
-            .{ .element_tag, .angle_bracket_right, null },
+            .{ .markup, .tag_token, "baz" },
+            .{ .markup, .slash, null },
+            .{ .markup, .angle_bracket_right, null },
 
             .{ .non_markup, .angle_bracket_left, null },
-            .{ .element_tag, .slash, null },
-            .{ .element_tag, .tag_token, "bar" },
-            .{ .element_tag, .angle_bracket_right, null },
+            .{ .markup, .slash, null },
+            .{ .markup, .tag_token, "bar" },
+            .{ .markup, .angle_bracket_right, null },
 
             .{ .non_markup, .text_data, "\n" },
 
@@ -2138,9 +2142,9 @@ test "General Test" {
             .{ .non_markup, .text_data, "\n" },
 
             .{ .non_markup, .angle_bracket_left, null },
-            .{ .element_tag, .slash, null },
-            .{ .element_tag, .tag_token, "foo" },
-            .{ .element_tag, .angle_bracket_right, null },
+            .{ .markup, .slash, null },
+            .{ .markup, .tag_token, "foo" },
+            .{ .markup, .angle_bracket_right, null },
 
             .{ .non_markup, .text_data, "\n" },
 

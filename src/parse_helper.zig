@@ -15,6 +15,16 @@ pub fn MaybeBufferedReader(comptime MaybeReader: ?type) type {
     };
 }
 
+pub fn nextTokenTypeNarrow(
+    tokenizer: *Tokenizer,
+    comptime context: Tokenizer.Context,
+    comptime MaybeReader: ?type,
+    mbr: MaybeBufferedReader(MaybeReader),
+) !Tokenizer.TokenType.Subset(context) {
+    const token_type = try nextTokenType(tokenizer, context, MaybeReader, mbr);
+    return token_type.narrowInto(context).?;
+}
+
 pub fn nextTokenType(
     tokenizer: *Tokenizer,
     context: Tokenizer.Context,

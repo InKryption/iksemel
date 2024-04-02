@@ -157,15 +157,14 @@ fn nextMarkerOrSrcImpl(
 
     return while (true) break switch (state.*) {
         .non_markup => switch (ret_type) {
-            .marker => switch (try parse_helper.nextTokenType(tokenizer, .non_markup, MaybeReader, mbr)) {
+            .marker => switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .non_markup, MaybeReader, mbr)) {
                 .eof => break .eof,
                 .text_data => {
                     state.* = .text_data;
                     break .text;
                 },
                 .cdata_start => {
-                    switch (try parse_helper.nextTokenType(tokenizer, .cdata, MaybeReader, mbr)) {
-                        else => unreachable,
+                    switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .cdata, MaybeReader, mbr)) {
                         .eof => return ScanError.UnexpectedEof,
                         .cdata_end => continue,
                         .text_data => {},
@@ -199,16 +198,13 @@ fn nextMarkerOrSrcImpl(
         .maybe_continue_text => switch (ret_type) {
             .marker => unreachable,
             .src => {
-                switch (try parse_helper.nextTokenType(tokenizer, .non_markup, MaybeReader, mbr)) {
-                    else => unreachable,
-
+                switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .non_markup, MaybeReader, mbr)) {
                     .text_data => {
                         state.* = .text_data;
                         continue;
                     },
                     .cdata_start => {
-                        switch (try parse_helper.nextTokenType(tokenizer, .cdata, MaybeReader, mbr)) {
-                            else => unreachable,
+                        switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .cdata, MaybeReader, mbr)) {
                             .eof => return ScanError.UnexpectedEof,
                             .cdata_end => continue,
                             .text_data => {},
@@ -256,8 +252,7 @@ fn nextMarkerOrSrcImpl(
                 if (try parse_helper.nextTokenSegment(tokenizer, .cdata, MaybeReader, mbr)) |segment| {
                     break segment;
                 }
-                switch (try parse_helper.nextTokenType(tokenizer, .cdata, MaybeReader, mbr)) {
-                    else => unreachable,
+                switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .cdata, MaybeReader, mbr)) {
                     .text_data => unreachable,
                     .eof => return ScanError.UnexpectedEof,
                     .cdata_end => {},
@@ -269,8 +264,7 @@ fn nextMarkerOrSrcImpl(
 
         .pi => switch (ret_type) {
             .marker => {
-                switch (try parse_helper.nextTokenType(tokenizer, .pi, MaybeReader, mbr)) {
-                    else => unreachable,
+                switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .pi, MaybeReader, mbr)) {
                     .eof => return ScanError.UnexpectedEof,
                     .pi_end => return ScanError.UnexpectedToken,
                     .text_data => {},
@@ -281,8 +275,7 @@ fn nextMarkerOrSrcImpl(
                 if (try parse_helper.nextTokenSegment(tokenizer, .pi, MaybeReader, mbr)) |segment| {
                     break segment;
                 }
-                switch (try parse_helper.nextTokenType(tokenizer, .pi, MaybeReader, mbr)) {
-                    else => unreachable,
+                switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .pi, MaybeReader, mbr)) {
                     .text_data => unreachable,
                     .eof => return ScanError.UnexpectedEof,
                     .pi_end => {},
@@ -294,13 +287,11 @@ fn nextMarkerOrSrcImpl(
 
         .ref => switch (ret_type) {
             .marker => {
-                const ref_kind: ScanMarker = switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
-                    else => unreachable,
+                const ref_kind: ScanMarker = switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .reference, MaybeReader, mbr)) {
                     .eof => return ScanError.UnexpectedEof,
                     .invalid_reference_end => return ScanError.UnexpectedToken,
                     .semicolon => return ScanError.UnexpectedToken,
-                    .hashtag => switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
-                        else => unreachable,
+                    .hashtag => switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .reference, MaybeReader, mbr)) {
                         .eof => return ScanError.UnexpectedEof,
                         .hashtag => return ScanError.UnexpectedToken,
                         .invalid_reference_end => return ScanError.UnexpectedToken,
@@ -322,12 +313,12 @@ fn nextMarkerOrSrcImpl(
         },
 
         .@"<" => switch (ret_type) {
-            .marker => switch (try parse_helper.nextTokenType(tokenizer, .element_tag, MaybeReader, mbr)) {
+            .marker => switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .markup, MaybeReader, mbr)) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
 
                 .slash => {
-                    switch (try parse_helper.nextTokenType(tokenizer, .element_tag, MaybeReader, mbr)) {
+                    switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .markup, MaybeReader, mbr)) {
                         else => return ScanError.UnexpectedToken,
                         .eof => return ScanError.UnexpectedEof,
                         .tag_token => {},
@@ -338,7 +329,7 @@ fn nextMarkerOrSrcImpl(
                 .tag_token => break .element_open_start,
             },
             .src => {
-                if (try parse_helper.nextTokenSegment(tokenizer, .element_tag, MaybeReader, mbr)) |segment| {
+                if (try parse_helper.nextTokenSegment(tokenizer, .markup, MaybeReader, mbr)) |segment| {
                     break segment;
                 }
                 state.* = .element_tag;
@@ -346,16 +337,16 @@ fn nextMarkerOrSrcImpl(
             },
         },
         .element_close_tag => switch (ret_type) {
-            .marker => switch (try parse_helper.nextTokenType(tokenizer, .element_tag, MaybeReader, mbr)) {
+            .marker => switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .markup, MaybeReader, mbr)) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
                 .tag_token => break .element_close,
             },
             .src => {
-                if (try parse_helper.nextTokenSegment(tokenizer, .element_tag, MaybeReader, mbr)) |segment| {
+                if (try parse_helper.nextTokenSegment(tokenizer, .markup, MaybeReader, mbr)) |segment| {
                     break segment;
                 }
-                switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .element_tag, MaybeReader, mbr)) {
+                switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .markup, MaybeReader, mbr)) {
                     else => return ScanError.UnexpectedToken,
                     .eof => return ScanError.UnexpectedEof,
                     .angle_bracket_right => {},
@@ -368,20 +359,20 @@ fn nextMarkerOrSrcImpl(
         .element_tag => switch (ret_type) {
             .src => unreachable,
             .marker => {
-                const first_non_whitespace_tt = switch (try parse_helper.nextTokenType(tokenizer, .element_tag, MaybeReader, mbr)) {
+                const first_non_whitespace_tt = switch (try parse_helper.nextTokenType(tokenizer, .markup, MaybeReader, mbr)) {
                     else => return ScanError.UnexpectedToken,
                     .eof => return ScanError.UnexpectedEof,
                     .slash, .angle_bracket_right => |tt| tt,
                     .tag_whitespace => tt: {
-                        try parse_helper.skipWhitespaceSrcUnchecked(tokenizer, .element_tag, MaybeReader, mbr);
-                        break :tt try parse_helper.nextTokenType(tokenizer, .element_tag, MaybeReader, mbr);
+                        try parse_helper.skipWhitespaceSrcUnchecked(tokenizer, .markup, MaybeReader, mbr);
+                        break :tt try parse_helper.nextTokenType(tokenizer, .markup, MaybeReader, mbr);
                     },
                 };
                 switch (first_non_whitespace_tt) {
                     else => return ScanError.UnexpectedToken,
                     .eof => return ScanError.UnexpectedEof,
                     .slash => {
-                        switch (try parse_helper.nextTokenType(tokenizer, .element_tag, MaybeReader, mbr)) {
+                        switch (try parse_helper.nextTokenType(tokenizer, .markup, MaybeReader, mbr)) {
                             else => return ScanError.UnexpectedToken,
                             .eof => return ScanError.UnexpectedEof,
                             .angle_bracket_right => {},
@@ -402,27 +393,27 @@ fn nextMarkerOrSrcImpl(
         },
         .attribute_name => switch (ret_type) {
             .src => {
-                if (try parse_helper.nextTokenSegment(tokenizer, .element_tag, MaybeReader, mbr)) |segment| {
+                if (try parse_helper.nextTokenSegment(tokenizer, .markup, MaybeReader, mbr)) |segment| {
                     break segment;
                 }
                 break null;
             },
             .marker => {
-                switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .element_tag, MaybeReader, mbr)) {
+                switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .markup, MaybeReader, mbr)) {
                     else => return ScanError.UnexpectedToken,
                     .eof => return ScanError.UnexpectedEof,
                     .tag_whitespace => unreachable,
                     .equals => {},
                 }
 
-                const quote_type = switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .element_tag, MaybeReader, mbr)) {
+                const quote_type = switch ((try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .markup, MaybeReader, mbr)).narrowInto(.markup).?) {
                     else => return ScanError.UnexpectedToken,
                     .eof => return ScanError.UnexpectedEof,
                     .tag_whitespace => unreachable,
                     inline //
                     .quote_single,
                     .quote_double,
-                    => |tt| comptime QuoteType.fromTokenType(tt).?,
+                    => |tt| comptime QuoteType.fromTokenType(Tokenizer.TokenType.fromNarrow(tt)).?,
                 };
                 state.* = switch (quote_type) {
                     .single => .attribute_value_type_sq,
@@ -452,13 +443,11 @@ fn nextMarkerOrSrcImpl(
                             break .attribute_end;
                         },
                         .ampersand => {
-                            const ref_kind: ScanMarker = switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
-                                else => unreachable,
+                            const ref_kind: ScanMarker = switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .reference, MaybeReader, mbr)) {
                                 .eof => return ScanError.UnexpectedEof,
                                 .invalid_reference_end => return ScanError.UnexpectedToken,
                                 .semicolon => return ScanError.UnexpectedToken,
-                                .hashtag => switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
-                                    else => unreachable,
+                                .hashtag => switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .reference, MaybeReader, mbr)) {
                                     .eof => return ScanError.UnexpectedEof,
                                     .hashtag => return ScanError.UnexpectedToken,
                                     .invalid_reference_end => return ScanError.UnexpectedToken,
@@ -540,8 +529,7 @@ fn expectReferenceSemicolonAfterTagToken(
     comptime MaybeReader: ?type,
     mbr: parse_helper.MaybeBufferedReader(MaybeReader),
 ) !void {
-    switch (try parse_helper.nextTokenType(tokenizer, .reference, MaybeReader, mbr)) {
-        else => unreachable,
+    switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .reference, MaybeReader, mbr)) {
         .tag_token => unreachable,
         .eof => return ScanError.UnexpectedEof,
         .hashtag => return ScanError.UnexpectedToken,
