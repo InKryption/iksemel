@@ -1,3 +1,20 @@
+pub const FullScanner = Scanner(null);
+pub inline fn fullScanner() FullScanner {
+    return .{ .mbr = .{} };
+}
+
+pub fn StreamScanner(comptime Reader: type) type {
+    return Scanner(Reader);
+}
+pub inline fn streamScanner(reader: anytype, read_buffer: []u8) StreamScanner(@TypeOf(reader)) {
+    return .{
+        .mbr = .{
+            .reader = reader,
+            .read_buffer = read_buffer,
+        },
+    };
+}
+
 pub const Kind = enum {
     general,
     parameter,
@@ -23,23 +40,6 @@ pub const ValueStrKind = enum {
     char_ref,
 };
 
-pub const FullScanner = Scanner(null);
-pub inline fn fullScanner() FullScanner {
-    return .{ .mbr = .{} };
-}
-
-pub fn StreamScanner(comptime Reader: type) type {
-    return Scanner(Reader);
-}
-pub inline fn streamScanner(reader: anytype, read_buffer: []u8) StreamScanner(@TypeOf(reader)) {
-    return .{
-        .mbr = .{
-            .reader = reader,
-            .read_buffer = read_buffer,
-        },
-    };
-}
-
 pub const ScanError = error{
     UnexpectedToken,
     UnexpectedEof,
@@ -58,9 +58,9 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
 
         /// This must be called first.
         /// Returns the entity kind.
-        /// See `nameNextSegment` next.
         /// Expects that the last token returned by `tokenizer` was `.angle_bracket_left_bang`, followed
         /// by a `.tag_token`, whose source satisfies `dtd.MarkupDeclKind.fromString(source) == .entity`.
+        /// See `nameNextSegment` next.
         pub fn entityKind(scanner: *Self, tokenizer: *TokenizerAPI) (SrcError || ScanError)!Kind {
             assert(scanner.state == .start);
             errdefer scanner.state = .err;

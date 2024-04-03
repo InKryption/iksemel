@@ -4,9 +4,11 @@
 //! are disallowed inside markup declarations in the
 //! Internal Subset, but not in the External Subset.
 
+pub const element = @import("dtd/element.zig");
 pub const entity = @import("dtd/entity.zig");
 
 comptime {
+    _ = element;
     _ = entity;
 }
 
