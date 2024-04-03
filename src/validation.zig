@@ -1,5 +1,14 @@
-//! Tools for validating strings and individual characters
+//! Tools for interpreting strings and individual characters
 //! in strings according to certain XML constructs.
+
+/// The set of codepoints defined as whitespace. They are all
+/// exactly one byte in size.
+pub const whitespace_set: []const u8 = &[_]u8{
+    '\u{20}',
+    '\u{09}',
+    '\u{0D}',
+    '\u{0A}',
+};
 
 pub fn containsOnlyValidPubidLiteralCharacters(
     str: []const u8,
@@ -83,6 +92,71 @@ pub fn isNameCharAfterStart(codepoint: u21) bool {
         else => false,
     };
 }
+
+pub const legal_char = struct {
+    /// The maximum value representing a unicode codepoint recognized
+    /// as a legal production of a character in an XML document.
+    pub const max_value = '\u{10FFFF}';
+    /// The maximum length of 'digits' in `'&#' Digits ';'`
+    pub const max_ref_digits_dec = std.fmt.count("{d}", .{max_value});
+    /// The maximum length of 'digits' in `'&#x' Digits ';'`
+    pub const max_ref_digits_hex = std.fmt.count("{x}", .{max_value});
+};
+
+/// Returns true if `codepoint` matches the production for Char as defined by the XML 1.0 specification.
+pub inline fn isLegalChar(codepoint: u21) bool {
+    return switch (codepoint) {
+        '\u{9}' => true,
+        '\u{A}' => true,
+        '\u{D}' => true,
+        '\u{20}'...'\u{D7FF}' => true,
+        '\u{E000}'...'\u{FFFD}' => true,
+        '\u{10000}'...'\u{10FFFF}' => true,
+        else => false,
+    };
+}
+
+pub const ParseCharRefError = error{
+    /// The reference is empty ('&;').
+    EmptyReference,
+    /// The reference is missing its hexadecimal digits ('&x;').
+    MissingDigits,
+    /// The reference contains invalid digits (either digits invalid for its base, or non-digit characters).
+    InvalidDigits,
+    /// The reference parses to an invalid codepoint.
+    InvalidCodepoint,
+};
+/// The returned codepoint is not validated to be a legal character;
+/// that can be checked with `isLegalChar` afterwards.
+pub fn parseCharRef(
+    /// From: `'&#' ref ';'`
+    ref: []const u8,
+) ParseCharRefError!u21 {
+    if (ref.len == 0) return ParseCharRefError.EmptyReference;
+    const digits: []const u8, const base: u8 = switch (ref[0]) {
+        'x' => .{ ref[1..], 16 },
+        else => .{ ref, 10 },
+    };
+    if (ref.len == 0) return ParseCharRefError.MissingDigits;
+
+    const max_ref_digits: u16 = switch (base) {
+        10 => legal_char.max_ref_digits_dec,
+        16 => legal_char.max_ref_digits_hex,
+        else => unreachable,
+    };
+    if (digits.len >= max_ref_digits) {}
+
+    if (std.mem.indexOfScalar(u8, digits, '_') != null) {
+        return ParseCharRefError.InvalidDigits;
+    }
+
+    return std.fmt.parseUnsigned(u21, digits, base) catch |err| switch (err) {
+        error.Overflow => ParseCharRefError.InvalidCodepoint,
+        error.InvalidCharacter => ParseCharRefError.InvalidDigits,
+    };
+}
+
+const std = @import("std");
 
 const iksemel = @import("iksemel.zig");
 const Tokenizer = iksemel.Tokenizer;
