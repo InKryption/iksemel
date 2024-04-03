@@ -54,7 +54,7 @@ pub fn nextTokenSegment(
     comptime MaybeReader: ?type,
     mbr: MaybeBufferedReader(MaybeReader),
 ) !?if (MaybeReader != null) []const u8 else Tokenizer.Range {
-    if (MaybeReader == null) return tokenizer.full.nextSrc(context);
+    if (MaybeReader == null) return tokenizer.full.nextSrcRange(context);
     const reader = mbr.reader;
     const read_buffer = mbr.read_buffer;
     return tokenizer.stream.nextSrc(context) catch while (true) {

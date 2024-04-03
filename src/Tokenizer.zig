@@ -142,7 +142,12 @@ pub const Full = struct {
         return token_type.intoNarrow(context).?;
     }
 
-    pub fn nextSrc(full: *Tokenizer.Full, context: Context) ?Range {
+    pub fn nextSrc(full: *Tokenizer.Full, context: Context) ?[]const u8 {
+        const range = full.nextSrcRange(context) orelse return null;
+        return range.toStr(full.asTokenizer().src);
+    }
+
+    pub fn nextSrcRange(full: *Tokenizer.Full, context: Context) ?Range {
         const tokenizer = full.asTokenizer();
         const tok_src: TokenSrc = tokenizer.nextTypeOrSrcImpl(context, .src_no_underrun) orelse return null;
         return switch (tok_src) {
@@ -152,8 +157,8 @@ pub const Full = struct {
     }
 
     pub fn nextSrcComplete(full: *Tokenizer.Full, context: Context) Range {
-        var range: Range = full.nextSrc(context).?;
-        while (full.nextSrc(context)) |subsequent_range| {
+        var range: Range = full.nextSrcRange(context).?;
+        while (full.nextSrcRange(context)) |subsequent_range| {
             assert(range.end == subsequent_range.start);
             range.end = subsequent_range.end;
         }
