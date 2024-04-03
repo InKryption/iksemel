@@ -55,11 +55,6 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
         pub const TokenizerAPI = if (MaybeReader != null) Tokenizer.Stream else Tokenizer.Full;
         pub const Src = if (MaybeReader != null) []const u8 else Tokenizer.Range;
 
-        /// Returns true if the scanner reached the end of the entity declaration successfully.
-        pub inline fn finished(scanner: *const Self) bool {
-            return scanner.state == .end;
-        }
-
         /// This must be called first.
         /// Returns the entity kind.
         /// See `nameNextSegment` next.
@@ -242,7 +237,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 => {},
             }
 
-            switch (try parse_helper.nextTokenTypeNarrowIgnoreTagWhitespace(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) {
+            switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
                 .tag_whitespace => unreachable,
@@ -405,7 +400,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
 
             try scanner.expectAndSkipTagWhitespace(tokenizer);
 
-            switch (try parse_helper.nextTokenTypeNarrowIgnoreTagWhitespace(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) {
+            switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
                 .tag_whitespace => unreachable,
@@ -430,13 +425,14 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 return segment;
             }
 
-            switch (try parse_helper.nextTokenTypeNarrowIgnoreTagWhitespace(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) {
+            switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
                 .tag_whitespace => unreachable,
                 .angle_bracket_right => {},
             }
 
+            scanner.state = .end;
             return null;
         }
 
@@ -719,19 +715,36 @@ const ScannerTestValues = struct {
 
                 break :def .{ .entity_value = try values.toOwnedSlice() };
             },
-            .external_id_public => def: {
-                const pubid_literal: []const u8 = str: {
-                    var pubid_literal = std.ArrayList(u8).init(allocator);
-                    defer pubid_literal.deinit();
 
-                    while (try scanner.pubidLiteralNextSegment(tokenizer)) |segment| {
-                        const segment_str = if (MaybeReader != null) segment else segment.toStr(src);
-                        try pubid_literal.appendSlice(segment_str);
-                    }
-
-                    break :str try pubid_literal.toOwnedSlice();
+            inline //
+            .external_id_public,
+            .external_id_system,
+            => |tag| def: {
+                const PubidLiteral = switch (tag) {
+                    .external_id_public => []const u8,
+                    .external_id_system => void,
+                    else => comptime unreachable,
                 };
-                errdefer allocator.free(pubid_literal);
+                const pubid_literal: PubidLiteral = switch (tag) {
+                    .external_id_public => str: {
+                        var pubid_literal = std.ArrayList(u8).init(allocator);
+                        defer pubid_literal.deinit();
+
+                        while (try scanner.pubidLiteralNextSegment(tokenizer)) |segment| {
+                            const segment_str = if (MaybeReader != null) segment else segment.toStr(src);
+                            try pubid_literal.appendSlice(segment_str);
+                        }
+
+                        break :str try pubid_literal.toOwnedSlice();
+                    },
+                    .external_id_system => {},
+                    else => comptime unreachable,
+                };
+                errdefer switch (tag) {
+                    .external_id_public => allocator.free(pubid_literal),
+                    .external_id_system => {},
+                    else => comptime unreachable,
+                };
 
                 const system_literal: []const u8 = str: {
                     var system_literal = std.ArrayList(u8).init(allocator);
@@ -759,36 +772,11 @@ const ScannerTestValues = struct {
                 } else null;
                 errdefer allocator.free(ndata_decl orelse "");
 
-                break :def .{ .external_id_public = .{ pubid_literal, system_literal, ndata_decl } };
-            },
-            .external_id_system => def: {
-                const system_literal: []const u8 = str: {
-                    var system_literal = std.ArrayList(u8).init(allocator);
-                    defer system_literal.deinit();
-
-                    while (try scanner.systemLiteralNextSegment(tokenizer)) |segment| {
-                        const segment_str = if (MaybeReader != null) segment else segment.toStr(src);
-                        try system_literal.appendSlice(segment_str);
-                    }
-
-                    break :str try system_literal.toOwnedSlice();
+                break :def switch (tag) {
+                    .external_id_public => .{ .external_id_public = .{ pubid_literal, system_literal, ndata_decl } },
+                    .external_id_system => .{ .external_id_system = .{ system_literal, ndata_decl } },
+                    else => comptime unreachable,
                 };
-                errdefer allocator.free(system_literal);
-
-                const ndata_decl: ?[]const u8 = if (try scanner.nDataDeclPresent(tokenizer)) str: {
-                    var ndata_decl = std.ArrayList(u8).init(allocator);
-                    defer ndata_decl.deinit();
-
-                    while (try scanner.nDataDeclNameNextSegment(tokenizer)) |segment| {
-                        const segment_str = if (MaybeReader != null) segment else segment.toStr(src);
-                        try ndata_decl.appendSlice(segment_str);
-                    }
-
-                    break :str try ndata_decl.toOwnedSlice();
-                } else null;
-                errdefer allocator.free(ndata_decl orelse "");
-
-                break :def .{ .external_id_system = .{ system_literal, ndata_decl } };
             },
         };
         errdefer definition.deinit(allocator);
@@ -845,13 +833,13 @@ fn expectEntityDeclStart(
     const src = if (MaybeReader == null) tokenizer.asTokenizer().src;
     try std.testing.expectEqual(.angle_bracket_left_bang, try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, mbr));
     try std.testing.expectEqual(.tag_token, try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, mbr));
-    var bstr: std.BoundedArray(u8, iksemel.int_subset.DeclType.max_str_len) = .{};
+    var bstr: std.BoundedArray(u8, iksemel.dtd.MarkupDeclKind.max_str_len) = .{};
     while (try parse_helper.nextTokenSegment(tokenizer.asTokenizer(), .markup, MaybeReader, mbr)) |segment| {
         const segment_str: []const u8 = if (MaybeReader != null) segment else segment.toStr(src);
         bstr.appendSlice(segment_str) catch return error.TestExpectedEqual;
     }
     errdefer std.log.err("Actual: '{}'", .{std.zig.fmtEscapes(bstr.constSlice())});
-    try std.testing.expectEqual(.entity, iksemel.int_subset.DeclType.fromString(bstr.constSlice()));
+    try std.testing.expectEqual(.entity, iksemel.dtd.MarkupDeclKind.fromString(bstr.constSlice()));
 }
 
 test "EntityValue" {

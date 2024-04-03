@@ -1,12 +1,13 @@
 //! Utilities for scanning the DTD Internal Subset.
 
-pub const entity = @import("internal_subset/entity.zig");
+pub const entity = @import("dtd/entity.zig");
 
 comptime {
     _ = entity;
 }
 
-pub const DeclType = enum {
+/// DTD Markup Decl
+pub const MarkupDeclKind = enum {
     entity,
     element,
     attlist,
@@ -17,7 +18,7 @@ pub const DeclType = enum {
         /// encountered after `.angle_bracket_left_bang` and then `.tag_token` with a
         /// context of `.markup`.
         str: []const u8,
-    ) ?DeclType {
+    ) ?MarkupDeclKind {
         return if (str.len <= max_str_len) switch (declStrInt(str)) {
             declStrInt("ENTITY") => .entity,
             declStrInt("ELEMENT") => .element,
@@ -45,12 +46,12 @@ pub const DeclType = enum {
     }
 };
 
-test DeclType {
-    try std.testing.expectEqual(.entity, DeclType.fromString("ENTITY"));
-    try std.testing.expectEqual(.element, DeclType.fromString("ELEMENT"));
-    try std.testing.expectEqual(.attlist, DeclType.fromString("ATTLIST"));
-    try std.testing.expectEqual(.notation, DeclType.fromString("NOTATION"));
-    try std.testing.expectEqual(null, DeclType.fromString("ABCD"));
+test MarkupDeclKind {
+    try std.testing.expectEqual(.entity, MarkupDeclKind.fromString("ENTITY"));
+    try std.testing.expectEqual(.element, MarkupDeclKind.fromString("ELEMENT"));
+    try std.testing.expectEqual(.attlist, MarkupDeclKind.fromString("ATTLIST"));
+    try std.testing.expectEqual(.notation, MarkupDeclKind.fromString("NOTATION"));
+    try std.testing.expectEqual(null, MarkupDeclKind.fromString("ABCD"));
 }
 
 const std = @import("std");

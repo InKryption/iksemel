@@ -406,14 +406,15 @@ fn nextMarkerOrSrcImpl(
                     .equals => {},
                 }
 
-                const quote_type = switch ((try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .markup, MaybeReader, mbr)).intoNarrow(.markup).?) {
+                const quote_type = switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer, .markup, MaybeReader, mbr)) {
                     else => return ScanError.UnexpectedToken,
                     .eof => return ScanError.UnexpectedEof,
                     .tag_whitespace => unreachable,
+
                     inline //
                     .quote_single,
                     .quote_double,
-                    => |tt| comptime QuoteType.fromTokenType(Tokenizer.TokenType.fromNarrow(tt)).?,
+                    => |tt| comptime QuoteType.fromTokenTypeNarrow(tt).?,
                 };
                 state.* = switch (quote_type) {
                     .single => .attribute_value_type_sq,

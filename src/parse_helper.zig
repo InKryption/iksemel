@@ -143,31 +143,21 @@ pub fn skipWhitespaceSrcUnchecked(
     }
 }
 
-pub fn nextTokenTypeNarrowIgnoreTagWhitespace(
-    tokenizer: *Tokenizer,
-    comptime context: Tokenizer.Context,
-    comptime MaybeReader: ?type,
-    mbr: MaybeBufferedReader(MaybeReader),
-) (if (MaybeReader) |Reader| Reader.Error else error{})!Tokenizer.TokenType.Subset(context) {
-    const token_type = try nextTokenTypeIgnoreTagWhitespace(tokenizer, context, MaybeReader, mbr);
-    return token_type.intoNarrow(context).?;
-}
-
 /// Gets the immediate next token type; if it's `.tag_whitespace`, it skips
 /// the whitespace token source, and then returns the next token type,
 /// asserting it is not of `.tag_whitespace` (two can't be returned consecutively).
 pub fn nextTokenTypeIgnoreTagWhitespace(
     tokenizer: *Tokenizer,
-    context: Tokenizer.Context,
+    comptime context: Tokenizer.Context,
     comptime MaybeReader: ?type,
     mbr: MaybeBufferedReader(MaybeReader),
-) (if (MaybeReader) |Reader| Reader.Error else error{})!Tokenizer.TokenType {
-    switch (try nextTokenType(tokenizer, context, MaybeReader, mbr)) {
+) (if (MaybeReader) |Reader| Reader.Error else error{})!Tokenizer.TokenType.Subset(context) {
+    switch (try nextTokenTypeNarrow(tokenizer, context, MaybeReader, mbr)) {
         else => |tag| return tag,
         .tag_whitespace => {},
     }
     try skipWhitespaceSrcUnchecked(tokenizer, context, MaybeReader, mbr);
-    return switch (try nextTokenType(tokenizer, context, MaybeReader, mbr)) {
+    return switch (try nextTokenTypeNarrow(tokenizer, context, MaybeReader, mbr)) {
         else => |tag| tag,
         .tag_whitespace => unreachable,
     };

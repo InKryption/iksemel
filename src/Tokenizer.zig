@@ -569,6 +569,14 @@ pub const QuoteType = enum {
         };
     }
 
+    pub inline fn toTokenTypeNarrow(qt: QuoteType, comptime context: Tokenizer.Context) Tokenizer.Tokenizer {
+        return qt.toTokenType().intoNarrow(context);
+    }
+    pub inline fn fromTokenTypeNarrow(narrow_tt: anytype) ?QuoteType {
+        const tt = Tokenizer.TokenType.fromNarrow(narrow_tt);
+        return QuoteType.fromTokenType(tt);
+    }
+
     /// Returns `.system_literal_quote_<qt>`.
     pub inline fn systemLiteralCtx(qt: QuoteType) Tokenizer.Context {
         return switch (qt) {
