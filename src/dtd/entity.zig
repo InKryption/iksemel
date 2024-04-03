@@ -1,5 +1,3 @@
-//! Facilitates the scanning of entity declarations in the DTD Internal Subset.
-
 pub const Kind = enum {
     general,
     parameter,
@@ -25,32 +23,35 @@ pub const ValueStrKind = enum {
     char_ref,
 };
 
-pub inline fn fullScanner() Scanner(null) {
+pub const FullScanner = Scanner(null);
+pub inline fn fullScanner() FullScanner {
+    return .{ .mbr = .{} };
+}
+
+pub fn StreamScanner(comptime Reader: type) type {
+    return Scanner(Reader);
+}
+pub inline fn streamScanner(reader: anytype, read_buffer: []u8) StreamScanner(@TypeOf(reader)) {
     return .{
-        .reader = {},
-        .read_buffer = {},
+        .mbr = .{
+            .reader = reader,
+            .read_buffer = read_buffer,
+        },
     };
 }
 
-pub inline fn streamScanner(reader: anytype, read_buffer: []u8) Scanner(@TypeOf(reader)) {
-    return .{
-        .reader = reader,
-        .read_buffer = read_buffer,
-    };
-}
+pub const ScanError = error{
+    UnexpectedToken,
+    UnexpectedEof,
+};
 
 pub fn Scanner(comptime MaybeReader: ?type) type {
     return struct {
-        reader: (MaybeReader orelse void),
-        read_buffer: if (MaybeReader != null) []u8 else void,
+        mbr: parse_helper.MaybeBufferedReader(MaybeReader),
         state: State = .start,
         const Self = @This();
 
         pub const SrcError = if (MaybeReader) |Reader| Reader.Error else error{};
-        pub const ScanError = error{
-            UnexpectedToken,
-            UnexpectedEof,
-        };
 
         pub const TokenizerAPI = if (MaybeReader != null) Tokenizer.Stream else Tokenizer.Full;
         pub const Src = if (MaybeReader != null) []const u8 else Tokenizer.Range;
@@ -58,14 +59,16 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
         /// This must be called first.
         /// Returns the entity kind.
         /// See `nameNextSegment` next.
+        /// Expects that the last token returned by `tokenizer` was `.angle_bracket_left_bang`, followed
+        /// by a `.tag_token`, whose source satisfies `dtd.MarkupDeclKind.fromString(source) == .entity`.
         pub fn entityKind(scanner: *Self, tokenizer: *TokenizerAPI) (SrcError || ScanError)!Kind {
             assert(scanner.state == .start);
             errdefer scanner.state = .err;
             defer scanner.state = .name;
 
-            try scanner.expectAndSkipTagWhitespace(tokenizer);
+            try scanner.expectAndSkipTagWhitespace(tokenizer.asTokenizer());
 
-            switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) {
+            switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr)) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
                 .tag_whitespace => unreachable,
@@ -73,9 +76,9 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 .percent => {},
             }
 
-            try scanner.expectAndSkipTagWhitespace(tokenizer);
+            try scanner.expectAndSkipTagWhitespace(tokenizer.asTokenizer());
 
-            switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) {
+            switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr)) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
                 .tag_whitespace => unreachable,
@@ -91,7 +94,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
             assert(scanner.state == .name);
             errdefer scanner.state = .err;
 
-            if (try parse_helper.nextTokenSegment(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) |segment| {
+            if (try parse_helper.nextTokenSegment(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr)) |segment| {
                 return segment;
             }
             scanner.state = .value_kind;
@@ -105,9 +108,9 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
             assert(scanner.state == .value_kind);
             errdefer scanner.state = .err;
 
-            try scanner.expectAndSkipTagWhitespace(tokenizer);
+            try scanner.expectAndSkipTagWhitespace(tokenizer.asTokenizer());
 
-            switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) {
+            switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr)) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
                 .tag_whitespace => unreachable,
@@ -124,11 +127,11 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 },
 
                 .tag_token => {
-                    const maybe_pub_or_sys = try parse_helper.nextTokenSrcAsEnum(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr(), enum { PUBLIC, SYSTEM });
+                    const maybe_pub_or_sys = try parse_helper.nextTokenSrcAsEnum(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr, enum { PUBLIC, SYSTEM });
                     const pub_or_sys = maybe_pub_or_sys orelse return ScanError.UnexpectedToken;
 
-                    try scanner.expectAndSkipTagWhitespace(tokenizer);
-                    const quote_type, const content = try scanner.expectSystemLiteral(tokenizer);
+                    try scanner.expectAndSkipTagWhitespace(tokenizer.asTokenizer());
+                    const quote_type, const content = try scanner.expectSystemLiteral(tokenizer.asTokenizer());
 
                     scanner.state = switch (content) {
                         .text => switch (pub_or_sys) {
@@ -173,7 +176,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
             });
             errdefer scanner.state = .err;
 
-            switch (try parse_helper.nextTokenType(tokenizer.asTokenizer(), quote_type.entityValueCtx(), MaybeReader, scanner.mbr())) {
+            switch (try parse_helper.nextTokenType(tokenizer.asTokenizer(), quote_type.entityValueCtx(), MaybeReader, scanner.mbr)) {
                 else => unreachable,
                 .eof => return ScanError.UnexpectedEof,
                 .text_data => {
@@ -185,7 +188,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 },
 
                 .percent => {
-                    switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .reference, MaybeReader, scanner.mbr())) {
+                    switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .reference, MaybeReader, scanner.mbr)) {
                         .eof,
                         => return ScanError.UnexpectedEof,
 
@@ -205,14 +208,14 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 },
 
                 .ampersand => {
-                    const ref_kind: ValueStrKind = switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .reference, MaybeReader, scanner.mbr())) {
+                    const ref_kind: ValueStrKind = switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .reference, MaybeReader, scanner.mbr)) {
                         .eof => return ScanError.UnexpectedEof,
 
                         .semicolon,
                         .invalid_reference_end,
                         => return ScanError.UnexpectedToken,
 
-                        .hashtag => switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .reference, MaybeReader, scanner.mbr())) {
+                        .hashtag => switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .reference, MaybeReader, scanner.mbr)) {
                             .eof => return ScanError.UnexpectedEof,
 
                             .hashtag,
@@ -237,7 +240,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 => {},
             }
 
-            switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) {
+            switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr)) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
                 .tag_whitespace => unreachable,
@@ -268,11 +271,11 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
             errdefer scanner.state = .err;
 
             const ref_or_str_context = if (is_ref) .reference else quote_type.entityValueCtx();
-            if (try parse_helper.nextTokenSegment(tokenizer.asTokenizer(), ref_or_str_context, MaybeReader, scanner.mbr())) |segment| {
+            if (try parse_helper.nextTokenSegment(tokenizer.asTokenizer(), ref_or_str_context, MaybeReader, scanner.mbr)) |segment| {
                 return segment;
             }
 
-            if (is_ref) switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .reference, MaybeReader, scanner.mbr())) {
+            if (is_ref) switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .reference, MaybeReader, scanner.mbr)) {
                 .eof => return ScanError.UnexpectedEof,
                 .hashtag,
                 .invalid_reference_end,
@@ -304,18 +307,18 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                         .pub_literal_dq => .double,
                         else => unreachable,
                     };
-                    if (try parse_helper.nextTokenSegment(tokenizer.asTokenizer(), quote_type.systemLiteralCtx(), MaybeReader, scanner.mbr())) |segment| {
+                    if (try parse_helper.nextTokenSegment(tokenizer.asTokenizer(), quote_type.systemLiteralCtx(), MaybeReader, scanner.mbr)) |segment| {
                         return segment;
                     }
-                    try scanner.expectSystemLiteralEndQuoteAfterTextData(tokenizer, quote_type);
+                    try scanner.expectSystemLiteralEndQuoteAfterTextData(tokenizer.asTokenizer(), quote_type);
                 },
 
                 .pub_literal_empty => {},
                 else => unreachable,
             }
 
-            try scanner.expectAndSkipTagWhitespace(tokenizer);
-            const quote_type, const content = try scanner.expectSystemLiteral(tokenizer);
+            try scanner.expectAndSkipTagWhitespace(tokenizer.asTokenizer());
+            const quote_type, const content = try scanner.expectSystemLiteral(tokenizer.asTokenizer());
 
             scanner.state = switch (content) {
                 .text => switch (quote_type) {
@@ -344,10 +347,10 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                         .sys_literal_dq => .double,
                         else => unreachable,
                     };
-                    if (try parse_helper.nextTokenSegment(tokenizer.asTokenizer(), quote_type.systemLiteralCtx(), MaybeReader, scanner.mbr())) |segment| {
+                    if (try parse_helper.nextTokenSegment(tokenizer.asTokenizer(), quote_type.systemLiteralCtx(), MaybeReader, scanner.mbr)) |segment| {
                         return segment;
                     }
-                    try scanner.expectSystemLiteralEndQuoteAfterTextData(tokenizer, quote_type);
+                    try scanner.expectSystemLiteralEndQuoteAfterTextData(tokenizer.asTokenizer(), quote_type);
                 },
 
                 .sys_literal_empty => {},
@@ -369,7 +372,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
             defer assert(scanner.state != .check_for_ndata_decl);
             errdefer scanner.state = .err;
 
-            switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) {
+            switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr)) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
 
@@ -379,9 +382,9 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 },
                 .tag_whitespace => {},
             }
-            try parse_helper.skipWhitespaceSrcUnchecked(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr());
+            try parse_helper.skipWhitespaceSrcUnchecked(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr);
 
-            switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) {
+            switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr)) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
                 .tag_whitespace => unreachable,
@@ -394,13 +397,13 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 .tag_token => {},
             }
 
-            if (try parse_helper.nextTokenSrcAsEnum(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr(), enum { NDATA }) == null) {
+            if (try parse_helper.nextTokenSrcAsEnum(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr, enum { NDATA }) == null) {
                 return ScanError.UnexpectedToken;
             }
 
-            try scanner.expectAndSkipTagWhitespace(tokenizer);
+            try scanner.expectAndSkipTagWhitespace(tokenizer.asTokenizer());
 
-            switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) {
+            switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr)) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
                 .tag_whitespace => unreachable,
@@ -417,15 +420,18 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
         /// The returned source segments should be concatenated in order to obtain the referenced
         /// notation's name.
         /// After this returns null, we have reached the end of the entity declaration.
-        pub fn nDataDeclNameNextSegment(scanner: *Self, tokenizer: *TokenizerAPI) (SrcError || ScanError)!?Src {
+        pub fn nDataDeclNameNextSegment(
+            scanner: *Self,
+            tokenizer: *TokenizerAPI,
+        ) (SrcError || ScanError)!?Src {
             assert(scanner.state == .ndata_decl_name);
             errdefer scanner.state = .err;
 
-            if (try parse_helper.nextTokenSegment(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) |segment| {
+            if (try parse_helper.nextTokenSegment(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr)) |segment| {
                 return segment;
             }
 
-            switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) {
+            switch (try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr)) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
                 .tag_whitespace => unreachable,
@@ -438,10 +444,10 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
 
         fn expectSystemLiteralEndQuoteAfterTextData(
             scanner: *const Self,
-            tokenizer: *TokenizerAPI,
+            tokenizer: *Tokenizer,
             quote_type: Tokenizer.QuoteType,
         ) !void {
-            switch (try parse_helper.nextTokenType(tokenizer.asTokenizer(), quote_type.systemLiteralCtx(), MaybeReader, scanner.mbr())) {
+            switch (try parse_helper.nextTokenType(tokenizer, quote_type.systemLiteralCtx(), MaybeReader, scanner.mbr)) {
                 else => unreachable,
                 .eof => return ScanError.UnexpectedEof,
                 .text_data => unreachable,
@@ -453,8 +459,11 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
         }
 
         const SystemLiteralContent = enum { text, empty };
-        fn expectSystemLiteral(scanner: *const Self, tokenizer: *TokenizerAPI) (SrcError || ScanError)!struct { Tokenizer.QuoteType, SystemLiteralContent } {
-            const quote_type: Tokenizer.QuoteType = switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) {
+        fn expectSystemLiteral(
+            scanner: *const Self,
+            tokenizer: *Tokenizer,
+        ) (SrcError || ScanError)!struct { Tokenizer.QuoteType, SystemLiteralContent } {
+            const quote_type: Tokenizer.QuoteType = switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .markup, MaybeReader, scanner.mbr)) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
 
@@ -463,7 +472,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 => |quote_tt| Tokenizer.QuoteType.fromTokenType(Tokenizer.TokenType.fromNarrow(quote_tt)).?,
             };
 
-            const content: SystemLiteralContent = switch (try parse_helper.nextTokenType(tokenizer.asTokenizer(), quote_type.systemLiteralCtx(), MaybeReader, scanner.mbr())) {
+            const content: SystemLiteralContent = switch (try parse_helper.nextTokenType(tokenizer, quote_type.systemLiteralCtx(), MaybeReader, scanner.mbr)) {
                 else => unreachable,
                 .eof => return ScanError.UnexpectedEof,
 
@@ -478,19 +487,11 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
             return .{ quote_type, content };
         }
 
-        fn expectAndSkipTagWhitespace(scanner: *const Self, tokenizer: *TokenizerAPI) (SrcError || ScanError)!void {
-            if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr())) |tt| switch (tt) {
+        fn expectAndSkipTagWhitespace(scanner: *const Self, tokenizer: *Tokenizer) (SrcError || ScanError)!void {
+            if (try parse_helper.skipIfTagWhitespaceOrGetNextTokType(tokenizer, .markup, MaybeReader, scanner.mbr)) |tt| switch (tt) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
                 .tag_whitespace => unreachable,
-            };
-        }
-
-        inline fn mbr(scanner: *const Self) parse_helper.MaybeBufferedReader(MaybeReader) {
-            if (MaybeReader == null) return .{};
-            return .{
-                .reader = scanner.reader,
-                .read_buffer = scanner.read_buffer,
             };
         }
 

@@ -1,4 +1,8 @@
 //! Utilities for scanning the DTD Internal Subset.
+//! Not suitable for rigorous, correct scanning of any
+//! DTD External Subset, as parameter entity references
+//! are disallowed inside markup declarations in the
+//! Internal Subset, but not in the External Subset.
 
 pub const entity = @import("dtd/entity.zig");
 
