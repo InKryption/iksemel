@@ -7,11 +7,13 @@
 pub const entity = @import("dtd/entity.zig");
 pub const element = @import("dtd/element.zig");
 pub const attlist = @import("dtd/attlist.zig");
+pub const notation = @import("dtd/notation.zig");
 
 comptime {
     _ = entity;
     _ = element;
     _ = attlist;
+    _ = notation;
 }
 
 /// DTD Markup Decl

@@ -734,7 +734,7 @@ fn testScanner(
                 .read_buffer = read_buffer,
             };
 
-            try expectElementDeclStart(Reader, &tokenizer.stream, mbr);
+            try expectAttlistDeclStart(Reader, &tokenizer.stream, mbr);
             const actual = try ScannerTestValues.parse(std.testing.allocator, Reader, &tokenizer.stream, mbr);
             defer actual.deinit(std.testing.allocator);
             try expected.expectEqual(actual);
@@ -743,13 +743,13 @@ fn testScanner(
 
     var tokenizer = Tokenizer.initFull(src);
 
-    try expectElementDeclStart(null, &tokenizer.full, .{});
+    try expectAttlistDeclStart(null, &tokenizer.full, .{});
     const actual = try ScannerTestValues.parse(std.testing.allocator, null, &tokenizer.full, .{});
     defer actual.deinit(std.testing.allocator);
     try expected.expectEqual(actual);
 }
 
-fn expectElementDeclStart(
+fn expectAttlistDeclStart(
     comptime MaybeReader: ?type,
     tokenizer: *Scanner(MaybeReader).TokenizerAPI,
     mbr: parse_helper.MaybeBufferedReader(MaybeReader),
