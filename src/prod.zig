@@ -10,6 +10,66 @@ pub const whitespace_set: []const u8 = &[_]u8{
     '\u{0A}',
 };
 
+pub const PredefinedEntity = enum {
+    lt,
+    gt,
+    amp,
+    apos,
+    quot,
+
+    pub fn toChar(predefined: PredefinedEntity) u8 {
+        return switch (predefined) {
+            .lt => '<',
+            .gt => '>',
+            .amp => '&',
+            .apos => '\'',
+            .quot => '\"',
+        };
+    }
+
+    pub fn fromChar(char: u8) ?PredefinedEntity {
+        return switch (char) {
+            '<' => .lt,
+            '>' => .gt,
+            '&' => .amp,
+            '\'' => .apos,
+            '\"' => .quot,
+            else => null,
+        };
+    }
+
+    pub inline fn toName(predefined: PredefinedEntity) []const u8 {
+        return @tagName(predefined);
+    }
+
+    pub const max_name_len = blk: {
+        var max_len = 0;
+        for (@typeInfo(PredefinedEntity).Enum.fields) |field| {
+            max_len = @max(max_len, field.name.len);
+        }
+        break :blk max_len;
+    };
+
+    pub fn fromName(str: []const u8) ?PredefinedEntity {
+        return if (str.len < max_name_len) switch (strInt(str)) {
+            strInt(@tagName(PredefinedEntity.lt)) => .lt,
+            strInt(@tagName(PredefinedEntity.gt)) => .gt,
+            strInt(@tagName(PredefinedEntity.amp)) => .amp,
+            strInt(@tagName(PredefinedEntity.apos)) => .apos,
+            strInt(@tagName(PredefinedEntity.quot)) => .quot,
+            else => null,
+        } else null;
+    }
+
+    const StrInt = std.meta.Int(.unsigned, @bitSizeOf([max_name_len]u8));
+    inline fn strInt(str: []const u8) StrInt {
+        assert(str.len <= max_name_len);
+        var buf: [max_name_len]u8 = .{0} ** max_name_len;
+        @memcpy(buf[0..str.len], str);
+        return @bitCast(buf);
+    }
+};
+
 pub fn containsOnlyValidPubidLiteralCharacters(
     str: []const u8,
     /// The surrounding quote type.
@@ -157,6 +217,7 @@ pub fn parseCharRef(
 }
 
 const std = @import("std");
+const assert = std.debug.assert;
 
 const iksemel = @import("iksemel.zig");
 const Tokenizer = iksemel.Tokenizer;
