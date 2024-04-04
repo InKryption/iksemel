@@ -4,12 +4,14 @@
 //! are disallowed inside markup declarations in the
 //! Internal Subset, but not in the External Subset.
 
-pub const element = @import("dtd/element.zig");
 pub const entity = @import("dtd/entity.zig");
+pub const element = @import("dtd/element.zig");
+pub const attlist = @import("dtd/attlist.zig");
 
 comptime {
-    _ = element;
     _ = entity;
+    _ = element;
+    _ = attlist;
 }
 
 /// DTD Markup Decl
