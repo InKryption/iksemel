@@ -157,6 +157,8 @@ pub const legal_char = struct {
     /// The maximum value representing a unicode codepoint recognized
     /// as a legal production of a character in an XML document.
     pub const max_value = '\u{10FFFF}';
+    /// The maximum length of the decimal or hex (including the 'x' prefix) reference to a character.
+    pub const max_ref_len = @max(max_ref_digits_dec, "x".len + max_ref_digits_hex);
     /// The maximum length of 'digits' in `'&#' Digits ';'`
     pub const max_ref_digits_dec = std.fmt.count("{d}", .{max_value});
     /// The maximum length of 'digits' in `'&#x' Digits ';'`

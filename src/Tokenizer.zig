@@ -524,6 +524,10 @@ pub const Range = struct {
     start: usize,
     end: usize,
 
+    pub inline fn len(range: Range) usize {
+        return range.end - range.end;
+    }
+
     pub inline fn toStr(range: Range, src: []const u8) []const u8 {
         return src[range.start..range.end];
     }
@@ -792,7 +796,7 @@ fn nextTypeOrSrcImplUnchecked(
                         continue;
                     },
                     else => |char| {
-                        const not_whitespace = std.mem.indexOfScalar(u8, iksemel.validation.whitespace_set, char) == null;
+                        const not_whitespace = std.mem.indexOfScalar(u8, iksemel.prod.whitespace_set, char) == null;
                         if (not_whitespace) break .tag_token;
                         tokenizer.state = .whitespace;
                         break .tag_whitespace;
@@ -805,7 +809,7 @@ fn nextTypeOrSrcImplUnchecked(
                     break null;
                 }
                 const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, iksemel.validation.whitespace_set ++ next_helper.dtd_terminal_characters) orelse src.len;
+                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, iksemel.prod.whitespace_set ++ next_helper.dtd_terminal_characters) orelse src.len;
                 tokenizer.index = str_end;
                 if (str_start == str_end) break null;
                 break next_helper.rangeInit(str_start, str_end);
@@ -819,7 +823,7 @@ fn nextTypeOrSrcImplUnchecked(
                     break null;
                 }
                 const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfNonePos(u8, src, tokenizer.index, iksemel.validation.whitespace_set) orelse src.len;
+                const str_end = std.mem.indexOfNonePos(u8, src, tokenizer.index, iksemel.prod.whitespace_set) orelse src.len;
                 tokenizer.index = str_end;
                 if (str_start != str_end) {
                     break next_helper.rangeInit(str_start, str_end);
@@ -1086,7 +1090,7 @@ fn nextTypeOrSrcImplUnchecked(
                     tokenizer.state = .eof;
                     break .dtd_start;
                 }
-                if (std.mem.indexOfScalar(u8, iksemel.validation.whitespace_set ++ next_helper.dtd_terminal_characters, src[tokenizer.index]) != null) {
+                if (std.mem.indexOfScalar(u8, iksemel.prod.whitespace_set ++ next_helper.dtd_terminal_characters, src[tokenizer.index]) != null) {
                     tokenizer.state = .blank;
                     break .dtd_start;
                 }
@@ -1105,7 +1109,7 @@ fn nextTypeOrSrcImplUnchecked(
                     break null;
                 }
                 const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, iksemel.validation.whitespace_set ++ next_helper.dtd_terminal_characters) orelse src.len;
+                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, iksemel.prod.whitespace_set ++ next_helper.dtd_terminal_characters) orelse src.len;
                 tokenizer.index = str_end;
                 if (str_start != str_end) {
                     break next_helper.rangeInit(str_start, str_end);
@@ -1240,7 +1244,7 @@ fn nextTypeOrSrcImplUnchecked(
         },
 
         ctxState(.reference, .blank) => {
-            const terminal_chars = iksemel.validation.whitespace_set ++ next_helper.dtd_terminal_characters ++ &[_]u8{'&'};
+            const terminal_chars = iksemel.prod.whitespace_set ++ next_helper.dtd_terminal_characters ++ &[_]u8{'&'};
             switch (ret_kind) {
                 .type => {
                     if (tokenizer.index == src.len) {

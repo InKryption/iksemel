@@ -48,6 +48,17 @@ pub fn nextTokenType(
     };
 }
 
+pub fn nextTokenSegmentStr(
+    tokenizer: *Tokenizer,
+    context: Tokenizer.Context,
+    comptime MaybeReader: ?type,
+    mbr: MaybeBufferedReader(MaybeReader),
+) !?[]const u8 {
+    const maybe_segment = try nextTokenSegment(tokenizer, context, MaybeReader, mbr);
+    const segment = maybe_segment orelse return null;
+    return if (MaybeReader != null) segment else segment.toStr(tokenizer.src);
+}
+
 pub fn nextTokenSegment(
     tokenizer: *Tokenizer,
     context: Tokenizer.Context,
@@ -114,13 +125,13 @@ pub fn skipWhitespaceTokenSrc(
     var any_non_whitespace = false;
     if (MaybeReader != null) {
         while (try nextTokenSegment(tokenizer, context, MaybeReader, mbr)) |str| {
-            if (std.mem.indexOfNone(u8, str, iksemel.validation.whitespace_set) == null) continue;
+            if (std.mem.indexOfNone(u8, str, iksemel.prod.whitespace_set) == null) continue;
             any_non_whitespace = false;
             // don't break, we need to consume the whole token source
         }
     } else {
         const range = tokenizer.full.nextSrcComplete(context);
-        any_non_whitespace = std.mem.indexOfNone(u8, range.toStr(tokenizer.src), iksemel.validation.whitespace_set) != null;
+        any_non_whitespace = std.mem.indexOfNone(u8, range.toStr(tokenizer.src), iksemel.prod.whitespace_set) != null;
     }
     return if (any_non_whitespace) .non_whitespace else .all_whitespace;
 }

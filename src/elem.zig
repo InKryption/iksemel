@@ -41,6 +41,8 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
             ));
         }
 
+        /// For element and attribute names, the returned segments
+        /// are guaranteed to be consecutive in the raw source.
         pub fn nextSrc(
             scanner: *Self,
             tokenizer: *TokenizerAPI,
