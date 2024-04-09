@@ -175,7 +175,7 @@ pub fn nextTokenTypeIgnoreTagWhitespace(
 }
 
 /// Expects the next token to be `.tag_whitespace`, and if it is,
-/// it skips the whitespace source, and returnsn ull. Otherwise,
+/// it skips the whitespace source, and returns null. Otherwise,
 /// it returns the actual token type.
 pub fn skipIfTagWhitespaceOrGetNextTokType(
     tokenizer: *Tokenizer,

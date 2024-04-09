@@ -77,9 +77,9 @@ pub const ScanMarker = enum {
 
     /// `nextSrc` will return the segments of the text.
     text,
-    //// `nextSrc` will return the segments of the reference name.
+    /// `nextSrc` will return the segments of the reference name.
     reference,
-    //// `nextSrc` will return the segments of the character reference number string.
+    /// `nextSrc` will return the segments of the character reference number string.
     char_reference,
 
     /// First, `nextSrc` will return the segments of the element name.

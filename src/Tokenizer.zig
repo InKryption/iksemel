@@ -528,7 +528,7 @@ pub const Range = struct {
         return range.end - range.end;
     }
 
-    pub inline fn toStr(range: Range, src: []const u8) []const u8 {
+    pub fn toStr(range: Range, src: []const u8) []const u8 {
         return src[range.start..range.end];
     }
 };
@@ -569,7 +569,7 @@ pub const QuoteType = enum {
         };
     }
 
-    pub inline fn toTokenTypeNarrow(qt: QuoteType, comptime context: Tokenizer.Context) Tokenizer.Tokenizer {
+    pub inline fn toTokenTypeNarrow(qt: QuoteType, comptime context: Tokenizer.Context) ?Tokenizer.TokenType.Subset(context) {
         return qt.toTokenType().intoNarrow(context);
     }
     pub inline fn fromTokenTypeNarrow(narrow_tt: anytype) ?QuoteType {
@@ -1899,10 +1899,20 @@ test "References" {
 test "Attribute Value" {
     try testTokenizer(.{}, "\'", &.{.{ .attribute_value_quote_single, .quote_single, null }});
     try testTokenizer(.{}, "\"", &.{.{ .attribute_value_quote_double, .quote_double, null }});
+
+    try testTokenizer(.{}, "\"", &.{.{ .attribute_value_quote_single, .text_data, "\"" }});
+    try testTokenizer(.{}, "\'", &.{.{ .attribute_value_quote_double, .text_data, "\'" }});
+
     // TODO: more exhaustive testing of invariants
 }
 
 test "Element tags" {
+    try testTokenizer(.{}, "foo/>", &.{
+        .{ .markup, .tag_token, "foo" },
+        .{ .markup, .slash, null },
+        .{ .markup, .angle_bracket_right, null },
+    });
+
     try testTokenizer(.{}, "/foo/bar/>", &.{
         .{ .markup, .slash, null },
         .{ .markup, .tag_token, "foo" },
