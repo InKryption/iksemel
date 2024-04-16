@@ -533,90 +533,6 @@ pub const Range = struct {
     }
 };
 
-pub const QuoteType = enum {
-    single,
-    double,
-
-    pub const Char = std.math.IntFittingRange(
-        @min('\'', '\"'),
-        @max('\'', '\"'),
-    );
-    pub inline fn toChar(qt: QuoteType) Char {
-        return switch (qt) {
-            .single => '\'',
-            .double => '\"',
-        };
-    }
-    pub inline fn fromChar(char: Char) ?QuoteType {
-        return switch (char) {
-            '\'' => .single,
-            '\"' => .double,
-            else => null,
-        };
-    }
-
-    pub inline fn toTokenType(qt: QuoteType) Tokenizer.TokenType {
-        return switch (qt) {
-            .single => .quote_single,
-            .double => .quote_double,
-        };
-    }
-    pub inline fn fromTokenType(tt: Tokenizer.TokenType) ?QuoteType {
-        return switch (tt) {
-            .quote_single => .single,
-            .quote_double => .double,
-            else => null,
-        };
-    }
-
-    pub inline fn toTokenTypeNarrow(qt: QuoteType, comptime context: Tokenizer.Context) ?Tokenizer.TokenType.Subset(context) {
-        return qt.toTokenType().intoNarrow(context);
-    }
-    pub inline fn fromTokenTypeNarrow(narrow_tt: anytype) ?QuoteType {
-        const tt = Tokenizer.TokenType.fromNarrow(narrow_tt);
-        return QuoteType.fromTokenType(tt);
-    }
-
-    /// Returns `.system_literal_quote_<qt>`.
-    pub inline fn systemLiteralCtx(qt: QuoteType) Tokenizer.Context {
-        return switch (qt) {
-            .single => .system_literal_quote_single,
-            .double => .system_literal_quote_double,
-        };
-    }
-
-    /// Returns `.attribute_value_quote_<qt>`.
-    pub inline fn attributeValueCtx(qt: QuoteType) Tokenizer.Context {
-        return switch (qt) {
-            .single => .attribute_value_quote_single,
-            .double => .attribute_value_quote_double,
-        };
-    }
-
-    /// Returns `.entity_value_quote_<qt>`.
-    pub inline fn entityValueCtx(qt: QuoteType) Tokenizer.Context {
-        return switch (qt) {
-            .single => .entity_value_quote_single,
-            .double => .entity_value_quote_double,
-        };
-    }
-
-    pub inline fn fromCtx(ctx: Tokenizer.Context) ?QuoteType {
-        return switch (ctx) {
-            .system_literal_quote_single => .single,
-            .system_literal_quote_double => .double,
-
-            .attribute_value_quote_single => .single,
-            .attribute_value_quote_double => .double,
-
-            .entity_value_quote_single => .single,
-            .entity_value_quote_double => .double,
-
-            else => null,
-        };
-    }
-};
-
 const TokenSrc = union(enum) {
     range: Range,
     literal: Literal,
@@ -796,7 +712,7 @@ fn nextTypeOrSrcImplUnchecked(
                         continue;
                     },
                     else => |char| {
-                        const not_whitespace = std.mem.indexOfScalar(u8, iksemel.prod.whitespace_set, char) == null;
+                        const not_whitespace = std.mem.indexOfScalar(u8, xml.prod.whitespace_set, char) == null;
                         if (not_whitespace) break .tag_token;
                         tokenizer.state = .whitespace;
                         break .tag_whitespace;
@@ -809,7 +725,7 @@ fn nextTypeOrSrcImplUnchecked(
                     break null;
                 }
                 const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, iksemel.prod.whitespace_set ++ next_helper.dtd_terminal_characters) orelse src.len;
+                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, xml.prod.whitespace_set ++ xml.prod.markup_symbol_set) orelse src.len;
                 tokenizer.index = str_end;
                 if (str_start == str_end) break null;
                 break next_helper.rangeInit(str_start, str_end);
@@ -823,7 +739,7 @@ fn nextTypeOrSrcImplUnchecked(
                     break null;
                 }
                 const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfNonePos(u8, src, tokenizer.index, iksemel.prod.whitespace_set) orelse src.len;
+                const str_end = std.mem.indexOfNonePos(u8, src, tokenizer.index, xml.prod.whitespace_set) orelse src.len;
                 tokenizer.index = str_end;
                 if (str_start != str_end) {
                     break next_helper.rangeInit(str_start, str_end);
@@ -1090,7 +1006,7 @@ fn nextTypeOrSrcImplUnchecked(
                     tokenizer.state = .eof;
                     break .dtd_start;
                 }
-                if (std.mem.indexOfScalar(u8, iksemel.prod.whitespace_set ++ next_helper.dtd_terminal_characters, src[tokenizer.index]) != null) {
+                if (std.mem.indexOfScalar(u8, xml.prod.whitespace_set ++ xml.prod.markup_symbol_set, src[tokenizer.index]) != null) {
                     tokenizer.state = .blank;
                     break .dtd_start;
                 }
@@ -1109,7 +1025,7 @@ fn nextTypeOrSrcImplUnchecked(
                     break null;
                 }
                 const str_start = tokenizer.index;
-                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, iksemel.prod.whitespace_set ++ next_helper.dtd_terminal_characters) orelse src.len;
+                const str_end = std.mem.indexOfAnyPos(u8, src, tokenizer.index, xml.prod.whitespace_set ++ xml.prod.markup_symbol_set) orelse src.len;
                 tokenizer.index = str_end;
                 if (str_start != str_end) {
                     break next_helper.rangeInit(str_start, str_end);
@@ -1244,7 +1160,7 @@ fn nextTypeOrSrcImplUnchecked(
         },
 
         ctxState(.reference, .blank) => {
-            const terminal_chars = iksemel.prod.whitespace_set ++ next_helper.dtd_terminal_characters ++ &[_]u8{'&'};
+            const terminal_chars = xml.prod.whitespace_set ++ xml.prod.markup_symbol_set;
             switch (ret_kind) {
                 .type => {
                     if (tokenizer.index == src.len) {
@@ -1547,15 +1463,6 @@ fn nextTypeOrSrcImplUnchecked(
 }
 
 const next_helper = struct {
-    const dtd_terminal_characters = &[_]u8{
-        '\"', '#', '%',
-        '\'', '(', ')',
-        '*',  '+', ',',
-        '/',  ';', '<',
-        '=',  '>', '?',
-        '[',  ']', '|',
-    };
-
     inline fn rangeInit(range_start: usize, range_end: usize) TokenSrc {
         return .{ .range = .{ .start = range_start, .end = range_end } };
     }
@@ -2175,4 +2082,4 @@ const std = @import("std");
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 
-const iksemel = @import("iksemel.zig");
+const xml = @import("iksemel.zig");

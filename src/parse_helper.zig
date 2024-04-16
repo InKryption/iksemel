@@ -1,9 +1,3 @@
-const std = @import("std");
-const assert = std.debug.assert;
-
-const iksemel = @import("iksemel.zig");
-const Tokenizer = iksemel.Tokenizer;
-
 pub fn MaybeBufferedReader(comptime MaybeReader: ?type) type {
     const Reader = MaybeReader orelse return struct {
         reader: void = {},
@@ -122,18 +116,17 @@ pub fn skipWhitespaceTokenSrc(
     comptime MaybeReader: ?type,
     mbr: MaybeBufferedReader(MaybeReader),
 ) !enum { all_whitespace, non_whitespace } {
-    var any_non_whitespace = false;
     if (MaybeReader != null) {
         while (try nextTokenSegment(tokenizer, context, MaybeReader, mbr)) |str| {
-            if (std.mem.indexOfNone(u8, str, iksemel.prod.whitespace_set) == null) continue;
-            any_non_whitespace = false;
-            // don't break, we need to consume the whole token source
+            if (std.mem.indexOfNone(u8, str, xml.prod.whitespace_set) == null) continue;
+            return .non_whitespace;
         }
+        return .all_whitespace;
     } else {
         const range = tokenizer.full.nextSrcComplete(context);
-        any_non_whitespace = std.mem.indexOfNone(u8, range.toStr(tokenizer.src), iksemel.prod.whitespace_set) != null;
+        const all_whitespace = std.mem.indexOfNone(u8, range.toStr(tokenizer.src), xml.prod.whitespace_set) == null;
+        return if (all_whitespace) .all_whitespace else .non_whitespace;
     }
-    return if (any_non_whitespace) .non_whitespace else .all_whitespace;
 }
 
 /// This function reads the source and asserts it's all whitespace
@@ -233,3 +226,9 @@ pub fn handleCommentSkip(
         else => unreachable,
     };
 }
+
+const std = @import("std");
+const assert = std.debug.assert;
+
+const xml = @import("iksemel.zig");
+const Tokenizer = xml.Tokenizer;

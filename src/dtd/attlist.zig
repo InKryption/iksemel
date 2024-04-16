@@ -270,8 +270,8 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
             const dd_kind: union(DefaultDeclKind) {
                 required,
                 implied,
-                fixed: Tokenizer.QuoteType,
-                value: Tokenizer.QuoteType,
+                fixed: xml.prod.QuoteType,
+                value: xml.prod.QuoteType,
             } = switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr)) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
@@ -291,7 +291,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                         .FIXED => .{ .fixed = fixed_quote_type: {
                             try scanner.expectAndSkipTagWhitespace(tokenizer.asTokenizer());
                             const possibly_quote_tt = try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr);
-                            const maybe_quote_type = Tokenizer.QuoteType.fromTokenTypeNarrow(possibly_quote_tt);
+                            const maybe_quote_type = xml.prod.QuoteType.fromTokenTypeNarrow(possibly_quote_tt);
                             break :fixed_quote_type maybe_quote_type orelse return ScanError.UnexpectedToken;
                         } },
                     };
@@ -300,7 +300,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 inline //
                 .quote_single,
                 .quote_double,
-                => |quote_tt| .{ .value = comptime Tokenizer.QuoteType.fromTokenTypeNarrow(quote_tt).? },
+                => |quote_tt| .{ .value = comptime xml.prod.QuoteType.fromTokenTypeNarrow(quote_tt).? },
             };
 
             scanner.state = switch (dd_kind) {
@@ -318,7 +318,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
         /// Returns null to indicate the attribute value string has been terminated.
         /// See `defaultDeclValueNextStrSegment`, and `pendingAttDef` next.
         pub fn defaultDeclValueNextStrKind(scanner: *Self, tokenizer: *TokenizerAPI) (SrcError || ScanError)!?AttributeValueStrKind {
-            const quote_type: Tokenizer.QuoteType = switch (scanner.state) {
+            const quote_type: xml.prod.QuoteType = switch (scanner.state) {
                 .default_decl_value_sq => .single,
                 .default_decl_value_dq => .double,
                 else => unreachable,
@@ -372,7 +372,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
         }
 
         pub fn defaultDeclValueNextStrSegment(scanner: *Self, tokenizer: *TokenizerAPI) (SrcError || ScanError)!?Src {
-            const quote_type: Tokenizer.QuoteType, const is_ref: bool = switch (scanner.state) {
+            const quote_type: xml.prod.QuoteType, const is_ref: bool = switch (scanner.state) {
                 .default_decl_value_str_sq => .{ .single, false },
                 .default_decl_value_str_dq => .{ .double, false },
 
@@ -757,13 +757,13 @@ fn expectAttlistDeclStart(
     const src = if (MaybeReader == null) tokenizer.asTokenizer().src;
     try std.testing.expectEqual(.angle_bracket_left_bang, try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer.asTokenizer(), .markup, MaybeReader, mbr));
     try std.testing.expectEqual(.tag_token, try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, mbr));
-    var bstr: std.BoundedArray(u8, iksemel.dtd.MarkupDeclKind.max_str_len) = .{};
+    var bstr: std.BoundedArray(u8, xml.dtd.MarkupDeclKind.max_str_len) = .{};
     while (try parse_helper.nextTokenSegment(tokenizer.asTokenizer(), .markup, MaybeReader, mbr)) |segment| {
         const segment_str: []const u8 = if (MaybeReader != null) segment else segment.toStr(src);
         bstr.appendSlice(segment_str) catch return error.TestExpectedEqual;
     }
     errdefer std.log.err("Actual: '{}'", .{std.zig.fmtEscapes(bstr.constSlice())});
-    try std.testing.expectEqual(.attlist, iksemel.dtd.MarkupDeclKind.fromString(bstr.constSlice()));
+    try std.testing.expectEqual(.attlist, xml.dtd.MarkupDeclKind.fromString(bstr.constSlice()));
 }
 
 test "basic" {
@@ -807,8 +807,8 @@ test "basic" {
 const std = @import("std");
 const assert = std.debug.assert;
 
-const iksemel = @import("../iksemel.zig");
-const Tokenizer = iksemel.Tokenizer;
+const xml = @import("../iksemel.zig");
+const Tokenizer = xml.Tokenizer;
 
 const parse_helper = @import("../parse_helper.zig");
 const test_helper = @import("../test_helper.zig");

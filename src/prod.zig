@@ -10,6 +10,17 @@ pub const whitespace_set: []const u8 = &[_]u8{
     '\u{0A}',
 };
 
+/// The set of codepoints which are recognized as symbols, or
+/// non-name characters in a markup context. They are all exactly
+/// one byte in size.
+pub const markup_symbol_set = &[_]u8{
+    '\"', '#', '%', '&',
+    '\'', '(', ')', '*',
+    '+',  ',', '/', ';',
+    '<',  '=', '>', '?',
+    '[',  ']', '|',
+};
+
 pub const PredefinedEntity = enum {
     lt,
     gt,
@@ -70,6 +81,90 @@ pub const PredefinedEntity = enum {
     }
 };
 
+pub const QuoteType = enum {
+    single,
+    double,
+
+    pub const Char = std.math.IntFittingRange(
+        @min('\'', '\"'),
+        @max('\'', '\"'),
+    );
+    pub inline fn toChar(qt: QuoteType) Char {
+        return switch (qt) {
+            .single => '\'',
+            .double => '\"',
+        };
+    }
+    pub inline fn fromChar(char: Char) ?QuoteType {
+        return switch (char) {
+            '\'' => .single,
+            '\"' => .double,
+            else => null,
+        };
+    }
+
+    pub inline fn toTokenType(qt: QuoteType) Tokenizer.TokenType {
+        return switch (qt) {
+            .single => .quote_single,
+            .double => .quote_double,
+        };
+    }
+    pub inline fn fromTokenType(tt: Tokenizer.TokenType) ?QuoteType {
+        return switch (tt) {
+            .quote_single => .single,
+            .quote_double => .double,
+            else => null,
+        };
+    }
+
+    pub inline fn toTokenTypeNarrow(qt: QuoteType, comptime context: Tokenizer.Context) ?Tokenizer.TokenType.Subset(context) {
+        return qt.toTokenType().intoNarrow(context);
+    }
+    pub inline fn fromTokenTypeNarrow(narrow_tt: anytype) ?QuoteType {
+        const tt = Tokenizer.TokenType.fromNarrow(narrow_tt);
+        return QuoteType.fromTokenType(tt);
+    }
+
+    /// Returns `.system_literal_quote_<qt>`.
+    pub inline fn systemLiteralCtx(qt: QuoteType) Tokenizer.Context {
+        return switch (qt) {
+            .single => .system_literal_quote_single,
+            .double => .system_literal_quote_double,
+        };
+    }
+
+    /// Returns `.attribute_value_quote_<qt>`.
+    pub inline fn attributeValueCtx(qt: QuoteType) Tokenizer.Context {
+        return switch (qt) {
+            .single => .attribute_value_quote_single,
+            .double => .attribute_value_quote_double,
+        };
+    }
+
+    /// Returns `.entity_value_quote_<qt>`.
+    pub inline fn entityValueCtx(qt: QuoteType) Tokenizer.Context {
+        return switch (qt) {
+            .single => .entity_value_quote_single,
+            .double => .entity_value_quote_double,
+        };
+    }
+
+    pub inline fn fromCtx(ctx: Tokenizer.Context) ?QuoteType {
+        return switch (ctx) {
+            .system_literal_quote_single => .single,
+            .system_literal_quote_double => .double,
+
+            .attribute_value_quote_single => .single,
+            .attribute_value_quote_double => .double,
+
+            .entity_value_quote_single => .single,
+            .entity_value_quote_double => .double,
+
+            else => null,
+        };
+    }
+};
+
 pub fn containsOnlyValidPubidLiteralCharacters(
     str: []const u8,
     /// The surrounding quote type.
@@ -77,7 +172,7 @@ pub fn containsOnlyValidPubidLiteralCharacters(
     /// A pubid literal may never contain a double quote,
     /// however it may contain a single quote if the string
     /// is double quoted.
-    quote: Tokenizer.QuoteType,
+    quote: xml.prod.QuoteType,
 ) bool {
     return for (str) |char| {
         if (!isPubidChar(char, quote)) break false;
@@ -91,7 +186,7 @@ pub fn isPubidChar(
     /// A pubid literal may never contain a double quote,
     /// however it may contain a single quote if the string
     /// is double quoted.
-    quote: Tokenizer.QuoteType,
+    quote: xml.prod.QuoteType,
 ) bool {
     return switch (codepoint) {
         '\u{20}', '\u{D}', '\u{A}' => true,
@@ -221,5 +316,5 @@ pub fn parseCharRef(
 const std = @import("std");
 const assert = std.debug.assert;
 
-const iksemel = @import("iksemel.zig");
-const Tokenizer = iksemel.Tokenizer;
+const xml = @import("iksemel.zig");
+const Tokenizer = xml.Tokenizer;

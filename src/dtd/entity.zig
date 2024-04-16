@@ -119,7 +119,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 .quote_single,
                 .quote_double,
                 => |quote_tt| {
-                    scanner.state = switch (comptime Tokenizer.QuoteType.fromTokenType(Tokenizer.TokenType.fromNarrow(quote_tt)).?) {
+                    scanner.state = switch (comptime xml.prod.QuoteType.fromTokenType(Tokenizer.TokenType.fromNarrow(quote_tt)).?) {
                         .single => .entity_value_kind_sq,
                         .double => .entity_value_kind_dq,
                     };
@@ -165,7 +165,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
         /// end of the entity declaration.
         /// See `entityValueNextStrSegment` next.
         pub fn entityValueNextStrKind(scanner: *Self, tokenizer: *TokenizerAPI) (SrcError || ScanError)!?ValueStrKind {
-            const quote_type: Tokenizer.QuoteType = switch (scanner.state) {
+            const quote_type: xml.prod.QuoteType = switch (scanner.state) {
                 .entity_value_kind_sq => .single,
                 .entity_value_kind_dq => .double,
                 else => unreachable,
@@ -257,7 +257,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
         /// to obtain the content of the text or the reference name.
         /// See `entityValueNextStrKind` next.
         pub fn entityValueNextStrSegment(scanner: *Self, tokenizer: *TokenizerAPI) (SrcError || ScanError)!?Src {
-            const quote_type: Tokenizer.QuoteType, //
+            const quote_type: xml.prod.QuoteType, //
             const is_ref: bool //
             = switch (scanner.state) {
                 .entity_value_str_sq => .{ .single, false },
@@ -302,7 +302,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 .pub_literal_sq,
                 .pub_literal_dq,
                 => |state_tag| {
-                    const quote_type: Tokenizer.QuoteType = switch (state_tag) {
+                    const quote_type: xml.prod.QuoteType = switch (state_tag) {
                         .pub_literal_sq => .single,
                         .pub_literal_dq => .double,
                         else => unreachable,
@@ -342,7 +342,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 .sys_literal_sq,
                 .sys_literal_dq,
                 => |state_tag| {
-                    const quote_type: Tokenizer.QuoteType = switch (state_tag) {
+                    const quote_type: xml.prod.QuoteType = switch (state_tag) {
                         .sys_literal_sq => .single,
                         .sys_literal_dq => .double,
                         else => unreachable,
@@ -445,7 +445,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
         fn expectSystemLiteralEndQuoteAfterTextData(
             scanner: *const Self,
             tokenizer: *Tokenizer,
-            quote_type: Tokenizer.QuoteType,
+            quote_type: xml.prod.QuoteType,
         ) !void {
             switch (try parse_helper.nextTokenType(tokenizer, quote_type.systemLiteralCtx(), MaybeReader, scanner.mbr)) {
                 else => unreachable,
@@ -462,14 +462,14 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
         fn expectSystemLiteral(
             scanner: *const Self,
             tokenizer: *Tokenizer,
-        ) (SrcError || ScanError)!struct { Tokenizer.QuoteType, SystemLiteralContent } {
-            const quote_type: Tokenizer.QuoteType = switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .markup, MaybeReader, scanner.mbr)) {
+        ) (SrcError || ScanError)!struct { xml.prod.QuoteType, SystemLiteralContent } {
+            const quote_type: xml.prod.QuoteType = switch (try parse_helper.nextTokenTypeNarrow(tokenizer, .markup, MaybeReader, scanner.mbr)) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
 
                 .quote_single,
                 .quote_double,
-                => |quote_tt| Tokenizer.QuoteType.fromTokenType(Tokenizer.TokenType.fromNarrow(quote_tt)).?,
+                => |quote_tt| xml.prod.QuoteType.fromTokenType(Tokenizer.TokenType.fromNarrow(quote_tt)).?,
             };
 
             const content: SystemLiteralContent = switch (try parse_helper.nextTokenType(tokenizer, quote_type.systemLiteralCtx(), MaybeReader, scanner.mbr)) {
@@ -566,7 +566,7 @@ const ScannerTestValues = struct {
             _ = options;
             switch (definition) {
                 .entity_value => |entity_value| {
-                    const quote_type: Tokenizer.QuoteType = for (entity_value) |value_segment| {
+                    const quote_type: xml.prod.QuoteType = for (entity_value) |value_segment| {
                         if (value_segment[0] != .text) continue;
                         if (std.mem.indexOfScalar(u8, value_segment[1], '"') != null) break .single;
                     } else .double;
@@ -591,8 +591,8 @@ const ScannerTestValues = struct {
                 .external_id_public => |extid_pub| {
                     const pubid, const sys, const maybe_ndata = extid_pub;
 
-                    const pubid_qt: Tokenizer.QuoteType = if (std.mem.indexOfScalar(u8, pubid, '"') != null) .single else .double;
-                    const sys_qt: Tokenizer.QuoteType = if (std.mem.indexOfScalar(u8, sys, '"') != null) .single else .double;
+                    const pubid_qt: xml.prod.QuoteType = if (std.mem.indexOfScalar(u8, pubid, '"') != null) .single else .double;
+                    const sys_qt: xml.prod.QuoteType = if (std.mem.indexOfScalar(u8, sys, '"') != null) .single else .double;
                     try writer.print("PUBLIC {0c}{1}{0c} {2c}{3}{2c}", .{
                         pubid_qt.toChar(), std.zig.fmtEscapes(pubid),
                         sys_qt.toChar(),   std.zig.fmtEscapes(sys),
@@ -606,7 +606,7 @@ const ScannerTestValues = struct {
                 .external_id_system => |extid_sys| {
                     const sys, const maybe_ndata = extid_sys;
 
-                    const sys_qt: Tokenizer.QuoteType = if (std.mem.indexOfScalar(u8, sys, '"') != null) .single else .double;
+                    const sys_qt: xml.prod.QuoteType = if (std.mem.indexOfScalar(u8, sys, '"') != null) .single else .double;
                     try writer.print("SYSTEM {0c}{1}{0c}", .{ sys_qt.toChar(), std.zig.fmtEscapes(sys) });
 
                     if (maybe_ndata) |ndata| {
@@ -834,13 +834,13 @@ fn expectEntityDeclStart(
     const src = if (MaybeReader == null) tokenizer.asTokenizer().src;
     try std.testing.expectEqual(.angle_bracket_left_bang, try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer.asTokenizer(), .markup, MaybeReader, mbr));
     try std.testing.expectEqual(.tag_token, try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, mbr));
-    var bstr: std.BoundedArray(u8, iksemel.dtd.MarkupDeclKind.max_str_len) = .{};
+    var bstr: std.BoundedArray(u8, xml.dtd.MarkupDeclKind.max_str_len) = .{};
     while (try parse_helper.nextTokenSegment(tokenizer.asTokenizer(), .markup, MaybeReader, mbr)) |segment| {
         const segment_str: []const u8 = if (MaybeReader != null) segment else segment.toStr(src);
         bstr.appendSlice(segment_str) catch return error.TestExpectedEqual;
     }
     errdefer std.log.err("Actual: '{}'", .{std.zig.fmtEscapes(bstr.constSlice())});
-    try std.testing.expectEqual(.entity, iksemel.dtd.MarkupDeclKind.fromString(bstr.constSlice()));
+    try std.testing.expectEqual(.entity, xml.dtd.MarkupDeclKind.fromString(bstr.constSlice()));
 }
 
 test "EntityValue" {
@@ -974,8 +974,8 @@ test "External Id" {
 const std = @import("std");
 const assert = std.debug.assert;
 
-const iksemel = @import("../iksemel.zig");
-const Tokenizer = iksemel.Tokenizer;
+const xml = @import("../iksemel.zig");
+const Tokenizer = xml.Tokenizer;
 
 const parse_helper = @import("../parse_helper.zig");
 const test_helper = @import("../test_helper.zig");

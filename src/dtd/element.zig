@@ -681,13 +681,13 @@ fn expectElementDeclStart(
     const src = if (MaybeReader == null) tokenizer.asTokenizer().src;
     try std.testing.expectEqual(.angle_bracket_left_bang, try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer.asTokenizer(), .markup, MaybeReader, mbr));
     try std.testing.expectEqual(.tag_token, try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, mbr));
-    var bstr: std.BoundedArray(u8, iksemel.dtd.MarkupDeclKind.max_str_len) = .{};
+    var bstr: std.BoundedArray(u8, xml.dtd.MarkupDeclKind.max_str_len) = .{};
     while (try parse_helper.nextTokenSegment(tokenizer.asTokenizer(), .markup, MaybeReader, mbr)) |segment| {
         const segment_str: []const u8 = if (MaybeReader != null) segment else segment.toStr(src);
         bstr.appendSlice(segment_str) catch return error.TestExpectedEqual;
     }
     errdefer std.log.err("Actual: '{}'", .{std.zig.fmtEscapes(bstr.constSlice())});
-    try std.testing.expectEqual(.element, iksemel.dtd.MarkupDeclKind.fromString(bstr.constSlice()));
+    try std.testing.expectEqual(.element, xml.dtd.MarkupDeclKind.fromString(bstr.constSlice()));
 }
 
 test "EMPTY or ANY" {
@@ -870,8 +870,8 @@ test "children invalid nesting" { // these are examples of the fact that the sca
 const std = @import("std");
 const assert = std.debug.assert;
 
-const iksemel = @import("../iksemel.zig");
-const Tokenizer = iksemel.Tokenizer;
+const xml = @import("../iksemel.zig");
+const Tokenizer = xml.Tokenizer;
 
 const parse_helper = @import("../parse_helper.zig");
 const test_helper = @import("../test_helper.zig");

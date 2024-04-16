@@ -100,14 +100,14 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
 
             try scanner.expectAndSkipTagWhitespace(tokenizer.asTokenizer());
 
-            const quote_type: Tokenizer.QuoteType = switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr)) {
+            const quote_type: xml.prod.QuoteType = switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr)) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
                 .tag_whitespace => unreachable,
                 inline //
                 .quote_single,
                 .quote_double,
-                => |narrow_tt| comptime Tokenizer.QuoteType.fromTokenTypeNarrow(narrow_tt).?,
+                => |narrow_tt| comptime xml.prod.QuoteType.fromTokenTypeNarrow(narrow_tt).?,
             };
             const is_empty: bool = switch (try parse_helper.nextTokenType(tokenizer.asTokenizer(), quote_type.systemLiteralCtx(), MaybeReader, scanner.mbr)) {
                 else => unreachable,
@@ -144,7 +144,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 .pubid_literal_sq,
                 .pubid_literal_dq,
                 => |state_tag| {
-                    const quote_type: Tokenizer.QuoteType = switch (state_tag) {
+                    const quote_type: xml.prod.QuoteType = switch (state_tag) {
                         .pubid_literal_sq => .single,
                         .pubid_literal_dq => .double,
                         else => unreachable,
@@ -190,7 +190,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
             }
             try parse_helper.skipWhitespaceSrcUnchecked(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr);
 
-            const quote_type: Tokenizer.QuoteType = switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr)) {
+            const quote_type: xml.prod.QuoteType = switch (try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, scanner.mbr)) {
                 else => return ScanError.UnexpectedToken,
                 .eof => return ScanError.UnexpectedEof,
                 .tag_whitespace => unreachable,
@@ -203,7 +203,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 inline //
                 .quote_single,
                 .quote_double,
-                => |narrow_tt| comptime Tokenizer.QuoteType.fromTokenTypeNarrow(narrow_tt).?,
+                => |narrow_tt| comptime xml.prod.QuoteType.fromTokenTypeNarrow(narrow_tt).?,
             };
 
             scanner.state = switch (try parse_helper.nextTokenType(tokenizer.asTokenizer(), quote_type.systemLiteralCtx(), MaybeReader, scanner.mbr)) {
@@ -234,7 +234,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
                 .system_literal_sq,
                 .system_literal_dq,
                 => |state_tag| {
-                    const quote_type: Tokenizer.QuoteType = switch (state_tag) {
+                    const quote_type: xml.prod.QuoteType = switch (state_tag) {
                         .system_literal_sq => .single,
                         .system_literal_dq => .double,
                         else => unreachable,
@@ -467,13 +467,13 @@ fn expectNotationDeclStart(
     const src = if (MaybeReader == null) tokenizer.asTokenizer().src;
     try std.testing.expectEqual(.angle_bracket_left_bang, try parse_helper.nextTokenTypeIgnoreTagWhitespace(tokenizer.asTokenizer(), .markup, MaybeReader, mbr));
     try std.testing.expectEqual(.tag_token, try parse_helper.nextTokenTypeNarrow(tokenizer.asTokenizer(), .markup, MaybeReader, mbr));
-    var bstr: std.BoundedArray(u8, iksemel.dtd.MarkupDeclKind.max_str_len) = .{};
+    var bstr: std.BoundedArray(u8, xml.dtd.MarkupDeclKind.max_str_len) = .{};
     while (try parse_helper.nextTokenSegment(tokenizer.asTokenizer(), .markup, MaybeReader, mbr)) |segment| {
         const segment_str: []const u8 = if (MaybeReader != null) segment else segment.toStr(src);
         bstr.appendSlice(segment_str) catch return error.TestExpectedEqual;
     }
     errdefer std.log.err("Actual: '{}'", .{std.zig.fmtEscapes(bstr.constSlice())});
-    try std.testing.expectEqual(.notation, iksemel.dtd.MarkupDeclKind.fromString(bstr.constSlice()));
+    try std.testing.expectEqual(.notation, xml.dtd.MarkupDeclKind.fromString(bstr.constSlice()));
 }
 
 test "basic" {
@@ -504,8 +504,8 @@ test "basic" {
 const std = @import("std");
 const assert = std.debug.assert;
 
-const iksemel = @import("../iksemel.zig");
-const Tokenizer = iksemel.Tokenizer;
+const xml = @import("../iksemel.zig");
+const Tokenizer = xml.Tokenizer;
 
 const parse_helper = @import("../parse_helper.zig");
 const test_helper = @import("../test_helper.zig");

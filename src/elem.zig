@@ -416,7 +416,7 @@ fn nextMarkerOrSrcImpl(
                     inline //
                     .quote_single,
                     .quote_double,
-                    => |tt| comptime QuoteType.fromTokenTypeNarrow(tt).?,
+                    => |tt| comptime xml.prod.QuoteType.fromTokenTypeNarrow(tt).?,
                 };
                 state.* = switch (quote_type) {
                     .single => .attribute_value_type_sq,
@@ -429,7 +429,7 @@ fn nextMarkerOrSrcImpl(
         .attribute_value_type_sq,
         .attribute_value_type_dq,
         => |quote_state| {
-            const quote_type: QuoteType = switch (quote_state) {
+            const quote_type: xml.prod.QuoteType = switch (quote_state) {
                 .attribute_value_type_sq => .single,
                 .attribute_value_type_dq => .double,
                 else => unreachable,
@@ -481,7 +481,7 @@ fn nextMarkerOrSrcImpl(
         .attribute_value_ref_sq,
         .attribute_value_ref_dq,
         => |quote_state| {
-            const quote_type: QuoteType = switch (quote_state) {
+            const quote_type: xml.prod.QuoteType = switch (quote_state) {
                 .attribute_value_ref_sq => .single,
                 .attribute_value_ref_dq => .double,
                 else => unreachable,
@@ -505,7 +505,7 @@ fn nextMarkerOrSrcImpl(
         .attribute_value_text_sq,
         .attribute_value_text_dq,
         => |quote_state| {
-            const quote_type: QuoteType = switch (quote_state) {
+            const quote_type: xml.prod.QuoteType = switch (quote_state) {
                 .attribute_value_text_sq => .single,
                 .attribute_value_text_dq => .double,
                 else => unreachable,
@@ -730,8 +730,7 @@ const assert = std.debug.assert;
 
 const builtin = @import("builtin");
 
-const iksemel = @import("iksemel.zig");
-const Tokenizer = iksemel.Tokenizer;
-const QuoteType = Tokenizer.QuoteType;
+const xml = @import("iksemel.zig");
+const Tokenizer = xml.Tokenizer;
 
 const parse_helper = @import("parse_helper.zig");
