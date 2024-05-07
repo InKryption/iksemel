@@ -2,7 +2,7 @@ pub fn expectEqualStringOrErrOrNull(
     expected: anyerror!?[]const u8,
     actual: anyerror!?[]const u8,
 ) !void {
-    const ValKind = enum { err, null, str };
+    const ValKind = enum(u2) { err, null, str };
     const expected_kind: ValKind = if (expected) |maybe_str| if (maybe_str != null) .str else .null else |_| .err;
     const actual_kind: ValKind = if (actual) |maybe_str| if (maybe_str != null) .str else .null else |_| .err;
 

@@ -166,7 +166,7 @@ pub const Full = struct {
     }
 };
 
-pub const Context = enum {
+pub const Context = enum(u4) {
     /// Used to scan markup tags (element open tags, element close tags, DTD Declaration, DTD Internal Subset & its tags).
     markup,
 
@@ -1577,7 +1577,7 @@ const next_helper = struct {
     };
 };
 
-const State = enum {
+const State = enum(u5) {
     eof,
 
     blank,

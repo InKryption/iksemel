@@ -267,7 +267,7 @@ pub fn Scanner(comptime MaybeReader: ?type) type {
         pub fn childrenNextTokenKind(scanner: *Self, tokenizer: *TokenizerAPI) (SrcError || ScanError)!?ChildrenTokenKind {
             errdefer scanner.state = .err;
 
-            const Category = enum {
+            const Category = enum(u3) {
                 lparen,
                 rparen,
                 name,
