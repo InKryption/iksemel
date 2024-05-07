@@ -13,7 +13,7 @@ pub fn build(b: *Build) void {
     test_step.dependOn(unit_test_step);
     test_step.dependOn(integration_test_step);
 
-    const iksemel_root = Build.LazyPath.relative("src/iksemel.zig");
+    const iksemel_root = b.path("src/iksemel.zig");
 
     const iksemel_mod = b.addModule("iksemel", .{
         .root_source_file = iksemel_root,
@@ -31,7 +31,7 @@ pub fn build(b: *Build) void {
     unit_test_step.dependOn(&xml_unit_tests_run.step);
 
     const integration_test_exe = b.addTest(.{
-        .root_source_file = .{ .path = "test/root.zig" },
+        .root_source_file = b.path("test/root.zig"),
         .target = target,
         .optimize = optimize,
         .filter = test_filter,
