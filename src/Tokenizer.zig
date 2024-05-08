@@ -1,31 +1,50 @@
 //! The lowest level API for interpreting an XML document.
-//! While simple, it provides little to no safety in the event of API misuse.
-//! It has two possible modes of operation: streaming and non-streaming.
+//! It provides minimal protections against API misuse in the form of
+//! stateful assertions when `std.debug.runtime_safety` is enabled.
 //!
-//! * Streaming Source: tokenizer is initialized with `initStream`, requires
-//! the programmer to make use of the `stream.feedInput` method after encountering
-//! `error.BufferUnderrun` while using the `stream.nextType` and `stream.nextSrc`
-//! methods. `stream.feedEof` must be used to signal the end of the XML source.
+//! A broad overview of the API is as follows: it is an iterator returning
+//! a series of "tokens", wherein a token is represented by a type and its
+//! source; a source is either a slice of bytes or a range into one.
+//! The programmer always first acquires the token type, and then depending
+//! on the type, the token source is acquired simply by converting the token
+//! type into its hard-coded string (if it has one), or by querying the
+//! tokenizer for it. Depending on the state the tokenizer is in, it
+//! may be returned in whole through one query, or in multiple parts through
+//! consecutive queries for the source.
 //!
-//! * Full Source: tokenizer is initialized with `initFull`. This mode allows use
-//! of a subset of the stream source API (`stream.nextType`, `stream.nextSrc`), in
-//! addition to the mirror methods `full.nextType` & `full.nextSrc`, which take
-//! advantage of the assumption that the entirety of the of the XML source has
-//! been fed. The methods `stream.feedInput` and `stream.feedEof` are illegal
-//! in this mode.
+//! The types of tokens which can be tokenized are determined by the specified
+//! context value, which will modify the behaviour of tokenization accordingly.
+//! During the query of a token, the same context value must be specified across
+//! all related calls.
 //!
-//! Important to note: if the tokenizer was first initialized with `initStream`,
-//! and then becomes non-streaming via a call to `feedEof`, immediately following
-//! a call to `feedInput` as a response to `error.BufferUnderrun`, the currently
-//! in-bound token may still be returned partially, as part of it may have existed
-//! in the previous buffer; after the partially returned token is acquired, any
-//! subsequent tokens will be available in full, returned as such by the `stream`
-//! API, or explicitly by the `full` API.
+//! The tokenizer can be in one of two modes:
+//! * Stream source: the source is fed to the tokenizer in between tokens, as
+//!   well as before and in between querying of a token's source.
+//!   Source must be fed after encountering `error.BufferUnderrun`, and then it
+//!   must not be fed again until encountering the same error.
+//!   At any point the programmer may signal the end of the document, after which
+//!   any subsequent calls are guaranteed to never return `error.BufferUnderrun`.
+//!   If the end of the document was signalled during or immediately after the
+//!   querying of a token, the tokenizer effectively be in "full source" mode for
+//!   any subsequent tokens.
+//!   While in this mode, the full source API is illegal.
+//!   The main
+//!
+//! * Full source: the full source is provided up-front; this behaves as though
+//!   the full document source was fed in go, and was then followed by a signal
+//!   for the end of the document. Tokens will be returned similarly as they are
+//!   in stream source mode, but taking advantage of the inerrant nature of the API,
+//!   and the guaranteed presense of the contiguous source of each token.
+//!   While in this mode, a subset of the stream source API is legal to use,
+//!   specifically those methods which do not feed source nor signal eof. This allows
+//!   a degree of abstraction over the two modes which is generic over the current mode.
 //!
 //! The tokenization of a valid document requires no special considerations,
 //! however the tokenizer is error-tolerant, and defines specially recognized
 //! invalid cases which should be treated as failures at some point, if not
 //! at the point of tokenization.
+//!
+//! Important note: correct usage of this type assumes all instances are naturally aligned.
 const Tokenizer = @This();
 src: []const u8,
 index: usize,
@@ -51,6 +70,12 @@ stream: Stream,
 /// is only meaningful as a pointer to the `Tokenizer`.
 full: Full,
 
+/// Initializes the `Tokenizer` with no input.
+/// Input (and eof) may be feed immediately after instantiation,
+/// as though `error.BufferUnderrun` has already been implicitly
+/// issued, but a query for the next (first) token is legal, and
+/// will return `error.BufferUnderrun`.
+/// The `full` API is illegal`.
 pub inline fn initStream() Tokenizer {
     return .{
         .src = "",
@@ -67,7 +92,7 @@ pub inline fn initStream() Tokenizer {
 /// Initializes the `Tokenizer` with the full input.
 /// Calling `stream.feedInput` or `stream.feedEof` is illegal.
 /// Treating `error.BufferUnderrun` as `unreachable` is safe.
-/// Equivalent initialising a streaming tokenizer, feeding it
+/// Equivalent to initialising a streaming tokenizer, feeding it
 /// `src`, and then feeding it eof.
 pub inline fn initFull(src: []const u8) Tokenizer {
     var tokenizer = Tokenizer.initStream();
@@ -83,8 +108,14 @@ pub inline fn remainingSrc(tokenizer: Tokenizer) Range {
 }
 
 pub const Stream = struct {
+    /// Returns a pointer to the actual tokenizer which contains this API as a field.
+    /// Assumes the `Tokenizer` is naturally aligned.
     pub inline fn asTokenizer(stream: *Stream) *Tokenizer {
         return @alignCast(@fieldParentPtr("stream", stream));
+    }
+
+    pub inline fn asTokenizerConst(stream: *const Stream) *const Tokenizer {
+        return @constCast(stream).asTokenizer();
     }
 
     pub const BufferError = error{BufferUnderrun};
@@ -104,16 +135,24 @@ pub const Stream = struct {
         tokenizer.eof_specified = true;
     }
 
+    /// Returns the type of the next token.
+    /// If `error.BufferUnderrun` is returned, the caller must `feedInput` or `feedEof`,
+    /// and then call this again. If after `feedInput`, this still errors, repeat.
     pub fn nextType(stream: *Tokenizer.Stream, context: Context) BufferError!TokenType {
         const tokenizer = stream.asTokenizer();
         return tokenizer.nextTypeOrSrcImpl(context, .type);
     }
 
+    /// Same as `nextType`, but instead returns a token type subset scoped to the given `context`.
+    /// Preferable when the context is known at comptime.
     pub fn nextTypeNarrow(stream: *Tokenizer.Stream, comptime context: Context) BufferError!TokenType.Subset(context) {
         const token_type = try stream.nextType(context);
         return token_type.intoNarrow(context).?;
     }
 
+    /// Iteratively returns the source of the current token. Similar to `nextType`, if `error.BufferUnderrun`
+    /// is encountered, the caller must `feedInput` or `feedEof`, and then call again.
+    /// The caller must call this repeatedly until it returns `null` in order to obtain the full token source.
     pub fn nextSrc(stream: *Tokenizer.Stream, context: Context) BufferError!?[]const u8 {
         const tokenizer = stream.asTokenizer();
         const maybe_tok_src: ?TokenSrc = try tokenizer.nextTypeOrSrcImpl(context, .src);
@@ -126,27 +165,53 @@ pub const Stream = struct {
 };
 
 pub const Full = struct {
+    /// Returns a pointer to the actual tokenizer which contains this API as a field.
+    /// Assumes the `Tokenizer` is naturally aligned.
     pub inline fn asTokenizer(full: *Full) *Tokenizer {
         const tokenizer: *Tokenizer = @alignCast(@fieldParentPtr("full", full));
         assert(tokenizer.eof_specified);
         return tokenizer;
     }
 
+    /// Equivalent to `asTokenizer` but constant.
+    pub inline fn asTokenizerConst(full: *const Full) *const Tokenizer {
+        return @constCast(full).asTokenizer();
+    }
+
+    /// Returns the type of the next token.
     pub fn nextType(full: *Tokenizer.Full, context: Context) TokenType {
         const tokenizer = full.asTokenizer();
         return tokenizer.nextTypeOrSrcImpl(context, .type_no_underrun);
     }
 
+    /// Same as `nextType`, but instead returns a token type subset scoped to the given `context`.
+    /// Preferable when the context is known at comptime.
     pub fn nextTypeNarrow(full: *Tokenizer.Full, comptime context: Context) TokenType.Subset(context) {
         const token_type = full.nextType(context);
         return token_type.intoNarrow(context).?;
     }
 
+    /// Assumes `latest_type` was returned by the latest call to `nextType` or `nextTypeNarrow`,
+    /// and that no other queries have occured since its acquisition.
+    /// If `latest_type.stringLiteral() != null`, returns the range of the literal represented
+    /// by the token type.
+    pub fn latestTypeLiteralRange(full: *const Tokenizer.Full, latest_type: TokenType) ?Range {
+        const tokenizer = full.asTokenizerConst();
+        const latest_literal = latest_type.stringLiteral() orelse return null;
+        return .{
+            .start = tokenizer.index - latest_literal.len,
+            .end = tokenizer.index,
+        };
+    }
+
+    /// Behaves equivalently to the stream source API's `nextSrc`, except without possibility of error.
     pub fn nextSrc(full: *Tokenizer.Full, context: Context) ?[]const u8 {
         const range = full.nextSrcRange(context) orelse return null;
         return range.toStr(full.asTokenizer().src);
     }
 
+    /// Behaves equivalently to `nextSrc`, except instead of returning a slice of `full.asTokenizer().src`,
+    /// it returns a range into it.
     pub fn nextSrcRange(full: *Tokenizer.Full, context: Context) ?Range {
         const tokenizer = full.asTokenizer();
         const tok_src: TokenSrc = tokenizer.nextTypeOrSrcImpl(context, .src_no_underrun) orelse return null;
@@ -156,6 +221,8 @@ pub const Full = struct {
         };
     }
 
+    /// Returns the source range of the current token as a contiguous range. Preferable when dealing with
+    /// a full source tokenizer directly.
     pub fn nextSrcComplete(full: *Tokenizer.Full, context: Context) Range {
         var range: Range = full.nextSrcRange(context).?;
         while (full.nextSrcRange(context)) |subsequent_range| {
@@ -459,7 +526,11 @@ pub const TokenType = enum {
         };
     }
 
-    pub fn fromNarrow(narrowed: anytype) TokenType {
+    /// Converts the `Subset(context)` into the corresponding `TokenType`.
+    pub fn fromNarrow(
+        /// `Subset(context)`.
+        narrowed: anytype,
+    ) TokenType {
         comptime for (@typeInfo(Context).Enum.fields) |ctx_field| {
             if (@TypeOf(narrowed) == Subset(@enumFromInt(ctx_field.value))) break;
         } else @compileError("Expected Subset(context), got " ++ @typeName(@TypeOf(narrowed)));
@@ -1735,6 +1806,8 @@ fn testTokenizer(
         = iteration_vals;
 
         const actual_tt: TokenType = tokenizer.full.nextType(context);
+        const actual_str_lit_from_range: ?[]const u8 = if (tokenizer.full.latestTypeLiteralRange(actual_tt)) |range| range.toStr(tokenizer.src) else null;
+
         const actual_src: ?[]const u8 = blk: {
             if (!actual_tt.hasSrc()) break :blk null;
             const range = tokenizer.full.nextSrcComplete(context);
@@ -1742,19 +1815,10 @@ fn testTokenizer(
         };
 
         try std.testing.expectEqual(expected_tt, actual_tt);
+        try test_helper.expectEqualStringOrErrOrNull(expected_tt.stringLiteral(), actual_tt.stringLiteral()); // this obviously should pass, it's mostly a sanity check
 
-        switch (combo(expected_src != null, actual_src != null)) {
-            combo(true, true) => try std.testing.expectEqualStrings(expected_src.?, actual_src.?),
-            combo(false, false) => {},
-            combo(true, false) => {
-                testingPrint("expected '{}', found null\n", .{std.zig.fmtEscapes(expected_src.?)});
-                return error.TestExpectedEqual;
-            },
-            combo(false, true) => {
-                testingPrint("expected null, found '{}'\n", .{std.zig.fmtEscapes(actual_src.?)});
-                return error.TestExpectedEqual;
-            },
-        }
+        try test_helper.expectEqualStringOrErrOrNull(actual_tt.stringLiteral(), actual_str_lit_from_range);
+        try test_helper.expectEqualStringOrErrOrNull(expected_src, actual_src);
     }
     const ctx_count = contexts_expected_tokens.len;
     errdefer testingPrint("difference occured on token {d}\n", .{ctx_count});
@@ -2083,3 +2147,5 @@ const assert = std.debug.assert;
 const builtin = @import("builtin");
 
 const xml = @import("iksemel.zig");
+
+const test_helper = @import("test_helper.zig");
